@@ -24,5 +24,5 @@ if errorlevel 1 (
 )
 echo Bundle build OK
 echo Deploying to GitHub Pages...
-copy /Y zchezz_bundle.html ..\..\..\docs\index.html >nul
-echo docs/index.html updated
+copy /Y zchezz_bundle.html ..\..\..\index.html >nul
+echo index.html updated
