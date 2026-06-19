@@ -1,12 +1,35 @@
-# Zchezz
+# Zchezz ♟️
 
-A chess engine written in C with a custom-trained NNUE evaluation, playable directly in the browser via WebAssembly. Runs natively on Windows, Linux, and Android (Termux), and compiles to a single self-contained HTML file that works fully offline.
+**A ~2800 Elo chess engine, entirely vibe coded with Claude Sonnet 4.6.**
 
-Entirely vibe coded with **Claude Sonnet 4.6**.
+Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantized int8/int16), playable directly in the browser via WebAssembly. Compiles to a single self-contained HTML file that works fully offline — no server, no install, no dependencies. Just double-click and play.
 
 ▶ **[Play against Zchezz in your browser](https://ciclopeestrabico.github.io/zchezz/)**
 
-**Measured Elo: ~2781 ±4** (against Stockfish anchors at movetime 200ms, without opening book or tablebases).
+---
+
+### Highlights
+
+| | |
+|---|---|
+| **Strength** | ~2800 Elo (measured against Stockfish anchors at movetime 200ms) |
+| **Search** | Alpha-beta with aspiration windows, PVS, Lazy SMP (up to 8 threads) |
+| **Evaluation** | Custom NNUE — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
+| **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
+| **Opening book** | Polyglot .bin format, with built-in ECO opening name recognition |
+| **Analysis** | Multi-PV (up to 5 lines), eval bar, blunder detection, eval graph |
+| **Platforms** | Windows, Linux, Android (Termux), WebAssembly (any modern browser) |
+| **Offline** | Single HTML bundle (~1.1 MB) — works from `file://`, no server needed |
+| **UCI** | Full UCI protocol compliance (15 commands, 12 configurable options) |
+
+### Features
+
+- 🧠 **NNUE evaluation** — 799-feature HalfKP input, dual-perspective accumulators, incremental updates, Quantization-Aware Training
+- ⚡ **Lazy SMP** — shared transposition table, staggered helper depths, lock-free design
+- 🎯 **Full search suite** — null move pruning, LMR, futility, razoring, ProbCut, singular extensions, IIR, SEE pruning
+- 🌐 **Browser play** — complete chess UI with game clock, move animation, sound effects, opening name display, 5 piece styles, 6 board themes
+- 📊 **Analysis mode** — engine analysis with depth control, Multi-PV, eval bar, eval graph, blunder check, FEN/PGN import/export
+- 📱 **Mobile responsive** — full touch support with adaptive layout
 
 ---
 
