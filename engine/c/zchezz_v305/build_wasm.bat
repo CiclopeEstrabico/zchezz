@@ -23,3 +23,6 @@ if errorlevel 1 (
   exit /b 1
 )
 echo Bundle build OK
+echo Deploying to GitHub Pages...
+copy /Y zchezz_bundle.html ..\..\..\docs\index.html >nul
+echo docs/index.html updated
