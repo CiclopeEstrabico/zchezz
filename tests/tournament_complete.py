@@ -1,0 +1,945 @@
+import os, json, subprocess, time, math, random, threading, datetime, tempfile, signal, sys, io, struct, glob
+from queue import Queue, Empty
+import chess
+import chess.pgn
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AUTO-DETECT LATEST ENGINE VERSION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_engine_dirs = sorted(glob.glob(os.path.join(_BASE_DIR, "engine", "c", "zchezz_v*")))
+_latest_dir = os.path.basename(_engine_dirs[-1]) if _engine_dirs else "zchezz_v305"
+_latest_ver = _latest_dir.replace("zchezz_", "")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIGURAÇÕES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MY_ENGINES = [
+    {
+        "path":     os.path.join("engine", "c", _latest_dir, "zchezz.exe"),
+        "label":    f"Zchezz_{_latest_ver}",
+        "tc_mode":  "movetime",   # "depth" | "movetime" | "fixedtime"
+        "tc_value": 200,         # depth=ply, movetime=ms, fixedtime=ms initial
+        "tc_inc":   0,         # increment ms (fixedtime only)
+    },
+]
+
+ANCHORS = [
+    {
+        "path":    r"engine\stockfish\stockfish.exe",
+        "label":   "SF-2800",
+        "elo":     2800,
+        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "2800"},
+        "tc_mode":  "movetime",
+        "tc_value": 200,
+        "tc_inc":   0,
+    },
+    {
+        "path":    r"engine\stockfish\stockfish.exe",
+        "label":   "SF-3000",
+        "elo":     3000,
+        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "3000"},
+        "tc_mode":  "movetime",
+        "tc_value": 200,
+        "tc_inc":   0,
+    },
+]
+
+# ── Torneio ───────────────────────────────────────────────────────────────────
+GAMES_VS_EACH_ANCHOR = 1000   # aberturas por par MY_ENGINE×ANCHOR (com COLOR_SWAP=True gera 2× jogos)
+GAMES_SELF_PLAY      = 1000   # aberturas por par MY_ENGINE×MY_ENGINE (com COLOR_SWAP=True gera 2× jogos)
+SELF_PLAY            = True  # meus engines jogam entre si?
+COLOR_SWAP           = True  # repete cada jogo com cores invertidas?
+
+CONCURRENCY          = 8  # usa todos os CPUs disponíveis
+MAX_PLIES            = 400
+MOVE_TIMEOUT         = 38.0
+REPORT_PERFORMANCE_METRICS = True
+
+# ── Aberturas ─────────────────────────────────────────────────────────────────
+OPENING_FOLDER       = r"openings"
+
+# ── Saída ─────────────────────────────────────────────────────────────────────
+SAVE_PGN             = False
+SAVE_EPD             = True
+RESULTS_DIR          = r"tests\complete_results"
+COUNTER_EVERY        = 14    # linha de progresso leve a cada N jogos
+# REPORT_LOOPS: cross-table a cada N mini-ciclos.
+# 1 mini-ciclo = todos os pares jogam 1 abertura (x2 se COLOR_SWAP).
+#   Exemplo: 2 engines, 2 anchors, COLOR_SWAP=True -> mini-ciclo = 10 jogos.
+# REPORT_LOOPS=1 -> cross-table toda vez que cada par completou mais 1 abertura.
+REPORT_LOOPS         = 10
+
+MATE_SCORE           = 999999
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LOGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+LOG_FILE  = os.path.join(RESULTS_DIR, f"torneio_{TIMESTAMP}.log")
+ALL_PGNS  = os.path.join(RESULTS_DIR, f"torneio_{TIMESTAMP}.pgn")
+ALL_EPDS  = os.path.join(RESULTS_DIR, f"torneio_{TIMESTAMP}.epd")
+
+_log_lock = threading.Lock()
+
+def log(*args):
+    msg = " ".join(map(str, args))
+    with _log_lock:
+        try: print(msg, flush=True)
+        except UnicodeEncodeError: print(msg.encode("ascii","replace").decode(), flush=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f: f.write(msg + "\n")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OPENING INDEX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OpeningIndex:
+    def __init__(self):
+        self._index = []
+        self._handles = {}
+        self._lock = threading.Lock()
+
+    def __len__(self):  return len(self._index)
+    def __bool__(self): return bool(self._index)
+
+    def _open(self, fpath):
+        with self._lock:
+            if fpath not in self._handles:
+                self._handles[fpath] = open(fpath, "rb")
+            return self._handles[fpath]
+
+    def _build_epd(self, fpath):
+        idx_path = fpath + ".idx"
+        if os.path.exists(idx_path) and os.path.getmtime(idx_path) >= os.path.getmtime(fpath):
+            try:
+                data = open(idx_path, "rb").read()
+                offsets = list(struct.unpack_from(f"<{len(data)//8}Q", data))
+                for off in offsets: self._index.append((fpath, off, "epd"))
+                log(f"  [EPD] {os.path.basename(fpath)}: {len(offsets):,} pos (cached)")
+                return
+            except Exception: pass
+        offsets = []
+        with open(fpath, "rb") as f:
+            while True:
+                off = f.tell(); raw = f.readline()
+                if not raw: break
+                s = raw.strip()
+                if s and not s.startswith(b"#") and len(s.split()) >= 4:
+                    offsets.append(off)
+        try:
+            with open(idx_path, "wb") as f:
+                f.write(struct.pack(f"<{len(offsets)}Q", *offsets))
+        except Exception: pass
+        for off in offsets: self._index.append((fpath, off, "epd"))
+        log(f"  [EPD] {os.path.basename(fpath)}: {len(offsets):,} pos indexed")
+
+    def _build_pgn(self, fpath):
+        count = 0
+        with open(fpath, "rb") as f:
+            game_start = None
+            while True:
+                off = f.tell(); raw = f.readline()
+                if not raw:
+                    if game_start is not None: self._index.append((fpath, game_start, "pgn")); count += 1
+                    break
+                line = raw.decode("utf-8", errors="ignore")
+                if line.startswith("[Event "):
+                    game_start = off
+                elif line.strip() == "" and game_start is not None:
+                    self._index.append((fpath, game_start, "pgn")); count += 1; game_start = None
+        log(f"  [PGN] {os.path.basename(fpath)}: {count:,} games")
+
+    def shuffle(self): random.shuffle(self._index)
+
+    def fetch(self, idx) -> dict:
+        fpath, offset, kind = self._index[idx]
+        if kind == "epd":
+            fh = self._open(fpath)
+            with self._lock:
+                fh.seek(offset)
+                raw = fh.readline().decode("utf-8", errors="ignore").strip()
+            parts = raw.split()
+            fen = " ".join(parts[:4]) + " 0 1"
+            try: chess.Board(fen); return {"moves": [], "fen": fen}
+            except Exception: return {"moves": [], "fen": None}
+        else:
+            with open(fpath, "rb") as f:
+                f.seek(offset)
+                block, blanks = [], 0
+                while True:
+                    raw = f.readline()
+                    if not raw: break
+                    line = raw.decode("utf-8", errors="ignore")
+                    block.append(line)
+                    if line.strip() == "":
+                        blanks += 1
+                        if blanks >= 2: break
+                    else: blanks = 0
+            game = chess.pgn.read_game(io.StringIO("".join(block)))
+            if not game: return {"moves": [], "fen": None}
+            uci_seq, board = [], game.board()
+            for move in game.mainline_moves():
+                if move in board.legal_moves: uci_seq.append(move.uci()); board.push(move)
+                else: break
+            return {"moves": uci_seq, "fen": None}
+
+    def random_pick(self) -> dict:
+        return self.fetch(random.randrange(len(self._index)))
+
+def load_all_openings(folder: str) -> OpeningIndex:
+    idx = OpeningIndex()
+    if not os.path.exists(folder): return idx
+    for f in sorted(os.listdir(folder)):
+        fp = os.path.join(folder, f)
+        if f.endswith(".epd"): idx._build_epd(fp)
+        elif f.endswith(".pgn"): idx._build_pgn(fp)
+    log(f"  [Openings] Total: {len(idx):,} posições")
+    return idx
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ENGINE INSTANCE  (UCI nativo apenas)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class EngineInstance:
+    def __init__(self, path, label, tc_mode="depth", tc_value=8, tc_inc=0,
+                 options=None, go_cmd_override=None, elo=None, **_):
+        self.path     = os.path.abspath(path)
+        self.label    = label
+        self.tc_mode  = tc_mode
+        self.tc_value = tc_value
+        self.tc_inc   = tc_inc
+        self.options  = options or {}
+        self.go_cmd_override = go_cmd_override
+        self.elo      = elo   # known elo (anchors only)
+        self.process  = None
+        self.queue    = Queue()
+        self.start_fen = None
+
+    def _reader(self):
+        try:
+            for line in iter(self.process.stdout.readline, ""):
+                line = line.strip()
+                if line: self.queue.put(line)
+        except Exception: pass
+
+    def start(self):
+        engine_dir = os.path.dirname(self.path)
+        try:
+            args = [self.path]
+            if os.path.exists(os.path.join(engine_dir, "nnue_weights.bin")):
+                args += ["--nnue", "nnue_weights.bin"]
+            self.process = subprocess.Popen(
+                args, cwd=engine_dir,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            )
+            threading.Thread(target=self._reader, daemon=True).start()
+            threading.Thread(target=lambda: self.process.stderr.read(), daemon=True).start()
+
+            self._send("uci")
+            t0 = time.time(); ok = False
+            while time.time() - t0 < 15:
+                try:
+                    if "uciok" in self.queue.get(timeout=0.1).lower(): ok = True; break
+                except Empty:
+                    if self.process.poll() is not None: break
+            if not ok: return False
+
+            for name, val in self.options.items():
+                self._send(f"setoption name {name} value {val}")
+
+            self._send("isready")
+            t0 = time.time()
+            while time.time() - t0 < 15:
+                try:
+                    if "readyok" in self.queue.get(timeout=0.1).lower(): break
+                except Empty: pass
+
+            self._send("ucinewgame")
+            self._send("isready")
+            t0 = time.time()
+            while time.time() - t0 < 10:
+                try:
+                    if "readyok" in self.queue.get(timeout=0.1).lower(): break
+                except Empty: pass
+            return True
+        except Exception as e:
+            log(f"  [ERRO] {self.label}: {e}")
+            return False
+
+    def _send(self, cmd):
+        if self.process and self.process.stdin:
+            try:
+                self.process.stdin.write(cmd + "\n")
+                self.process.stdin.flush()
+                return True
+            except Exception: pass
+        return False
+
+    def _build_go(self, wtime, btime):
+        if self.go_cmd_override:
+            return f"go {self.go_cmd_override}"
+        if self.tc_mode == "depth":
+            return f"go depth {self.tc_value}"
+        if self.tc_mode == "movetime":
+            return f"go movetime {self.tc_value}"
+        if self.tc_mode == "nodes":
+            return f"go nodes {self.tc_value}"
+        # fixedtime
+        return f"go wtime {wtime} btime {btime} winc {self.tc_inc} binc {self.tc_inc}"
+
+    def get_move(self, board, wtime=0, btime=0):
+        if not self.process or self.process.poll() is not None:
+            if not self.start(): return None, None
+
+        while not self.queue.empty():
+            try: self.queue.get_nowait()
+            except Empty: break
+
+        moves = " ".join(m.uci() for m in board.move_stack)
+        if self.start_fen:
+            pos = f"position fen {self.start_fen}" + (f" moves {moves}" if moves else "")
+        else:
+            pos = "position startpos" + (f" moves {moves}" if moves else "")
+        self._send(pos)
+        self._send(self._build_go(wtime, btime))
+
+        move = None; score = None; nodes = 0; depth = 0
+        t0 = time.time()
+        while time.time() - t0 < MOVE_TIMEOUT:
+            try:
+                line = self.queue.get(timeout=0.2)
+                if line.startswith("info "):
+                    parts = line.split()
+                    if "nodes" in parts:
+                        try: nodes = int(parts[parts.index("nodes")+1])
+                        except Exception: pass
+                    if "depth" in parts:
+                        try: depth = int(parts[parts.index("depth")+1])
+                        except Exception: pass
+                if "score cp" in line:
+                    parts = line.split()
+                    try:
+                        i = parts.index("cp"); score = int(parts[i+1])
+                        # Convert to white's perspective: if it's black's turn, negate
+                        if board.turn == chess.BLACK: score = -score
+                    except Exception: pass
+                elif "score mate" in line:
+                    parts = line.split()
+                    try:
+                        i = parts.index("mate"); m_val = int(parts[i+1])
+                        # positive mate = current side mates; from white's side:
+                        if board.turn == chess.WHITE:
+                            score = MATE_SCORE if m_val > 0 else -MATE_SCORE
+                        else:
+                            score = MATE_SCORE if m_val < 0 else -MATE_SCORE
+                    except Exception: pass
+                if line.startswith("bestmove"):
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1] not in ("(none)", "0000"):
+                        move = parts[1]
+                    break
+            except Empty:
+                if self.process.poll() is not None: break
+        return move, score, nodes, depth
+
+    def stop(self):
+        if self.process:
+            try: self._send("quit")
+            except Exception: pass
+            try: self.process.terminate(); self.process.wait(timeout=1.0)
+            except Exception: pass
+            self.process = None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ELO ESTIMATOR  (MLE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class EloEstimator:
+    def __init__(self):
+        self.results = []  # list of (opponent_elo_float, score_float)
+
+    def add(self, opp_elo, score):
+        self.results.append((opp_elo, score))
+
+    def estimate_mle(self):
+        if not self.results: return None, None
+        smoothing = [(r[0], 0.5) for r in self.results[:2]] if len(self.results) > 10 else []
+        tmp = self.results + smoothing
+        p = sum(r[1] for r in tmp) / len(tmp)
+        avg_opp = sum(r[0] for r in tmp) / len(tmp)
+        if 0 < p < 1:
+            E = avg_opp + (-400 * math.log10(1.0/p - 1))
+        else:
+            E = avg_opp + (400 if p >= 1 else -400)
+        hess = 0
+        for _ in range(50):
+            grad, hess = 0, 0
+            for A, s in tmp:
+                exp_t = 10 ** ((A - E) / 400)
+                pi = 1 / (1 + exp_t) if exp_t < 1e15 else 0.0
+                grad += s - pi
+                hess += -pi * max(1e-15, 1 - pi) * (math.log(10) / 400)
+            if abs(grad) < 1e-4 or abs(hess) < 1e-18: break
+            E -= grad / (hess if hess != 0 else -1e-18)
+        
+        # O grad e hess no loop estão divididos por k = math.log(10)/400 para simplificar o Newton step.
+        # Para a variância (Erro Padrão), precisamos do Hessian verdadeiro: hess_true = hess * k
+        true_hess = hess * (math.log(10) / 400)
+        se = 1 / math.sqrt(abs(true_hess)) if abs(true_hess) > 0 else 0
+        return E, se * 1.96
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STATS & ELO HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_stats_lock = threading.Lock()
+_all_labels    = []   # filled in main()
+_my_labels     = []   # MY_ENGINES labels
+stats          = {}   # label -> {w,l,d,pts,games,total_ms,total_moves,to,err}
+h2h            = {}   # (l1,l2) -> {w,l,d}
+elo_estimators = {}   # my_label -> EloEstimator
+completed_games = 0
+epd_positions   = 0
+start_time      = time.time()
+
+
+def _new_stats():
+    return {"w": 0, "l": 0, "d": 0, "pts": 0, "games": 0, "to": 0, "err": 0, 
+            "total_ms": 0, "total_moves": 0, "total_nodes": 0, "total_depth": 0}
+
+
+def elo_diff(wins, losses, draws):
+    N = wins + losses + draws
+    if N == 0: return "N/A"
+    pts = wins + draws * 0.5
+    E_s = (pts + 0.5) / (N + 1)
+    elo = 400 * math.log10(E_s / (1 - E_s))
+    w_s = (wins  + 0.33) / (N + 1)
+    d_s = (draws + 0.33) / (N + 1)
+    l_s = (losses+ 0.33) / (N + 1)
+    var = w_s*(1-E_s)**2 + d_s*(0.5-E_s)**2 + l_s*(0-E_s)**2
+    se  = math.sqrt(var / (N + 1))
+    deriv = 400 / (math.log(10) * E_s * (1 - E_s))
+    margin = 1.96 * se * deriv
+    sign = "+" if elo >= 0 else ""
+    return f"{sign}{elo:.1f} +/-{margin:.1f}"
+
+
+def format_eval(score, elapsed_ms):
+    t = f" | {elapsed_ms}ms" if elapsed_ms is not None else ""
+    if score is None:
+        return ("{ " + str(elapsed_ms) + "ms } ") if elapsed_ms else ""
+    if abs(score) >= MATE_SCORE // 2:
+        side = "+" if score > 0 else "-"
+        return "{ #" + side + "M" + t + " } "
+    cp = score / 100.0
+    sign = "+" if cp >= 0 else ""
+    return "{ " + sign + f"{cp:.2f}" + t + " } "
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PLAY GAME
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def play_game(game_id, white_cfg, black_cfg, results_queue, opening=None):
+    w_eng = EngineInstance(**white_cfg)
+    b_eng = EngineInstance(**black_cfg)
+
+    opening_fen = opening.get("fen") if opening else None
+    forced_moves = opening.get("moves") if opening else []
+
+    w_eng.start_fen = opening_fen
+    b_eng.start_fen = opening_fen
+
+    if not w_eng.start() or not b_eng.start():
+        results_queue.put({"id": game_id, "error": True,
+                           "white": w_eng.label, "black": b_eng.label})
+        w_eng.stop(); b_eng.stop()
+        return
+
+    board    = chess.Board(opening_fen) if opening_fen else chess.Board()
+    pgn_game = chess.pgn.Game()
+    pgn_game.headers["Event"]   = "Tournament Complete"
+    pgn_game.headers["Round"]   = str(game_id)
+    pgn_game.headers["White"]   = w_eng.label
+    pgn_game.headers["Black"]   = b_eng.label
+    pgn_game.headers["WhiteTC"] = f"{w_eng.tc_mode} {w_eng.tc_value}"
+    pgn_game.headers["BlackTC"] = f"{b_eng.tc_mode} {b_eng.tc_value}"
+    if opening_fen:
+        pgn_game.headers["FEN"]   = opening_fen
+        pgn_game.headers["SetUp"] = "1"
+
+    # Apply forced opening moves
+    node = pgn_game
+    for uci in (forced_moves or []):
+        try:
+            mv = chess.Move.from_uci(uci)
+            if mv in board.legal_moves: board.push(mv); node = node.add_main_variation(mv)
+            else: break
+        except Exception: break
+
+    # positions list: each entry = {"fen": str, "score_white": int|None}
+    # We collect (fen_before_move, score_from_white) for every engine move
+    positions = []
+    # Record opening positions (no score)
+    tmp_board = chess.Board(opening_fen) if opening_fen else chess.Board()
+    positions.append({"fen": tmp_board.fen(), "score_white": None, "evaluator": "book"})
+    for uci in (forced_moves or []):
+        try:
+            mv = chess.Move.from_uci(uci)
+            if mv in tmp_board.legal_moves:
+                tmp_board.push(mv)
+                positions.append({"fen": tmp_board.fen(), "score_white": None, "evaluator": "book"})
+            else: break
+        except Exception: break
+
+    wtime = w_eng.tc_value if w_eng.tc_mode == "fixedtime" else 0
+    btime = b_eng.tc_value if b_eng.tc_mode == "fixedtime" else 0
+
+    ply = 0
+    winner = None
+    result_reason = "Normal"
+    error_occurred = False
+    timeout_occurred = False
+    timing = {w_eng.label: {"ms": 0, "moves": 0, "nodes": 0, "depth": 0}, 
+              b_eng.label: {"ms": 0, "moves": 0, "nodes": 0, "depth": 0}}
+
+    try:
+        while not board.is_game_over() and ply < MAX_PLIES:
+            is_white = board.turn == chess.WHITE
+            active   = w_eng if is_white else b_eng
+
+            t0 = time.time()
+            move_str, score, move_nodes, move_depth = active.get_move(board, wtime, btime)
+            elapsed_ms = int((time.time() - t0) * 1000)
+
+            timing[active.label]["ms"]    += elapsed_ms
+            timing[active.label]["moves"] += 1
+            timing[active.label]["nodes"] += move_nodes
+            timing[active.label]["depth"] += move_depth
+
+            if active.tc_mode == "fixedtime":
+                if is_white: wtime = max(0, wtime - elapsed_ms + w_eng.tc_inc)
+                else:        btime = max(0, btime - elapsed_ms + b_eng.tc_inc)
+
+            if not move_str:
+                timeout_occurred = True
+                result_reason = f"Timeout ({active.label})"
+                winner = "black" if is_white else "white"
+                break
+
+            try:
+                move = board.parse_uci(move_str)
+                if move not in board.legal_moves or move == chess.Move.null():
+                    raise ValueError(f"Illegal: {move_str}")
+                # Record position before push
+                positions.append({"fen": board.fen(), "score_white": score, "evaluator": active.label})
+                board.push(move)
+                comment = format_eval(score, elapsed_ms)
+                node = node.add_main_variation(move, comment=comment)
+                ply += 1
+            except Exception as e:
+                error_occurred = True
+                result_reason = f"Lance Inválido ({move_str}) [{active.label}]"
+                winner = "black" if is_white else "white"
+                break
+
+        # Determine result
+        if not timeout_occurred and not error_occurred:
+            if ply >= MAX_PLIES:
+                result_reason = "Empate (Limite de lances)"; winner = None
+            elif board.is_checkmate():
+                result_reason = "Checkmate"
+                winner = "white" if board.turn == chess.BLACK else "black"
+            elif board.is_stalemate():
+                result_reason = "Afogamento"; winner = None
+            elif board.is_insufficient_material():
+                result_reason = "Material Insuficiente"; winner = None
+            elif board.is_fifty_moves():
+                result_reason = "Regra dos 50 Lances"; winner = None
+            elif board.is_repetition(3):
+                result_reason = "Triplice Repetição"; winner = None
+            else:
+                result_reason = "Empate"; winner = None
+
+        # Add final position
+        positions.append({"fen": board.fen(), "score_white": None})
+
+        pgn_result = "1-0" if winner == "white" else ("0-1" if winner == "black" else "1/2-1/2")
+        pgn_game.headers["Result"]      = pgn_result
+        pgn_game.headers["Termination"] = result_reason
+
+        exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=True)
+        pgn_str  = pgn_game.accept(exporter)
+
+        results_queue.put({
+            "id":        game_id,
+            "white":     w_eng.label,
+            "black":     b_eng.label,
+            "winner":    winner,
+            "reason":    result_reason,
+            "result":    pgn_result,
+            "pgn":       pgn_str,
+            "positions": positions,
+            "timing":    timing,
+            "timeout":   timeout_occurred,
+            "error":     error_occurred,
+        })
+    finally:
+        w_eng.stop()
+        b_eng.stop()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def print_counter():
+    elapsed = time.time() - start_time
+    parts = []
+    for lb in _my_labels:
+        s = stats.get(lb, _new_stats())
+        g = s["games"]
+        parts.append(f"{lb}: {s['pts']:.1f}pts/{g}g")
+    log(f"  [{completed_games}] {' | '.join(parts)} | EPD: {epd_positions} pos | {elapsed:.0f}s")
+
+
+def print_cross_table(is_final=False):
+    elapsed = time.time() - start_time
+    gps = completed_games / elapsed if elapsed > 0 else 0
+    title = "RELATÓRIO FINAL" if is_final else f"RELATÓRIO (após {completed_games} jogos)"
+    log(f"\n{'='*64}")
+    log(f" {title}")
+    log(f" Jogos: {completed_games} | {elapsed:.0f}s | {gps:.2f} j/s | EPD: {epd_positions} pos")
+    log(f"{'='*64}")
+
+    all_p = _all_labels
+    col_w = max(14, max(len(lb) for lb in all_p) + 2)
+    row_w = col_w
+
+    # header
+    hdr = f"{'':>{row_w}}"
+    for lb in all_p: hdr += f" {lb:^{col_w}}"
+    log(hdr)
+    log("-" * len(hdr))
+
+    # rows
+    for lb in all_p:
+        row = f"{lb:>{row_w}}"
+        for lb2 in all_p:
+            if lb == lb2:
+                row += f" {'---':^{col_w}}"
+            else:
+                s = h2h.get((lb, lb2), {"w":0,"l":0,"d":0})
+                g = s["w"] + s["l"] + s["d"]
+                pts = s["w"] + s["d"] * 0.5
+                cell = f"{pts:.1f}/{g}" if g > 0 else "-"
+                row += f" {cell:^{col_w}}"
+        # overall
+        st = stats.get(lb, _new_stats())
+        row += f"  {st['pts']:.1f}/{st['games']}"
+        log(row)
+
+    log("")
+    # ELO MLE for my engines
+    log(" ELO Estimado (MLE):")
+    for lb in _my_labels:
+        est = elo_estimators.get(lb)
+        if est:
+            e, m = est.estimate_mle()
+            if e is not None:
+                log(f"   {lb}: {e:.1f} +/-{m:.1f} Elo")
+            else:
+                log(f"   {lb}: (sem dados suficientes)")
+
+    # H2H between my engines
+    if len(_my_labels) > 1:
+        log("")
+        log(" H2H Direto (Meus Engines):")
+        for i in range(len(_my_labels)):
+            for j in range(i+1, len(_my_labels)):
+                n1, n2 = _my_labels[i], _my_labels[j]
+                s = h2h.get((n1, n2), {"w":0,"l":0,"d":0})
+                if s["w"]+s["l"]+s["d"] == 0: continue
+                ed = elo_diff(s["w"], s["l"], s["d"])
+                log(f"   {n1} vs {n2}: {ed} Elo  (V:{s['w']} E:{s['d']} D:{s['l']})")
+
+    log(f"{'='*64}\n")
+
+    if REPORT_PERFORMANCE_METRICS:
+        log(" Performance (Médias por Engine):")
+        log(f" {'Engine':<16} | {'n/s':>10} | {'time/move':>12} | {'nodes/move':>12} | {'depth/move':>10}")
+        log("-" * 64)
+        for lb in _all_labels:
+            st = stats.get(lb, _new_stats())
+            tmv = st["total_moves"]
+            if tmv > 0:
+                t_sec = st["total_ms"] / 1000.0
+                nps = st["total_nodes"] / t_sec if t_sec > 0 else 0
+                t_pm = st["total_ms"] / tmv
+                n_pm = st["total_nodes"] / tmv
+                d_pm = st["total_depth"] / tmv
+                log(f" {lb:<16} | {nps:>10.0f} | {t_pm:>10.0f}ms | {n_pm:>12.0f} | {d_pm:>10.1f}")
+        log(f"{'='*64}\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SCHEDULE BUILDER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_schedule(op_idx):
+    my_cfgs     = MY_ENGINES
+    anchor_cfgs = ANCHORS
+    schedule    = []
+    gid         = 1
+
+    pairs = []
+    # MY_ENGINES vs ANCHORS
+    for my in my_cfgs:
+        for anc in anchor_cfgs:
+            pairs.append((my, anc, GAMES_VS_EACH_ANCHOR))
+
+    # MY_ENGINES self-play
+    if SELF_PLAY:
+        for i in range(len(my_cfgs)):
+            for j in range(i+1, len(my_cfgs)):
+                pairs.append((my_cfgs[i], my_cfgs[j], GAMES_SELF_PLAY))
+
+    max_games = max((p[2] for p in pairs), default=0)
+    for round_num in range(max_games):
+        round_matches = []
+        for w_cfg, b_cfg, total_games in pairs:
+            if round_num < total_games:
+                idx = random.randrange(len(op_idx)) if op_idx and len(op_idx) > 0 else None
+                round_matches.append((w_cfg, b_cfg, idx))
+                if COLOR_SWAP:
+                    round_matches.append((b_cfg, w_cfg, idx))
+        
+        random.shuffle(round_matches)
+        for w_cfg, b_cfg, idx in round_matches:
+            schedule.append((gid, w_cfg, b_cfg, idx))
+            gid += 1
+
+    return schedule
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  EPD WRITER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_epd_lock = threading.Lock()
+
+def write_epd(f_epd, positions, winner):
+    """
+    positions: list of {"fen": str, "score_white": int|None, "evaluator": str}
+    winner: "white" | "black" | None
+    """
+    if winner == "white": pgn_res = "1-0"
+    elif winner == "black": pgn_res = "0-1"
+    else: pgn_res = "1/2-1/2"
+    
+    lines = []
+    for idx, pos in enumerate(positions):
+        fen = pos["fen"]
+        sc  = pos["score_white"]
+        
+        norm_score = 0
+        if sc is not None:
+            if abs(sc) >= MATE_SCORE // 2:
+                norm_score = MATE_SCORE if sc > 0 else -MATE_SCORE
+            else:
+                norm_score = sc
+                
+        lines.append(f"{fen} c0 \"{pgn_res}\"; c1 \"{norm_score}\"; c2 \"{pos.get('evaluator', '')}\"; c3 \"{idx}\";\n")
+        
+    with _epd_lock:
+        f_epd.writelines(lines)
+        f_epd.flush()
+    return len(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    global completed_games, epd_positions, start_time
+    global _all_labels, _my_labels, stats, h2h, elo_estimators
+
+    start_time = time.time()
+
+    # Build label lists
+    _my_labels  = [e["label"] for e in MY_ENGINES]
+    _anc_labels = [a["label"] for a in ANCHORS]
+    _all_labels = _my_labels + _anc_labels
+
+    # Init stats & h2h
+    for lb in _all_labels:
+        stats[lb] = _new_stats()
+    for l1 in _all_labels:
+        for l2 in _all_labels:
+            if l1 != l2: h2h[(l1, l2)] = {"w":0,"l":0,"d":0}
+
+    # Anchor ELO map
+    anchor_elo_map = {a["label"]: a["elo"] for a in ANCHORS}
+
+    # Init ELO estimators for my engines
+    for lb in _my_labels:
+        elo_estimators[lb] = EloEstimator()
+
+    # Load openings
+    log("\n" + "="*60)
+    log("  TOURNAMENT COMPLETE — Iniciando")
+    log(f"  Meus Engines  : {', '.join(_my_labels)}")
+    log(f"  Anchors       : {', '.join(_anc_labels)}")
+    log(f"  Self-play     : {SELF_PLAY}")
+    log(f"  Color swap    : {COLOR_SWAP}")
+    log(f"  Concorrência  : {CONCURRENCY}")
+    log("="*60)
+
+    op_idx = load_all_openings(OPENING_FOLDER)
+    op_idx.shuffle()
+
+    schedule = build_schedule(op_idx)
+    total_games = len(schedule)
+
+    # mini-ciclo: todos os pares jogam 1 abertura (x2 se COLOR_SWAP)
+    # Independente de GAMES_VS_EACH_ANCHOR — representa 1 passagem por todos os pares
+    swap = 2 if COLOR_SWAP else 1
+    n_my  = len(MY_ENGINES)
+    n_anc = len(ANCHORS)
+    pairs_anc  = n_my * n_anc
+    pairs_self = (n_my * (n_my - 1) // 2) if (SELF_PLAY and n_my > 1) else 0
+    loop_size  = max(1, (pairs_anc + pairs_self) * swap)
+    report_every = loop_size * max(1, REPORT_LOOPS)
+
+    log(f"  Total de jogos : {total_games}")
+    log(f"  Mini-ciclo     : {loop_size} jogos ({pairs_anc} pares-anchor + {pairs_self} pares-self x{swap} cores)")
+    log(f"  Report a cada  : {report_every} jogos (REPORT_LOOPS={REPORT_LOOPS})")
+    log(f"  CPUs em uso    : {CONCURRENCY}")
+    log(f"  Ordem dos jogos: aleatória (schedule embaralhado)")
+    log("")
+
+    task_queue    = Queue()
+    results_queue = Queue()
+    for item in schedule:
+        task_queue.put(item)
+
+    def worker_loop():
+        while True:
+            try:
+                item = task_queue.get_nowait()
+            except Empty:
+                break
+            gid, w_cfg, b_cfg, op_idx_val = item
+            op = op_idx.fetch(op_idx_val) if op_idx_val is not None else {"moves": [], "fen": None}
+            play_game(gid, w_cfg, b_cfg, results_queue, op)
+            task_queue.task_done()
+
+    threads = [threading.Thread(target=worker_loop, daemon=True) for _ in range(CONCURRENCY)]
+    for t in threads: t.start()
+
+    f_pgn = open(ALL_PGNS, "w", encoding="utf-8") if SAVE_PGN else None
+    f_epd = open(ALL_EPDS, "w", encoding="utf-8") if SAVE_EPD else None
+
+    def _cleanup():
+        if f_pgn: f_pgn.close()
+        if f_epd: f_epd.close()
+
+    try:
+        while completed_games < total_games:
+            try:
+                res = results_queue.get(timeout=1.0)
+            except Empty:
+                if all(not t.is_alive() for t in threads): break
+                continue
+
+            completed_games += 1
+            w, b = res["white"], res["black"]
+
+            with _stats_lock:
+                for lb in (w, b):
+                    if lb not in stats: stats[lb] = _new_stats()
+                stats[w]["games"] += 1
+                stats[b]["games"] += 1
+                t_w = res["timing"].get(w, {"ms":0,"moves":0,"nodes":0,"depth":0})
+                t_b = res["timing"].get(b, {"ms":0,"moves":0,"nodes":0,"depth":0})
+                stats[w]["total_ms"]    += t_w["ms"]
+                stats[w]["total_moves"] += t_w["moves"]
+                stats[w]["total_nodes"] += t_w.get("nodes", 0)
+                stats[w]["total_depth"] += t_w.get("depth", 0)
+                stats[b]["total_ms"]    += t_b["ms"]
+                stats[b]["total_moves"] += t_b["moves"]
+                stats[b]["total_nodes"] += t_b.get("nodes", 0)
+                stats[b]["total_depth"] += t_b.get("depth", 0)
+                if res.get("timeout"): stats[w]["to"]+=1; stats[b]["to"]+=1
+                if res.get("error"):   stats[w]["err"]+=1; stats[b]["err"]+=1
+
+                winner = res.get("winner")
+                if winner == "white":
+                    stats[w]["w"]+=1; stats[w]["pts"]+=1; stats[b]["l"]+=1
+                    if (w,b) in h2h: h2h[(w,b)]["w"]+=1
+                    if (b,w) in h2h: h2h[(b,w)]["l"]+=1
+                elif winner == "black":
+                    stats[b]["w"]+=1; stats[b]["pts"]+=1; stats[w]["l"]+=1
+                    if (w,b) in h2h: h2h[(w,b)]["l"]+=1
+                    if (b,w) in h2h: h2h[(b,w)]["w"]+=1
+                else:
+                    stats[w]["d"]+=1; stats[w]["pts"]+=0.5
+                    stats[b]["d"]+=1; stats[b]["pts"]+=0.5
+                    if (w,b) in h2h: h2h[(w,b)]["d"]+=1
+                    if (b,w) in h2h: h2h[(b,w)]["d"]+=1
+
+                # Update ELO estimators (apenas contra anchors fixos)
+                for my_lb in _my_labels:
+                    if my_lb not in (w, b): continue
+                    opp_lb = b if w == my_lb else w
+                    if opp_lb not in anchor_elo_map: continue
+                    
+                    score = (1.0 if winner == ("white" if w==my_lb else "black")
+                             else 0.0 if winner == ("black" if w==my_lb else "white")
+                             else 0.5)
+                    opp_elo = float(anchor_elo_map[opp_lb])
+                    elo_estimators[my_lb].add(opp_elo, score)
+
+            # Write PGN
+            if f_pgn and res.get("pgn") and not res.get("error") and not res.get("timeout"):
+                f_pgn.write(res["pgn"] + "\n\n")
+                f_pgn.flush()
+
+            # Write EPD
+            if f_epd and res.get("positions"):
+                n = write_epd(f_epd, res["positions"], winner)
+                with _stats_lock:
+                    epd_positions += n
+
+            # Per-game log
+            # Log por jogo apenas no counter_every
+            if completed_games % COUNTER_EVERY == 0:
+                print_counter()
+
+            # Full cross-table (aligned to complete loops)
+            if completed_games % report_every == 0:
+                print_cross_table(is_final=False)
+
+    except KeyboardInterrupt:
+        log("\n[!] Torneio interrompido pelo utilizador")
+    finally:
+        _cleanup()
+
+    print_cross_table(is_final=True)
+
+
+def _sigint(sig, frame):
+    log("\n[!] SIGINT recebido")
+    print_cross_table(is_final=True)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _sigint)
+
+if __name__ == "__main__":
+    main()
