@@ -4,7 +4,7 @@ A chess engine written in C with a custom-trained NNUE evaluation, playable dire
 
 Entirely vibe coded with **Claude Sonnet 4.6**.
 
-▶ **[Play against Zchezz in your browser](https://ciclopeestrabico.github.io/zchezz/zchezz_bundle.html)**
+▶ **[Play against Zchezz in your browser](https://ciclopeestrabico.github.io/zchezz/)**
 
 **Measured Elo: ~2781 ±4** (against Stockfish anchors at movetime 200ms, without opening book or tablebases).
 
@@ -512,27 +512,27 @@ Table files are available from [tablebase.sesse.net](http://tablebase.sesse.net/
 ## File structure
 
 ```
-engine/c/zchezz_v305/
-├── board.c / board.h          Board state, bitboards, magic attacks, make/unmake
-├── search.c / search.h        Alpha-beta, TT, all pruning and heuristics, Lazy SMP
-├── nnue.c / nnue.h            NNUE forward pass, incremental accumulator, NNU3 loader
-├── main.c                     UCI protocol, entry point, SMP thread management
-├── syzygy.c / syzygy.h        Zchezz ↔ Fathom integration layer
-├── book.c / book.h            Polyglot opening book support
-├── tbprobe.c / tbprobe.h      Fathom library (tablebase probing)
-├── tbchess.c                  Fathom internal move generator
-├── tbconfig.h                 Fathom configuration for Zchezz
-├── stdendian.h                Endianness compatibility shim
-├── poly_keys.h                Polyglot Zobrist key constants
-├── Makefile                   Native / WASM build targets
+zchezz/
+├── engine/c/zchezz_v305/         Engine source code
+│   ├── board.c / board.h         Board state, bitboards, magic attacks, make/unmake
+│   ├── search.c / search.h       Alpha-beta, TT, LMR, NMP, Lazy SMP
+│   ├── nnue.c / nnue.h           NNUE inference, incremental accumulator, NNU3 loader
+│   ├── main.c                    UCI protocol, entry point, SMP threads
+│   ├── syzygy.c / syzygy.h       Zchezz ↔ Fathom integration layer
+│   ├── book.c / book.h           Polyglot opening book support
+│   ├── nnue_weights.bin          Trained weights (NNU3 format, ~426 KB)
+│   ├── Makefile                  Native / WASM build targets
+│   ├── bundle.py                 HTML bundler (WASM + weights → single offline file)
+│   ├── zchezz_wasm.html          Browser UI source
+│   └── zchezz_bundle.html        Self-contained offline bundle
 │
-├── zchezz_wasm.html           Browser UI source (game + analysis)
-├── zchezz_bundle.html         Fully self-contained offline bundle (output of bundle.py)
-├── bundle.py                  Offline HTML bundler — embeds WASM + weights + UI into one file
-│
-└── nnue_weights.bin           Trained weights (NNU3 format, ~426 KB)
-
-pieces/                        SVG piece sets (cburnett, merida, staunty)
+├── pieces/                       SVG piece sets (cburnett, merida, staunty)
+├── tests/                        Test & match scripts (version-agnostic)
+├── train/                        NNUE training code (PyTorch)
+├── sf_analyze/                   Stockfish data generation scripts
+├── test_suites/                  EPD test suites (WAC, STS, etc.)
+├── docs/                         GitHub Pages (serves zchezz_bundle.html)
+└── utils/                        Utility scripts
 ```
 
 ---
@@ -547,7 +547,9 @@ pieces/                        SVG piece sets (cburnett, merida, staunty)
 **Bundler (`bundle.py`)**
 
 - Python ≥ 3.10
-- `python-chess` (optional — required only for Merida SVG piece embedding)
+
+**Training (optional)**
+
 - PyTorch, python-chess, pandas, pyarrow, numpy
 
 ---
