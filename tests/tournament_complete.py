@@ -7,25 +7,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_elo
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  AUTO-DETECT LATEST ENGINE VERSION
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_engine_dirs = sorted(glob.glob(os.path.join(_BASE_DIR, "engine", "c", "zchezz_v*")))
-_latest_dir = os.path.basename(_engine_dirs[-1]) if _engine_dirs else "zchezz_v305"
-_latest_ver = _latest_dir.replace("zchezz_", "")
-
-# ═══════════════════════════════════════════════════════════════════════════════
 #  CONFIGURAÇÕES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 MY_ENGINES = [
     {
-        "path":     os.path.join("engine", "c", _latest_dir, "zchezz.exe"),
-        "label":    f"Zchezz_{_latest_ver}",
+        "path":     r"engine\c\zchezz_v309\zchezz.exe",
+        "label":    "Zchezz-v309",
         "tc_mode":  "movetime",   # "depth" | "movetime" | "fixedtime"
-        "tc_value": 200,         # depth=ply, movetime=ms, fixedtime=ms initial
-        "tc_inc":   0,         # increment ms (fixedtime only)
+        "tc_value": 200,          # depth=ply, movetime=ms, fixedtime=ms initial
+        "tc_inc":   0,            # increment ms (fixedtime only)
+    },
+    {
+        "path":     r"engine\c\zchezz_v309\zchezz.exe",
+        "label":    "Zchezz-v309-TB",
+        "tc_mode":  "movetime",
+        "tc_value": 200,
+        "tc_inc":   0,
+        "options":  {"SyzygyPath": r"tablebases\3-4-5"},
     },
 ]
 
@@ -53,10 +54,10 @@ ANCHORS = [
 # ── Torneio ───────────────────────────────────────────────────────────────────
 GAMES_VS_EACH_ANCHOR = 1000   # aberturas por par MY_ENGINE×ANCHOR (com COLOR_SWAP=True gera 2× jogos)
 GAMES_SELF_PLAY      = 1000   # aberturas por par MY_ENGINE×MY_ENGINE (com COLOR_SWAP=True gera 2× jogos)
-SELF_PLAY            = True  # meus engines jogam entre si?
-COLOR_SWAP           = True  # repete cada jogo com cores invertidas?
+SELF_PLAY            = True   # meus engines jogam entre si?
+COLOR_SWAP           = True   # repete cada jogo com cores invertidas?
 
-CONCURRENCY          = 8  # usa todos os CPUs disponíveis
+CONCURRENCY          = 8      # concurrent games
 MAX_PLIES            = 400
 MOVE_TIMEOUT         = 38.0
 REPORT_PERFORMANCE_METRICS = True
