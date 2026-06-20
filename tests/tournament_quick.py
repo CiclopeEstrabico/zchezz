@@ -1,62 +1,15 @@
 #!/usr/bin/env python3
 """
-tournament.py — Universal Chess Engine Tournament Runner
+tournament_quick.py — Quick 200-game H2H regression test
 =========================================================
 
-This is the ONE script for all engine testing scenarios. Edit the config
-block below, then run:   python tests/tournament.py
+Same engine as tournament.py, only the config block differs.
+Use this for fast regression checks between two engine versions.
 
-MODES OF OPERATION (all controlled by the config block):
-─────────────────────────────────────────────────────────
-1. HEAD-TO-HEAD (H2H):
-   - Put 2+ engines in MY_ENGINES, set ANCHORS = [], SELF_PLAY = True
-   - Engines play each other directly, ELO difference shown via elo_calc
+  python tests/tournament_quick.py
 
-2. ANCHOR TOURNAMENT (ELO estimation):
-   - Put 1+ engines in MY_ENGINES, fill ANCHORS with Stockfish at known ELOs
-   - Each engine plays against each anchor, absolute ELO is estimated via MLE
-   - Weighted average across anchors for final ELO ± confidence interval
-
-3. FULL TOURNAMENT (H2H + anchors):
-   - Fill both MY_ENGINES and ANCHORS, set SELF_PLAY = True
-   - Engines play against all anchors AND against each other
-   - Shows cross-table, H2H ELO diffs, and absolute ELO estimates
-
-4. SINGLE ENGINE BENCHMARK:
-   - Put 1 engine in MY_ENGINES, 1+ anchors in ANCHORS, SELF_PLAY = False
-   - Simple ELO estimation against Stockfish
-
-FEATURES:
-─────────
-- Concurrent games (CONCURRENCY workers, each with persistent engine processes)
-- Paired openings with color swap (same position played from both sides)
-- Memory-efficient opening index (only byte offsets stored, not positions)
-- Supports EPD and PGN opening books (auto-detects format)
-- Score adjudication: none (plays until game-over, stalemate, or MAX_PLIES)
-- PGN export (optional, SAVE_PGN)
-- EPD training data export (optional, SAVE_EPD) — position + eval + result
-- Live progress counter and periodic cross-table reports
-- Performance metrics: NPS, time/move, nodes/move, depth/move per engine
-- ELO calculation via elo_calc.py (trinomial model, 95% CI, cutechess-style)
-- MLE ELO estimation across multiple Stockfish anchors
-- Graceful SIGINT handling — prints final report before exiting
-- Auto-detects NNUE weights in engine directory
-
-ENGINE CONFIG (each entry in MY_ENGINES or ANCHORS):
-────────────────────────────────────────────────────
-  "path"      — relative or absolute path to engine executable
-  "label"     — display name (must be unique)
-  "tc_mode"   — "movetime" (fixed ms/move), "depth" (fixed ply), "fixedtime" (clock)
-  "tc_value"  — value for tc_mode (ms for movetime, ply for depth)
-  "tc_inc"    — increment in ms (only for fixedtime mode)
-  "options"   — dict of UCI options, e.g. {"SyzygyPath": "tablebases/3-4-5"}
-  "elo"       — known ELO rating (anchors only, used for ELO estimation)
-
-OUTPUT FILES (in RESULTS_DIR):
-──────────────────────────────
-  torneio_YYYYMMDD_HHMMSS.log — full console log
-  torneio_YYYYMMDD_HHMMSS.pgn — PGN games (if SAVE_PGN = True)
-  torneio_YYYYMMDD_HHMMSS.epd — EPD positions with eval (if SAVE_EPD = True)
+Default: v309 vs v309-TB, 200 games (100 openings x 2 colors),
+         14 workers, 100ms/move, PGN + log saved, no EPD.
 """
 
 import os, json, subprocess, time, math, random, threading, datetime, tempfile, signal, sys, io, struct, glob
@@ -69,81 +22,54 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_elo
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION — Edit this block to set up your tournament
+#  CONFIGURATION — Quick H2H regression test
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ── My Engines ────────────────────────────────────────────────────────────────
-# Engines to test. Add as many as needed. Each plays against all anchors
-# and (if SELF_PLAY=True) against each other.
+# ── My Engines (H2H — no anchors) ────────────────────────────────────────────
 MY_ENGINES = [
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
         "label":    "Zchezz-v309",
-        "tc_mode":  "movetime",   # "depth" | "movetime" | "fixedtime"
-        "tc_value": 200,          # depth=ply, movetime=ms, fixedtime=ms initial
-        "tc_inc":   0,            # increment ms (fixedtime only)
+        "tc_mode":  "movetime",
+        "tc_value": 100,          # fast: 100ms/move
+        "tc_inc":   0,
     },
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
         "label":    "Zchezz-v309-TB",
         "tc_mode":  "movetime",
-        "tc_value": 200,
+        "tc_value": 100,
         "tc_inc":   0,
         "options":  {"SyzygyPath": r"tablebases\3-4-5"},
     },
 ]
 
-# ── Anchor Engines ────────────────────────────────────────────────────────────
-# Reference engines with known ELO. Set ANCHORS = [] for pure H2H mode.
-ANCHORS = [
-    {
-        "path":    r"engine\stockfish\stockfish.exe",
-        "label":   "SF-2800",
-        "elo":     2800,
-        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "2800"},
-        "tc_mode":  "movetime",
-        "tc_value": 200,
-        "tc_inc":   0,
-    },
-    {
-        "path":    r"engine\stockfish\stockfish.exe",
-        "label":   "SF-3000",
-        "elo":     3000,
-        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "3000"},
-        "tc_mode":  "movetime",
-        "tc_value": 200,
-        "tc_inc":   0,
-    },
-]
+# ── No anchors for quick H2H ─────────────────────────────────────────────────
+ANCHORS = []
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
-GAMES_VS_EACH_ANCHOR = 600   # openings per MY_ENGINE×ANCHOR pair (×2 with COLOR_SWAP)
-GAMES_SELF_PLAY      = 600   # openings per MY_ENGINE×MY_ENGINE pair (×2 with COLOR_SWAP)
-SELF_PLAY            = True   # engines in MY_ENGINES play each other?
-COLOR_SWAP           = True   # repeat each opening with colors reversed?
+GAMES_VS_EACH_ANCHOR = 0      # not used (no anchors)
+GAMES_SELF_PLAY      = 100    # 100 openings x 2 colors = 200 games
+SELF_PLAY            = True
+COLOR_SWAP           = True
 
-CONCURRENCY          = 14      # number of concurrent games (= worker threads)
-MAX_PLIES            = 400    # max half-moves per game before forced draw
-MOVE_TIMEOUT         = 38.0   # seconds to wait for a move before timeout loss
-REPORT_PERFORMANCE_METRICS = True  # show NPS, time/move etc. in reports
+CONCURRENCY          = 14     # use most cores for speed
+MAX_PLIES            = 400
+MOVE_TIMEOUT         = 38.0
+REPORT_PERFORMANCE_METRICS = True
 
 # ── Opening Book ──────────────────────────────────────────────────────────────
-OPENING_FOLDER       = r"openings"  # folder with .epd and/or .pgn files
-
-# Filter: load ONLY these files from OPENING_FOLDER. Empty list = load ALL.
-# Example: ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
-OPENING_FILES        = []
+OPENING_FOLDER       = r"openings"
+OPENING_FILES        = ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
 
 # ── Output ────────────────────────────────────────────────────────────────────
-SAVE_PGN             = False  # save all games as PGN
-SAVE_EPD             = True   # save positions + eval as EPD (for NNUE training)
-RESULTS_DIR          = r"tests\complete_results"
-COUNTER_EVERY        = 14     # progress line every N games
-# REPORT_LOOPS: full cross-table every N mini-cycles.
-# 1 mini-cycle = all pairs play 1 opening (×2 if COLOR_SWAP).
-REPORT_LOOPS         = 10
+SAVE_PGN             = True   # save games for review
+SAVE_EPD             = False  # no training data for quick tests
+RESULTS_DIR          = r"tests\quick_results"
+COUNTER_EVERY        = 10     # progress every 10 games
+REPORT_LOOPS         = 25     # cross-table every ~50 games (25 openings x 2 colors)
 
 MATE_SCORE           = 999999  # sentinel value for mate scores
 
