@@ -16,6 +16,10 @@ tests/debug_*.py
 tests/kqk_*.txt
 tests/tb_test_*.txt
 
+# Version-specific tournament scripts (one-off, not reusable)
+tests/tournament_v*.py
+tests/tournament_*_sf_*.py
+
 # External engines (download separately)
 engine/stockfish/
 engine/stockfish_fast/

@@ -1,15 +1,34 @@
-import os, json, subprocess, time, math, random, threading, datetime, tempfile, signal, sys, io
+import os, json, subprocess, time, math, random, threading, datetime, tempfile, signal, sys, io, glob
 from queue import Queue, Empty
 import chess
 import chess.pgn
 import struct as _struct
 
-# ── CONFIGURAÇÕES DO USUÁRIO ──────────────────────────────────────────────────
-# Engine Zchezz que será testado
-MY_ENGINE = (r"engine\c\zchezz_v305\zchezz.exe", "Zchezz-v305")
-MY_ENGINE_OPTIONS = {"NNUE": os.path.abspath(r"engine\c\zchezz_v305\nnue_weights.bin"), "SyzygyPath": os.path.abspath(r"tablebases")}
+# Import shared ELO calculator (trinomial model, same as cutechess-cli)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference, estimated_elo, elo_wdl_summary
 
-# Motores Âncora
+# ── AUTO-DETECT LATEST ENGINE ─────────────────────────────────────────────────
+def find_latest_engine():
+    """Find the latest zchezz version directory by version number."""
+    base = os.path.join(os.path.dirname(__file__), "..", "engine", "c")
+    pattern = os.path.join(base, "zchezz_v*")
+    dirs = sorted(glob.glob(pattern))
+    if not dirs:
+        raise FileNotFoundError("No zchezz engine directories found")
+    latest = dirs[-1]  # highest version
+    name = os.path.basename(latest)
+    exe = os.path.join(latest, "zchezz.exe")
+    nnue = os.path.join(latest, "nnue_weights.bin")
+    return exe, name, nnue
+
+_exe, _name, _nnue = find_latest_engine()
+
+# Engine under test (auto-detected, override if needed)
+MY_ENGINE = (_exe, f"Zchezz-{_name.replace('zchezz_', '')}")
+MY_ENGINE_OPTIONS = {"NNUE": os.path.abspath(_nnue)}
+
+# Anchor engines
 ANCHORS = [
     {
         "path": r"engine\stockfish\stockfish.exe",
@@ -25,22 +44,22 @@ ANCHORS = [
     },
 ]
 
-# PARÂMETROS DO TORNEIO
-GAMES_PER_ANCHOR = 300          
-CONCURRENCY      = 8           
-MAX_PLIES        = 400         
-MOVE_TIMEOUT_MAX = 35.0        
+# TOURNAMENT PARAMETERS
+GAMES_PER_ANCHOR = 300
+CONCURRENCY      = 8
+MAX_PLIES        = 400
+MOVE_TIMEOUT_MAX = 35.0
 
-# CONTROLE DE BUSCA
-TC_MODE      = "movetime"       #depth, movetime or fixedtime
-TC_VALUE     = 200            
-TC_WINC      = 200          
+# SEARCH CONTROL
+TC_MODE      = "movetime"       # depth, movetime or fixedtime
+TC_VALUE     = 200
+TC_WINC      = 200
 
-# GESTÃO DE ABERTURAS
+# OPENINGS
 OPENING_FOLDER = r"openings"
 
-# OPÇÕES DE SAÍDA
-SAVE_PGN     = True            
+# OUTPUT
+SAVE_PGN     = True
 RESULTS_DIR  = r"tests\elo_results"
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE     = os.path.join(RESULTS_DIR, f"elo_test_{TIMESTAMP}.log")
@@ -273,38 +292,47 @@ class EngineInstance:
 # ── ELO ESTIMATOR ─────────────────────────────────────────────────────────────
 
 class EloEstimator:
+    """Track W/D/L per anchor and estimate ELO using trinomial model."""
     def __init__(self):
-        self.results = []
+        self.per_anchor = {}  # label → {w, d, l, elo}
 
-    def add(self, anchor_elo, score):
-        self.results.append((anchor_elo, score))
+    def add(self, anchor_label, anchor_elo, score):
+        if anchor_label not in self.per_anchor:
+            self.per_anchor[anchor_label] = {"w": 0, "d": 0, "l": 0, "elo": anchor_elo}
+        s = self.per_anchor[anchor_label]
+        if score == 1.0: s["w"] += 1
+        elif score == 0.0: s["l"] += 1
+        else: s["d"] += 1
+
+    def estimate(self):
+        """Weighted average of per-anchor ELO estimates."""
+        if not self.per_anchor:
+            return 0.0, float('inf')
+
+        total_w = sum(1.0 / max(ci, 1) ** 2
+                      for label, s in self.per_anchor.items()
+                      for est, ci in [estimated_elo(s["w"], s["d"], s["l"], s["elo"])])
+        weighted_elo = 0.0
+        combined_var = 0.0
+
+        for label, s in self.per_anchor.items():
+            est, ci = estimated_elo(s["w"], s["d"], s["l"], s["elo"])
+            se = ci / 1.96 if ci < float('inf') else float('inf')
+            if se == 0 or se == float('inf'):
+                continue
+            weight = 1.0 / se ** 2
+            weighted_elo += est * weight
+            combined_var += 1.0 / (se ** 2)
+
+        if combined_var > 0:
+            final_elo = weighted_elo / combined_var
+            final_se = 1.0 / math.sqrt(combined_var)
+            return final_elo, final_se * 1.96
+        return 0.0, float('inf')
 
     def estimate_mle(self):
-        if not self.results: return 0.0, 0.0
-        
-        # Regularization: add a small "draw" to avoid infinite Elo on 100% winrate
-        smoothing = [(r[0], 0.5) for r in self.results[:2]] if len(self.results) > 10 else []
-        temp_results = self.results + smoothing
-
-        total_p = sum(r[1] for r in temp_results) / len(temp_results)
-        elo_diff = 0
-        if total_p > 0 and total_p < 1:
-            elo_diff = -400 * math.log10(1/total_p - 1)
-        E = sum(r[0] for r in temp_results) / len(temp_results) + elo_diff
-        
-        hess = 0
-        for _ in range(30):
-            grad, hess = 0, 0
-            for A_i, score_i in temp_results:
-                exp_term = 10**((A_i - E) / 400)
-                p_i = 1 / (1 + exp_term) if exp_term < 1e15 else 0.0
-                grad += (score_i - p_i)
-                hess += -p_i * (max(1e-15, 1 - p_i)) * (math.log(10) / 400)
-            if abs(grad) < 0.0001 or abs(hess) < 1e-18: break
-            E = E - grad / (hess if abs(hess) != 0 else -1e-18)
-        
-        se = 1 / math.sqrt(abs(hess)) if abs(hess) > 0 else 0
-        return E, se * 1.96
+        """Backward-compatible interface."""
+        return self.estimate()
 
 # ── TORNEIO ───────────────────────────────────────────────────────────────────
 
@@ -436,7 +464,7 @@ def main():
             res_val = res["result"]
             score = 1.0 if (res_val == "1-0" and res["white"] == MY_ENGINE[1]) or (res_val == "0-1" and res["black"] == MY_ENGINE[1]) else (0.0 if (res_val == "1-0" and res["black"] == MY_ENGINE[1]) or (res_val == "0-1" and res["white"] == MY_ENGINE[1]) else 0.5)
             
-            estimator.add(stats[an_label]["elo"], score)
+            estimator.add(an_label, stats[an_label]["elo"], score)
             if score == 1.0: stats[an_label]["w"] += 1
             elif score == 0.0: stats[an_label]["l"] += 1
             else: stats[an_label]["d"] += 1
