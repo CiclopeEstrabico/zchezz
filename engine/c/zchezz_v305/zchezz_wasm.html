@@ -5239,17 +5239,18 @@ const OPENING_BOOK = {
       if (clockMode) {
         // Optimized time management for WASM clock mode
         const myTime = ec === 'w' ? clockW : clockB;
-        // Phase-based moves remaining (Stockfish-style, tuned for snappy play)
-        // Opening (ply<30): ~35-40 moves left. Middlegame (30-80): ~25-30. Endgame (>80): ~18-22
-        const fullmove = Math.floor(ply / 2) + 1;
-        const movesLeft = fullmove < 15 ? Math.max(35, 40 - Math.floor(fullmove/3))
-                        : fullmove < 40 ? Math.max(25, 30 - Math.floor((fullmove-15)/5))
+        // Phase-based moves remaining (tuned for snappy play, faster openings)
+        const curPly = moveHistory.length;
+        const fullmove = Math.floor(curPly / 2) + 1;
+        const movesLeft = fullmove < 10 ? 45       // Opening: play fast, save time
+                        : fullmove < 20 ? 38       // Early middlegame: still fast
+                        : fullmove < 40 ? Math.max(25, 30 - Math.floor((fullmove-20)/4))
                         : Math.max(12, 22 - Math.floor((fullmove-40)/8));
         // Base budget + 75% increment (conservative like Stockfish)
         const budget = Math.round(myTime / movesLeft + clockInc * 0.75);
         // Hard cap: 25% of remaining clock
         const hardCap = Math.round(myTime * 0.25);
-        searchParams.timeLimitMs = Math.max(10, Math.min(budget - 50, hardCap, 10000));
+        searchParams.timeLimitMs = Math.max(50, Math.min(budget, hardCap, 10000));
         searchParams.depth = 40;
       }
       window.zchezzSearch(searchParams, msg => {

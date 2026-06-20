@@ -7,15 +7,10 @@ import struct as _struct
 # ── CONFIGURAÇÕES DO USUÁRIO ──────────────────────────────────────────────────
 # Engine Zchezz que será testado
 MY_ENGINE = (r"engine\c\zchezz_v305\zchezz.exe", "Zchezz-v305")
+MY_ENGINE_OPTIONS = {"SyzygyPath": os.path.abspath(r"tablebases")}
 
 # Motores Âncora
 ANCHORS = [
-    {
-        "path": r"engine\stockfish\stockfish.exe",
-        "label": "SF-2700",
-        "elo": 2700,
-        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "2700"},
-    },
     {
         "path": r"engine\stockfish\stockfish.exe",
         "label": "SF-2800",
@@ -28,37 +23,10 @@ ANCHORS = [
         "elo": 2900,
         "options": {"UCI_LimitStrength": "true", "UCI_Elo": "2900"},
     },
-    {
-        "path": r"engine\stockfish\stockfish.exe",
-        "label": "SF-3000",
-        "elo": 3000,
-        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "3000"},
-    },
-    # {
-    #     "path": r"engine\maia\lc0.exe",
-    #     "label": "Maia-1100",
-    #     "elo": 1100,
-    #     "options": {"WeightsFile": os.path.abspath(r"engine\maia\maia-1100.pb.gz")},
-    #     "go_cmd_override": "nodes 1"
-    # },
-    # {
-    #     "path": r"engine\maia\lc0.exe",
-    #     "label": "Maia-1500",
-    #     "elo": 1500,
-    #     "options": {"WeightsFile": os.path.abspath(r"engine\maia\maia-1500.pb.gz")},
-    #     "go_cmd_override": "nodes 1"
-    # },
-    # {
-    #     "path": r"engine\maia\lc0.exe",
-    #     "label": "Maia-1900",
-    #     "elo": 1900,
-    #     "options": {"WeightsFile": os.path.abspath(r"engine\maia\maia-1900.pb.gz")},
-    #     "go_cmd_override": "nodes 1"
-    # }
 ]
 
 # PARÂMETROS DO TORNEIO
-GAMES_PER_ANCHOR = 100          
+GAMES_PER_ANCHOR = 300          
 CONCURRENCY      = 8           
 MAX_PLIES        = 400         
 MOVE_TIMEOUT_MAX = 35.0        
@@ -389,10 +357,10 @@ def main():
         for _ in range(GAMES_PER_ANCHOR // 2):
             opening = op_idx.random_pick() if op_idx else {}
             # Jogo 1: Zchezz Brancas
-            schedule.append((game_id, ({"path": MY_ENGINE[0], "label": MY_ENGINE[1]}, anchor), opening))
+            schedule.append((game_id, ({"path": MY_ENGINE[0], "label": MY_ENGINE[1], "options": MY_ENGINE_OPTIONS}, anchor), opening))
             game_id += 1
             # Jogo 2: Zchezz Pretas (Mesma Abertura)
-            schedule.append((game_id, (anchor, {"path": MY_ENGINE[0], "label": MY_ENGINE[1]}), opening))
+            schedule.append((game_id, (anchor, {"path": MY_ENGINE[0], "label": MY_ENGINE[1], "options": MY_ENGINE_OPTIONS}), opening))
             game_id += 1
 
     random.shuffle(schedule)
@@ -420,7 +388,7 @@ def main():
             
             an_label = res["black"] if res["white"] == MY_ENGINE[1] else res["white"]
             res_val = res["result"]
-            score = 1.0 if (res_val == "1-0" and res["white"] == MY_ENGINE[1]) or (res_val == "0-1" and res["black"] == MY_ENGINE[1]) else (0.5 if res_val == "1/2-1/2" else 0.0)
+            score = 1.0 if (res_val == "1-0" and res["white"] == MY_ENGINE[1]) or (res_val == "0-1" and res["black"] == MY_ENGINE[1]) else (0.0 if (res_val == "1-0" and res["black"] == MY_ENGINE[1]) or (res_val == "0-1" and res["white"] == MY_ENGINE[1]) else 0.5)
             
             estimator.add(stats[an_label]["elo"], score)
             if score == 1.0: stats[an_label]["w"] += 1
