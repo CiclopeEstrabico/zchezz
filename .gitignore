@@ -21,16 +21,16 @@ tests/tb_test_*.txt
 tests/tournament_v*.py
 tests/tournament_*_sf_*.py
 
-# Deprecated test scripts (replaced by match.py + tournament_complete.py)
+# Deprecated test scripts (replaced by tournament_h2h.py + tournament_compare.py)
 tests/quick_match.py
 tests/concurrent_match.py
 tests/parallel_match.py
 tests/tournament_quick.py
-tests/tournament_h2h.py
 tests/tournament_elo.py
 tests/tournament.py
 tests/tb_tournament.py
 tests/test_tournament.py
+tests/match.py
 
 # External engines (download separately)
 engine/stockfish/
