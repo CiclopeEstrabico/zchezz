@@ -230,9 +230,12 @@ class EngineInstance:
             try: self.queue.get_nowait()
             except Empty: break
 
-        # Use FEN instead of long move list to avoid any length-related issues
-        fen = board.fen()
-        pos_cmd = f"position fen {fen}"
+        # Use proper position command with full move list (preserves history for repetition detection)
+        m_list = " ".join([m.uci() for m in board.move_stack])
+        if self.start_fen:
+            pos_cmd = f"position fen {self.start_fen}" + (f" moves {m_list}" if m_list else "")
+        else:
+            pos_cmd = f"position startpos" + (f" moves {m_list}" if m_list else "")
         self._send(pos_cmd)
         
         if self.go_cmd_override:

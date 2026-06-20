@@ -313,6 +313,13 @@ static void cmd_position(const char *line) {
         g_searching = 0;
     }
 
+    /* Reset undo stack and history — these accumulate across position
+     * commands (apply_moves calls board_make which pushes onto g_undo[]).
+     * Without this reset, after ~11 position commands with long move lists,
+     * g_undo_top overflows STACK_SIZE (512) and board_make silently skips. */
+    g_undo_top = 0;
+    g_hist_len = 0;
+
     const char *p = line;
 
     if (eat(&p, "startpos")) {
