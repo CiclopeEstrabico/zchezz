@@ -27,20 +27,23 @@ from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_el
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ── Time Control ──────────────────────────────────────────────────────────────
+MOVETIME             = 100    # ms per move (applied to ALL engines)
+
 # ── My Engines (H2H — no anchors) ────────────────────────────────────────────
 MY_ENGINES = [
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
         "label":    "Zchezz-v309",
         "tc_mode":  "movetime",
-        "tc_value": 100,          # fast: 100ms/move
+        "tc_value": MOVETIME,          # fast: 100ms/move
         "tc_inc":   0,
     },
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
         "label":    "Zchezz-v309-TB",
         "tc_mode":  "movetime",
-        "tc_value": 100,
+        "tc_value": MOVETIME,
         "tc_inc":   0,
         "options":  {"SyzygyPath": r"tablebases\3-4-5"},
     },
