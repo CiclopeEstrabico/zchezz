@@ -94,10 +94,10 @@ typedef struct {
     uint8_t  nbb;          /* number of bb ops                            */
 } UndoFrame;
 
-extern _Thread_local UndoFrame g_undo[STACK_SIZE];
-extern _Thread_local int       g_undo_top;
-extern _Thread_local uint64_t  g_hist [HIST_SIZE];
-extern _Thread_local int       g_hist_len;
+extern UndoFrame g_undo[STACK_SIZE];
+extern int       g_undo_top;
+extern uint64_t  g_hist [HIST_SIZE];
+extern int       g_hist_len;
 
 extern uint64_t ZR_tab   [32*64];
 extern uint64_t ZR_ep    [8];

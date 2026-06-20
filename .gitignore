@@ -24,7 +24,7 @@ engine/old/
 
 # Deprecated engine versions (only latest kept in repo)
 engine/c/zchezz_v2*/
-engine/c/zchezz_v30[0-4]/
+engine/c/zchezz_v30[0-8]/
 
 # Deprecated code
 deprecated/

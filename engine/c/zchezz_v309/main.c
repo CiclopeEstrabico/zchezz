@@ -62,7 +62,7 @@ static int z_strncasecmp(const char *a, const char *b, size_t n) {
 #endif
 
 #define ENGINE_NAME    "Zchezz"
-#define ENGINE_VERSION "3.05"
+#define ENGINE_VERSION "3.06"
 #define ENGINE_AUTHOR  "Gustavo Zambrano"
 
 /* ── Global game state ─────────────────────────────────────────── */
@@ -252,9 +252,20 @@ static void cmd_setoption(const char *line) {
         strncpy(g_opt_syzygy_path, value, sizeof(g_opt_syzygy_path)-1);
         if (value[0]) {
             int loaded = syzygy_init(value);
-            fprintf(stderr, "info string SyzygyPath set to %s (%d-piece tables loaded, max=%d)\n",
-                    value, loaded, syzygy_max_pieces());
+            if (loaded > 0) {
+                /* Auto-enable in-tree WDL probing when TB loads successfully.
+                 * depth >= 6 balances probe overhead vs endgame accuracy.
+                 * User can override with SyzygyProbeDepth if desired. */
+                g_tb_probe_depth = 6;
+                g_tb_probe_limit = loaded < 7 ? loaded : 6;
+            }
+            fprintf(stderr, "info string Syzygy %d-piece tables loaded (probe_depth=%d)\n",
+                    loaded, g_tb_probe_depth);
             fflush(stderr);
+        } else {
+            /* Empty path = disable TB entirely */
+            g_tb_probe_depth = 99;
+            g_tb_probe_limit = 0;
         }
     }
     else if (strcasecmp(name, "SyzygyProbeDepth") == 0) {
@@ -422,7 +433,7 @@ static void uci_info_cb(int depth, int score, long nodes, const char *pv, int tu
     long long nps = nodes * 1000LL / elapsed;
     int hf = tt_hashfull();
 
-    extern _Thread_local long s_tb_hits;  /* from search.c */
+    extern long s_tb_hits;  /* from search.c */
 
     pthread_mutex_lock(&g_io_mutex);
     int is_mate = (score > 9000 || score < -9000);
@@ -460,10 +471,15 @@ static int g_num_helpers = 0;
 
 static void *helper_thread_fn(void *arg) {
     HelperArgs *ha = (HelperArgs *)arg;
-    /* Helper searches the same position with a staggered start depth.
-     * Its only purpose is to fill the shared TT with entries at depths
-     * the main thread hasn't reached yet. */
-    search_best(&ha->board, &ha->params);
+    /* Allocate per-thread search state for Lazy SMP.
+     * Each helper has its own killers, history, etc.
+     * They all share the TT (global) and stop flag. */
+    SearchState *my_ss = search_state_new();
+    if (my_ss) {
+        ha->params.search_state = my_ss;
+        search_best(&ha->board, &ha->params);
+        search_state_free(my_ss);
+    }
     return NULL;
 }
 

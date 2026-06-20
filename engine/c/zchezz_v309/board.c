@@ -18,11 +18,11 @@
 /* ═══════════════════════════════════════════════════════════════════
  * GLOBALS
  * ═══════════════════════════════════════════════════════════════════ */
-_Thread_local UndoFrame g_undo[STACK_SIZE];
-_Thread_local int       g_undo_top = 0;
+UndoFrame g_undo[STACK_SIZE];
+int       g_undo_top = 0;
 
-_Thread_local uint64_t g_hist [HIST_SIZE];
-_Thread_local int      g_hist_len = 0;
+uint64_t g_hist [HIST_SIZE];
+int      g_hist_len = 0;
 
 /* ═══════════════════════════════════════════════════════════════════
  * ZOBRIST  (64-bit — single hash)

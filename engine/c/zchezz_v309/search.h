@@ -10,6 +10,9 @@
 #pragma once
 #include "board.h"
 
+/* Forward declare SearchState for per-thread search data */
+typedef struct SearchState SearchState;
+
 #define MAX_PLY     64
 #ifdef __EMSCRIPTEN__
 #define TT_SIZE     (1 << 19)   /* 512K entries (~13 MB) — fits in WASM memory */
@@ -60,10 +63,7 @@ typedef struct {
     int  multi_pv;          /* number of PV lines (1..MAX_MULTI_PV) */
     int  threads;           /* number of search threads (1 = single, Lazy SMP) */
     volatile int *stop;     /* pointer to shared stop flag (NULL = no external stop) */
-    /* Callback chamado após cada iteração do ID com resultado parcial.
-     * NULL = sem callback (WASM / modo silencioso).
-     * turn: COL_W ou COL_B — side to move na raiz, para score White-relative.
-     * multipv: 1-based index of the PV line being reported. */
+    SearchState *search_state;  /* per-thread state (NULL = use global default) */
     void (*info_cb)(int depth, int score, long nodes, const char *pv, int turn, int multipv);
 } SearchParams;
 
@@ -79,6 +79,16 @@ void search_reset(void);
 
 /* Zera tabelas de história completamente (chamar em ucinewgame) */
 void search_history_clear(void);
+
+/* Set the active SearchState for this thread.
+ * NULL resets to the default global state. */
+void search_set_state(SearchState *state);
+
+/* Allocate a new SearchState on the heap (for helper threads) */
+SearchState *search_state_new(void);
+
+/* Free a heap-allocated SearchState */
+void search_state_free(SearchState *state);
 
 /* Find best move.  Board b is not modified (make/unmake balanced). */
 SearchResult search_best(Board *b, const SearchParams *p);
