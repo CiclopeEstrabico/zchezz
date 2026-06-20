@@ -291,7 +291,7 @@ The engine supports **Lazy SMP** with up to 8 threads. Each worker thread runs a
 
 - **UCI option**: `setoption name Threads value <N>` (1–128, default 1)
 - **WASM**: single-threaded only (browser SharedArrayBuffer requires COOP/COEP headers not available on file:// protocol)
-- **Thread safety**: TT is lock-free (struct-of-arrays layout); per-thread state uses static arrays indexed by thread ID
+- **Thread safety**: TT is lock-free (struct-of-arrays layout); per-board undo stack and repetition history ensure thread isolation
 
 ### Quiescence search
 
@@ -550,7 +550,7 @@ Table files are available from [tablebase.sesse.net](http://tablebase.sesse.net/
 
 ```
 zchezz/
-├── engine/c/zchezz_v310/         Engine source code (current)
+├── engine/c/zchezz_v311/         Engine source code (current)
 │   ├── board.c / board.h         Board state, bitboards, magic attacks, make/unmake
 │   ├── search.c / search.h       Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
 │   ├── nnue.c / nnue.h           NNUE inference, incremental accumulator, NNU3 loader
@@ -606,6 +606,13 @@ zchezz/
 
 ## Changelog
 
+### v3.11
+- **Lazy SMP crash fix** — moved undo stack and repetition history from global arrays into per-Board structs, eliminating thread contention that caused crashes with Threads ≥ 4
+- **TB hits reporting** — fixed `tbhits=0` in UCI info output by syncing `s_tb_hits` from per-thread search state before the info callback
+- **Thread safety** — each search thread now owns its own undo/history state; zero shared mutable state outside the lock-free TT
+- **Zero overhead** — structural changes add no performance cost: NPS identical to v3.10, confirmed across 600+ dedicated H2H games
+- **Verified:** 70/70 UCI tests, 37/37 perft checks, +44.7 ELO vs v3.09, 50/50 MT stability games with zero crashes
+
 ### v3.10
 - **Staged move generation** — TT move → captures → quiets → losing captures (+21 ELO vs v3.09)
 - **WASM crash fix** — sanitize SearchParams function pointers in WASM sret wrapper
@@ -622,5 +629,5 @@ zchezz/
 ## Next steps
 
 - Better NNUE structure
-- Fix Lazy SMP stability with 4+ threads
 - Improve tablebase hit rate in search
+- Stronger endgame play

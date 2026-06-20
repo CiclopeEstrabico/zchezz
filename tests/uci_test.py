@@ -532,6 +532,120 @@ def test_t8(eng):
     else:
         check("FEN round-trip", False, "no Fen: line in output")
 
+# ── T9: Regression & Stress Tests ─────────────────────────────
+def test_t9(eng):
+    print("\n=== T9: Regression & Stress ===")
+
+    # Depth consistency: go depth 10 must reach depth 10
+    eng.send("position startpos")
+    eng.send("go depth 10")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    info_d10 = [l for l in lines if "info" in l and " depth 10 " in l]
+    check("go depth 10 → info depth 10 present",
+          len(info_d10) > 0,
+          f"found {len(info_d10)} depth-10 info lines")
+
+    # NPS sanity check: must be > 100K (catch broken eval/search)
+    nps_val = 0
+    for l in reversed(lines):
+        m = re.search(r"nps\s+(\d+)", l)
+        if m:
+            nps_val = int(m.group(1))
+            break
+    check("NPS > 100,000 (sanity)",
+          nps_val > 100000,
+          f"nps={nps_val}")
+
+    # Node count check: must be > 0
+    nodes_val = 0
+    for l in reversed(lines):
+        m = re.search(r"nodes\s+(\d+)", l)
+        if m:
+            nodes_val = int(m.group(1))
+            break
+    check("nodes > 0 at depth 10",
+          nodes_val > 0,
+          f"nodes={nodes_val}")
+
+    # Multiple FEN positions — opening, middlegame, endgame
+    test_fens = [
+        ("opening", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"),
+        ("middlegame", "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQ1RK1 w - - 4 6"),
+        ("endgame", "8/5pk1/7p/3p1Rp1/p2P2P1/1r5P/1P3PK1/8 w - - 2 40"),
+    ]
+    for label, fen in test_fens:
+        eng.send(f"position fen {fen}")
+        eng.send("go depth 8")
+        lines = eng.read_until(r"^bestmove", timeout=15)
+        bm = [l for l in lines if l.startswith("bestmove")]
+        check(f"{label} FEN → bestmove",
+              len(bm) > 0 and len(bm[0].split()[1]) >= 4)
+
+    # Rapid position cycling: 10 position+go cycles without crash
+    rapid_ok = True
+    for i in range(10):
+        eng.send("position startpos moves e2e4 e7e5 g1f3")
+        eng.send("go depth 4")
+        lines = eng.read_until(r"^bestmove", timeout=10)
+        if not any(l.startswith("bestmove") for l in lines):
+            rapid_ok = False
+            break
+    check("rapid cycling (10x position+go) no crash", rapid_ok)
+
+    # Long move list: 30+ moves applied → bestmove (undo stack stress)
+    long_moves = "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 " \
+                 "f1e1 b7b5 a4b3 d7d6 c2c3 e8g8 h2h3 c6b8 d2d4 b8d7 " \
+                 "b3c2 c7c5 d4d5 d7b6 b1d2 a6a5 b2b3 a5a4"
+    eng.send(f"position startpos moves {long_moves}")
+    eng.send("go depth 6")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    check("long move list (28 moves) → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+
+    # Threads=4 deep search (crash stress)
+    eng.send("setoption name Threads value 4")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position startpos")
+    eng.send("go depth 10")
+    lines = eng.read_until(r"^bestmove", timeout=60)
+    check("Threads=4 depth 10 → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+
+    # Multiple sequential Threads=4 games (crash stress)
+    multi_ok = True
+    for i in range(5):
+        eng.send("ucinewgame")
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+        eng.send("position startpos moves e2e4 e7e5")
+        eng.send("go depth 6")
+        lines = eng.read_until(r"^bestmove", timeout=30)
+        if not any(l.startswith("bestmove") for l in lines):
+            multi_ok = False
+            break
+    check("5x sequential Threads=4 games no crash", multi_ok)
+
+    # Reset threads
+    eng.send("setoption name Threads value 1")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+
+    # Perft validation: perft(4) from startpos = 197,281
+    eng.send("position startpos")
+    eng.send("perft 4")
+    lines = eng.read_until(r"Nodes searched", timeout=15)
+    perft_ok = False
+    nodes = -1
+    for l in lines:
+        if "Nodes searched:" in l:
+            nodes = int(l.split(":")[1].strip())
+            perft_ok = (nodes == 197281)
+            break
+    check("perft(4) = 197,281",
+          perft_ok,
+          f"nodes={nodes}" if not perft_ok else "")
+
 
 # ── Main ──────────────────────────────────────────────────────
 def main():
@@ -556,6 +670,7 @@ def main():
         ("T6", test_t6),
         ("T7", test_t7),
         ("T8", test_t8),
+        ("T9", test_t9),
     ]
 
     for name, test_fn in test_groups:
