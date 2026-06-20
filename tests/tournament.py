@@ -132,6 +132,10 @@ REPORT_PERFORMANCE_METRICS = True  # show NPS, time/move etc. in reports
 # ── Opening Book ──────────────────────────────────────────────────────────────
 OPENING_FOLDER       = r"openings"  # folder with .epd and/or .pgn files
 
+# Filter: load ONLY these files from OPENING_FOLDER. Empty list = load ALL.
+# Example: ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
+OPENING_FILES        = []
+
 # ── Output ────────────────────────────────────────────────────────────────────
 SAVE_PGN             = False  # save all games as PGN
 SAVE_EPD             = True   # save positions + eval as EPD (for NNUE training)
@@ -260,14 +264,21 @@ class OpeningIndex:
     def random_pick(self) -> dict:
         return self.fetch(random.randrange(len(self._index)))
 
-def load_all_openings(folder: str) -> OpeningIndex:
+def load_all_openings(folder: str, filter_files: list = None) -> OpeningIndex:
+    """Load openings from folder. If filter_files is non-empty, only load those files."""
     idx = OpeningIndex()
     if not os.path.exists(folder): return idx
-    for f in sorted(os.listdir(folder)):
+    all_files = sorted(os.listdir(folder))
+    if filter_files:
+        # Only load files in the filter list
+        all_files = [f for f in all_files if f in filter_files]
+        if not all_files:
+            log(f"  [WARNING] No matching files in {folder} for filter: {filter_files}")
+    for f in all_files:
         fp = os.path.join(folder, f)
         if f.endswith(".epd"): idx._build_epd(fp)
         elif f.endswith(".pgn"): idx._build_pgn(fp)
-    log(f"  [Openings] Total: {len(idx):,} posições")
+    log(f"  [Openings] Total: {len(idx):,} positions from {len(all_files)} file(s)")
     return idx
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -876,7 +887,7 @@ def main():
     log(f"  Concorrência  : {CONCURRENCY}")
     log("="*60)
 
-    op_idx = load_all_openings(OPENING_FOLDER)
+    op_idx = load_all_openings(OPENING_FOLDER, OPENING_FILES or None)
     op_idx.shuffle()
 
     schedule = build_schedule(op_idx)
