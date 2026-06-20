@@ -7,7 +7,7 @@ import struct as _struct
 # ── CONFIGURAÇÕES DO USUÁRIO ──────────────────────────────────────────────────
 # Engine Zchezz que será testado
 MY_ENGINE = (r"engine\c\zchezz_v305\zchezz.exe", "Zchezz-v305")
-MY_ENGINE_OPTIONS = {"SyzygyPath": os.path.abspath(r"tablebases")}
+MY_ENGINE_OPTIONS = {"NNUE": os.path.abspath(r"engine\c\zchezz_v305\nnue_weights.bin"), "SyzygyPath": os.path.abspath(r"tablebases")}
 
 # Motores Âncora
 ANCHORS = [
@@ -32,8 +32,8 @@ MAX_PLIES        = 400
 MOVE_TIMEOUT_MAX = 35.0        
 
 # CONTROLE DE BUSCA
-TC_MODE      = "fixedtime"      #depth, movetime or fixedtime
-TC_VALUE     = 10000            
+TC_MODE      = "movetime"       #depth, movetime or fixedtime
+TC_VALUE     = 200            
 TC_WINC      = 200          
 
 # GESTÃO DE ABERTURAS
@@ -317,7 +317,9 @@ def play_game(game_id, pair_cfg, results_queue, opening=None):
     winc, binc = TC_WINC if TC_MODE == "fixedtime" else 0, TC_WINC if TC_MODE == "fixedtime" else 0
     
     ply = 0
-    while not board.is_game_over() and ply < MAX_PLIES:
+    last_mover_is_white = None
+    broke_early = False
+    while not board.is_game_over(claim_draw=True) and ply < MAX_PLIES:
         is_white = board.turn == chess.WHITE
         active = w_eng if is_white else b_eng
         t0 = time.time()
@@ -327,17 +329,36 @@ def play_game(game_id, pair_cfg, results_queue, opening=None):
         if is_white: wtime = max(0, wtime - elapsed_ms + winc)
         else: btime = max(0, btime - elapsed_ms + binc)
 
-        if not move_str: break
+        if not move_str:
+            # Engine failed to return a move — treat as loss for that engine
+            broke_early = True
+            last_mover_is_white = is_white
+            break
         try:
             move = board.parse_uci(move_str)
             if move in board.legal_moves:
                 board.push(move); node = node.add_main_variation(move); ply += 1
-            else: break
-        except: break
+            else:
+                broke_early = True
+                last_mover_is_white = is_white
+                break
+        except:
+            broke_early = True
+            last_mover_is_white = is_white
+            break
+
+    # Determine result
+    if board.is_game_over(claim_draw=True):
+        result = board.result(claim_draw=True)
+    elif broke_early and last_mover_is_white is not None:
+        # Engine that failed to move loses
+        result = "0-1" if last_mover_is_white else "1-0"
+    else:
+        result = "1/2-1/2"  # hit MAX_PLIES, count as draw
 
     results_queue.put({
         "id": game_id, "white": w_eng.label, "black": b_eng.label,
-        "result": board.result(), "pgn": str(pgn_game)
+        "result": result, "pgn": str(pgn_game)
     })
     w_eng.stop(); b_eng.stop()
 
