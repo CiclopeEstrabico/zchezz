@@ -28,36 +28,66 @@ from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_el
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Time Control ──────────────────────────────────────────────────────────────
-MOVETIME             = 100    # ms per move (applied to ALL engines)
+MOVETIME             = 200    # ms per move
 
-# ── My Engines (H2H — no anchors) ────────────────────────────────────────────
+# ── Stage 7: ELO Benchmark — v312 vs Stockfish ──────────────────────────────
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v310\zchezz.exe",
-        "label":    "Zchezz-v310",
-        "tc_mode":  "movetime",
-        "tc_value": MOVETIME,          # fast: 100ms/move
-        "tc_inc":   0,
-    },
-    {
-        "path":     r"engine\c\zchezz_v309\zchezz.exe",
-        "label":    "Zchezz-v309",
+        "path":     r"engine\c\zchezz_v312\zchezz.exe",
+        "label":    "Zchezz-v312",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
     },
 ]
 
-# ── No anchors for quick H2H ─────────────────────────────────────────────────
-ANCHORS = []
+# ── Stockfish anchors ────────────────────────────────────────────────────────
+ANCHORS = [
+    {
+        "path":     r"engine\stockfish\stockfish.exe",
+        "label":    "SF-2500",
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME,
+        "tc_inc":   0,
+        "elo":      2500,
+        "options":  {"UCI_LimitStrength": "true", "UCI_Elo": "2500"},
+    },
+    {
+        "path":     r"engine\stockfish\stockfish.exe",
+        "label":    "SF-2700",
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME,
+        "tc_inc":   0,
+        "elo":      2700,
+        "options":  {"UCI_LimitStrength": "true", "UCI_Elo": "2700"},
+    },
+    {
+        "path":     r"engine\stockfish\stockfish.exe",
+        "label":    "SF-2900",
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME,
+        "tc_inc":   0,
+        "elo":      2900,
+        "options":  {"UCI_LimitStrength": "true", "UCI_Elo": "2900"},
+    },
+    {
+        "path":     r"engine\stockfish\stockfish.exe",
+        "label":    "SF-3100",
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME,
+        "tc_inc":   0,
+        "elo":      3100,
+        "options":  {"UCI_LimitStrength": "true", "UCI_Elo": "3100"},
+    },
+]
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
-GAMES_VS_EACH_ANCHOR = 0      # not used (no anchors)
-GAMES_SELF_PLAY      = 125    # 125 openings x 2 colors = 250 games
-SELF_PLAY            = True
+GAMES_VS_EACH_ANCHOR = 100    # 100 openings x 2 colors = 200 games each
+GAMES_SELF_PLAY      = 0
+SELF_PLAY            = False
 COLOR_SWAP           = True
 
-CONCURRENCY          = 15     # use 15 cores
+CONCURRENCY          = 14
 MAX_PLIES            = 400
 MOVE_TIMEOUT         = 38.0
 REPORT_PERFORMANCE_METRICS = True
@@ -70,8 +100,8 @@ OPENING_FILES        = ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
 SAVE_PGN             = True   # save games for review
 SAVE_EPD             = False  # no training data for quick tests
 RESULTS_DIR          = r"tests\quick_results"
-COUNTER_EVERY        = 10     # progress every 10 games
-REPORT_LOOPS         = 25     # cross-table every ~50 games (25 openings x 2 colors)
+COUNTER_EVERY        = 10
+REPORT_LOOPS         = 200    # report at end (200 openings)
 
 MATE_SCORE           = 999999  # sentinel value for mate scores
 

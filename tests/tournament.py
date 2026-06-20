@@ -87,7 +87,6 @@ MY_ENGINES = [
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-        "options":  {"SyzygyPath": r"tablebases"},
     },
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
@@ -95,7 +94,6 @@ MY_ENGINES = [
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-        "options":  {"SyzygyPath": r"tablebases"},
     },
 ]
 
@@ -114,9 +112,9 @@ ANCHORS = [
 ]
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
-GAMES_VS_EACH_ANCHOR = 600   # openings per MY_ENGINE×ANCHOR pair (×2 with COLOR_SWAP)
-GAMES_SELF_PLAY      = 600   # openings per MY_ENGINE×MY_ENGINE pair (×2 with COLOR_SWAP)
-SELF_PLAY            = True   # engines in MY_ENGINES play each other?
+GAMES_VS_EACH_ANCHOR = 200   # openings per MY_ENGINE×ANCHOR pair (×2 with COLOR_SWAP)
+GAMES_SELF_PLAY      = 200   # openings per MY_ENGINE×MY_ENGINE pair (×2 with COLOR_SWAP)
+SELF_PLAY            = False  # engines in MY_ENGINES play each other?
 COLOR_SWAP           = True   # repeat each opening with colors reversed?
 
 CONCURRENCY          = 14      # number of concurrent games (= worker threads)
