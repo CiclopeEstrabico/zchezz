@@ -201,16 +201,38 @@ class EngineInstance:
 
     def get_move(self, board, wtime, btime, winc, binc):
         if not self.process: self.start()
+        
+        # BULLETPROOF SYNC: stop any running search, drain its bestmove, then isready
+        self._send("stop")
+        # Drain until we see bestmove or timeout
+        t0 = time.time()
+        while time.time() - t0 < 0.5:
+            try:
+                line = self.queue.get(timeout=0.05)
+                if line.startswith("bestmove"):
+                    break  # consumed the stale bestmove
+            except Empty:
+                break  # nothing left, stop wasn't needed
+        
+        # Now isready as a hard sync barrier
+        self._send("isready")
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            try:
+                line = self.queue.get(timeout=0.1)
+                if "readyok" in line:
+                    break
+            except Empty:
+                pass
+        
+        # Final flush
         while not self.queue.empty():
             try: self.queue.get_nowait()
             except Empty: break
 
-        m_list = " ".join([m.uci() for m in board.move_stack])
-        if self.start_fen:
-            # We must apply moves on top of FEN
-            pos_cmd = f"position fen {self.start_fen}" + (f" moves {m_list}" if m_list else "")
-        else:
-            pos_cmd = f"position startpos" + (f" moves {m_list}" if m_list else "")
+        # Use FEN instead of long move list to avoid any length-related issues
+        fen = board.fen()
+        pos_cmd = f"position fen {fen}"
         self._send(pos_cmd)
         
         if self.go_cmd_override:

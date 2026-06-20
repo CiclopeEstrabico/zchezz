@@ -150,6 +150,11 @@ static int tt_hashfull(void) {
 /* ── UCI handlers ──────────────────────────────────────────────── */
 static void auto_load_nnue(void);  /* forward declaration */
 
+/* Search thread globals (declared early so cmd_position can use them) */
+static pthread_t g_search_thread;
+static int       g_searching = 0;     /* 1 while search thread is running */
+static volatile int g_stop_flag = 0;  /* shared stop flag */
+
 static void cmd_uci(void) {
     printf("id name %s %s\n", ENGINE_NAME, ENGINE_VERSION);
     printf("id author %s\n", ENGINE_AUTHOR);
@@ -180,6 +185,12 @@ static void cmd_uci(void) {
 }
 
 static void cmd_isready(void) {
+    /* Wait for any running search before responding */
+    if (g_searching) {
+        g_stop_flag = 1;
+        pthread_join(g_search_thread, NULL);
+        g_searching = 0;
+    }
     /* Auto-load NNUE if not yet loaded (e.g. no setoption was sent) */
     if (!nnue_ready()) auto_load_nnue();
     printf("readyok\n");
@@ -295,6 +306,13 @@ static void apply_moves(const char *moves_str) {
 }
 
 static void cmd_position(const char *line) {
+    /* Wait for any running search before modifying g_board */
+    if (g_searching) {
+        g_stop_flag = 1;
+        pthread_join(g_search_thread, NULL);
+        g_searching = 0;
+    }
+
     const char *p = line;
 
     if (eat(&p, "startpos")) {
@@ -422,9 +440,6 @@ static void uci_info_cb(int depth, int score, long nodes, const char *pv, int tu
 }
 
 /* ── Async search infrastructure ──────────────────────────────── */
-static pthread_t g_search_thread;
-static int       g_searching = 0;     /* 1 while search thread is running */
-static volatile int g_stop_flag = 0;  /* shared stop flag */
 
 /* Lazy SMP helper thread data */
 typedef struct {
