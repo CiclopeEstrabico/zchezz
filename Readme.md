@@ -606,12 +606,16 @@ zchezz/
 
 ## Changelog
 
+### v3.12
+- **Performance fix** — v3.11's per-Board undo stack (36 KB `UndoFrame undo[512]` embedded in Board struct) caused L1 cache thrashing, producing a ~15 ELO regression vs v3.10
+- **Pointer-based undo** — undo stack moved out of Board struct into external allocations; Board holds only a pointer (16 bytes). Main thread uses a static global; SMP helpers heap-allocate per-thread stacks
+- **Zero overhead** — single pointer dereference per make/unmake, no TLS function calls (MinGW `__emutls` avoided), NPS identical to v3.10
+- **Verified:** 37/37 perft, 70/70 UCI tests, +0.7 ±23.2 ELO vs v3.10 (500 games), MT stability confirmed (50 games 1T vs 4T)
+
 ### v3.11
 - **Lazy SMP crash fix** — moved undo stack and repetition history from global arrays into per-Board structs, eliminating thread contention that caused crashes with Threads ≥ 4
 - **TB hits reporting** — fixed `tbhits=0` in UCI info output by syncing `s_tb_hits` from per-thread search state before the info callback
-- **Thread safety** — each search thread now owns its own undo/history state; zero shared mutable state outside the lock-free TT
-- **Zero overhead** — structural changes add no performance cost: NPS identical to v3.10, confirmed across 600+ dedicated H2H games
-- **Verified:** 70/70 UCI tests, 37/37 perft checks, +44.7 ELO vs v3.09, 50/50 MT stability games with zero crashes
+- **⚠️ Regression** — embedding 36 KB undo stack in Board struct caused cache thrashing (~15 ELO loss vs v3.10); fixed in v3.12
 
 ### v3.10
 - **Staged move generation** — TT move → captures → quiets → losing captures (+21 ELO vs v3.09)
