@@ -82,19 +82,20 @@ MOVETIME             = 200    # ms per move (applied to ALL engines and anchors)
 # and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v309\zchezz.exe",
-        "label":    "Zchezz-v309",
-        "tc_mode":  "movetime",   # "depth" | "movetime" | "fixedtime"
-        "tc_value": MOVETIME,          # depth=ply, movetime=ms, fixedtime=ms initial
-        "tc_inc":   0,            # increment ms (fixedtime only)
-    },
-    {
-        "path":     r"engine\c\zchezz_v309\zchezz.exe",
-        "label":    "Zchezz-v309-TB",
+        "path":     r"engine\c\zchezz_v310\zchezz.exe",
+        "label":    "Zchezz-v310",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-        "options":  {"SyzygyPath": r"tablebases\3-4-5"},
+        "options":  {"SyzygyPath": r"tablebases"},
+    },
+    {
+        "path":     r"engine\c\zchezz_v309\zchezz.exe",
+        "label":    "Zchezz-v309",
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME,
+        "tc_inc":   0,
+        "options":  {"SyzygyPath": r"tablebases"},
     },
 ]
 
@@ -106,15 +107,6 @@ ANCHORS = [
         "label":   "SF-2800",
         "elo":     2800,
         "options": {"UCI_LimitStrength": "true", "UCI_Elo": "2800"},
-        "tc_mode":  "movetime",
-        "tc_value": MOVETIME,
-        "tc_inc":   0,
-    },
-    {
-        "path":    r"engine\stockfish\stockfish.exe",
-        "label":   "SF-3000",
-        "elo":     3000,
-        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "3000"},
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,

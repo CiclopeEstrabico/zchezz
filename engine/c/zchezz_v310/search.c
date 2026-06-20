@@ -1,0 +1,1659 @@
+/* search.c — Zchezz search layer
+ *
+ * Direct port of zchezz_worker_v146.js:
+ */
+#define _POSIX_C_SOURCE 200809L
+/*
+ *   see()           → static exchange evaluation
+ *   score_move()    → move ordering scores
+ *   eval_stm()      → NNUE or fast classical (fastEval)
+ *   qsearch()       → quiescence search
+ *   alpha_beta()    → main negamax + all pruning
+ *   search_best()   → iterative deepening + aspiration
+ */
+
+#include "search.h"
+#include "board.h"
+#include "nnue.h"
+#include "syzygy.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+
+/* ── TT (global SoA arrays) ──────────────────────────────────── */
+uint64_t TT_H[TT_SIZE];
+int32_t  TT_S[TT_SIZE];
+int32_t  TT_D[TT_SIZE];
+uint16_t TT_G[TT_SIZE];
+int32_t  TT_M[TT_SIZE];
+int32_t  TT_E[TT_SIZE];
+uint16_t TT_GEN = 0;
+
+
+
+/* Contempt value (centipawns, STM-relative).
+ * Returned instead of 0 on the first repetition (draw==3) so the engine
+ * avoids cycling in winning positions.  15cp is enough to prefer any
+ * real continuation over repeating, while still accepting a draw when
+ * actually behind.  Raise to increase aversion to draws; lower to 0
+ * to disable (reverts to flat-draw behaviour). */
+#define CONTEMPT 15
+
+/* ── LMR table ───────────────────────────────────────────────── */
+#define LMR_D 64
+#define LMR_M 128
+static uint8_t lmr_tab[LMR_D * LMR_M];
+
+/* ── MVV-LVA table ───────────────────────────────────────────── */
+/* victim 1-5, attacker 1-6  → index = victim*7+attacker */
+static int32_t MVV_LVA[7*7];
+
+/* ── SearchState — per-thread search data ─────────────────────
+ * All mutable search state that must be private to each thread
+ * in Lazy SMP.  Single-thread mode uses a single static instance.
+ * Multi-thread mode allocates one per helper on the heap.         */
+struct SearchState {
+    long   nodes;
+    long   nodes_total;
+    long   node_limit;
+    long   deadline_ms;
+    int    time_up;
+    volatile int *stop_flag;
+    long   tb_hits;
+    Move killers[MAX_PLY][2];
+    int32_t mv_history[64*64];
+    int32_t counter_move[64*64];
+    int16_t cont_hist[2][64][64*64];
+    int prev_ft[MAX_PLY];
+    int prev_to_sq[MAX_PLY];
+    int8_t sing_from[MAX_PLY];
+    int8_t sing_to[MAX_PLY];
+    int prev_static_eval[MAX_PLY];
+    Move excluded_root[MAX_MOVES];  /* TB-filtered + Multi-PV excluded moves */
+    int  excluded_root_n;
+};
+
+static SearchState g_ss;
+/* Active search state pointer — set by search_best() entry point.
+ * NOT thread-local because _Thread_local is 2x slower on MinGW/Windows.
+ * Thread safety: each thread's search_best() sets ss before entering
+ * the search loop, and the value remains stable for that thread's
+ * entire search (no concurrent writes). */
+static SearchState *ss = &g_ss;
+long s_tb_hits = 0;  /* legacy accessor for main.c */
+
+/* Syzygy probing configuration (set from UCI options) */
+int g_tb_probe_depth = 99;  /* disabled by default; set via UCI for single-game play */
+int g_tb_probe_limit = 6;   /* maximum pieces for probing */
+
+/* ── Wall clock helper ───────────────────────────────────────── */
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL);
+}
+
+static int time_up(SearchState *ss) {
+    if (ss->stop_flag && *ss->stop_flag) { ss->time_up = 1; return 1; }
+    if ((ss->nodes_total & 8191) == 0 && ss->deadline_ms > 0)
+        ss->time_up = (now_ms() >= ss->deadline_ms);
+    return ss->time_up;
+}
+
+/* ── TT helpers ──────────────────────────────────────────────── */
+static inline int32_t tt_score_store(int score, int ply) {
+    if (score >  9000) return score + ply;
+    if (score < -9000) return score - ply;
+    return score;
+}
+static inline int32_t tt_score_read(int score, int ply) {
+    if (score >  9000) return score - ply;
+    if (score < -9000) return score + ply;
+    return score;
+}
+
+/* Pack move into 32 bits — mirrors JS _packMove exactly */
+static inline int32_t pack_move(const Move *m) {
+    if (!m) return 0;
+    int ci = m->castle; /* 0-4 already */
+    return (m->from | (m->to<<6) | ((m->prom&7)<<12) |
+            (m->epc ? (1<<15) : 0) | (ci<<16));
+}
+
+static inline void unpack_move(int32_t v, Move *m) {
+    if (!v) { m->from=0; m->to=0; m->prom=0; m->epc=0; m->castle=0; m->score=0; return; }
+    m->from   = v & 63;
+    m->to     = (v >> 6) & 63;
+    m->prom   = (v >> 12) & 7;
+    m->epc    = (v >> 15) & 1;
+    m->castle = (v >> 16) & 15;
+    m->score  = 0;
+}
+
+typedef struct { int score; int depth; int flag; Move move; int static_eval; } TTE;
+
+static void tt_store(uint64_t hash, int score,
+                     int depth, int flag, const Move *move,
+                     int ply, int static_eval) {
+    int slot = (int)(hash & TT_MASK);
+    int base = slot * TT_BUCKETS;
+    int stored_score = tt_score_store(score, ply);
+    int32_t packed_df = ((depth & 0xFF) << 8) | (flag & 3);
+    int32_t packed_mv = pack_move(move);
+    int32_t se = (static_eval != TT_EVAL_NONE) ? static_eval : TT_EVAL_NONE;
+
+    /* Bucket 0: depth-preferred (replace only if deeper or same generation) */
+    int exist_depth0 = (TT_D[base] >> 8) & 0xFF;
+    if (!TT_H[base] || TT_G[base] != TT_GEN || depth >= exist_depth0) {
+        /* If bucket 0 had a valid entry being displaced, move it to bucket 1 */
+        if (TT_H[base] && TT_G[base] == TT_GEN && depth >= exist_depth0) {
+            TT_H[base+1] = TT_H[base]; TT_S[base+1] = TT_S[base];
+            TT_D[base+1] = TT_D[base]; TT_G[base+1] = TT_G[base];
+            TT_M[base+1] = TT_M[base]; TT_E[base+1] = TT_E[base];
+        }
+        TT_H[base] = hash; TT_S[base] = stored_score;
+        TT_D[base] = packed_df; TT_G[base] = TT_GEN;
+        TT_M[base] = packed_mv; TT_E[base] = se;
+        return;
+    }
+
+    /* Bucket 1: always-replace */
+    TT_H[base+1] = hash; TT_S[base+1] = stored_score;
+    TT_D[base+1] = packed_df; TT_G[base+1] = TT_GEN;
+    TT_M[base+1] = packed_mv; TT_E[base+1] = se;
+}
+
+static int tt_probe(uint64_t hash, int ply, TTE *out) {
+    int slot = (int)(hash & TT_MASK);
+    int base = slot * TT_BUCKETS;
+
+    /* Check both buckets */
+    for (int b = 0; b < TT_BUCKETS; b++) {
+        int idx = base + b;
+        if (TT_H[idx] != hash) continue;
+        if (TT_G[idx] != TT_GEN) {
+            /* Stale generation: reuse the stored move for ordering, but not the score */
+            out->score  = TT_EVAL_NONE;
+            out->depth  = 0;
+            out->flag   = TT_UPPER;
+            out->static_eval = TT_EVAL_NONE;
+            unpack_move(TT_M[idx], &out->move);
+            return 2;   /* 2 = stale hit (move only) */
+        }
+        int d = TT_D[idx];
+        out->score  = tt_score_read(TT_S[idx], ply);
+        out->depth  = (d >> 8) & 0xFF;
+        out->flag   = d & 3;
+        out->static_eval = TT_E[idx];
+        unpack_move(TT_M[idx], &out->move);
+        return 1;   /* 1 = full hit */
+    }
+    return 0;
+}
+
+/* ── Eval ────────────────────────────────────────────────────── */
+int eval_stm(Board *b) {
+    if (!nnue_ready()) {
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "[NNUE] eval called but weights not loaded — returning 0\n");
+        }
+        return 0;
+    }
+    /* Fast path: pass precomputed bb[12] and Zobrist hash directly so
+     * nnue_eval_bb can (a) skip _build_bb_from_board and (b) use a
+     * 2-slot hash cache to avoid re-projecting ext features for the
+     * same position evaluated in the same search node. */
+    return nnue_eval_bb(b->turn == COL_W ? 0 : 1, b->b, b->bb, b->hash);
+}
+
+/* ── SEE (pure bitboard — Phase 3) ────────────────────────────
+ * No mailbox copy, no see_occ_bb, no see_lva.
+ * Uses Board's bb[] arrays + magic lookups directly.
+ * X-ray attacks are uncovered when attackers are removed from occ. */
+
+/* Find all attackers of `sq` given occupancy `occ` */
+static inline uint64_t see_attackers(const Board *bd, int sq, uint64_t occ) {
+    return (bpawn_attacks_bb((uint64_t)1 << sq) & bd->bb[0])   /* WP */
+         | (wpawn_attacks_bb((uint64_t)1 << sq) & bd->bb[6])   /* BP */
+         | (NATK[sq] & (bd->bb[1] | bd->bb[7]))                /* N */
+         | (bish_attacks(sq, occ) & (bd->bb[2] | bd->bb[4] | bd->bb[8] | bd->bb[10])) /* B+Q */
+         | (rook_attacks(sq, occ) & (bd->bb[3] | bd->bb[4] | bd->bb[9] | bd->bb[10])) /* R+Q */
+         | (KATK[sq] & (bd->bb[5] | bd->bb[11]));              /* K */
+}
+
+static int see_board(const Board *bd, int from, int to, int is_epc) {
+    if (!bd->b[to] && !is_epc) return 0;
+
+    int gained[32];
+    int ng = 0;
+
+    /* Initial capture value */
+    int attacker_type = PC_TYPE(bd->b[from]);
+    if (is_epc)
+        gained[ng++] = MV_TAB[1]; /* pawn captured via ep */
+    else
+        gained[ng++] = MV_TAB[PC_TYPE(bd->b[to])];
+
+    int last_cap_val = MV_TAB[attacker_type];
+
+    /* Build occupancy from board's cached value, modified for the initial move */
+    uint64_t occ = bd->occ;
+    occ &= ~((uint64_t)1 << from);  /* remove attacker from its origin */
+    occ |=  ((uint64_t)1 << to);    /* attacker now on target */
+    if (is_epc) {
+        int cap_sq = PC_COLOR(bd->b[from]) == COL_W ? to + 8 : to - 8;
+        occ &= ~((uint64_t)1 << cap_sq);
+    }
+
+    int col = PC_COLOR(bd->b[from]) ^ 24; /* opponent moves next */
+
+    /* Piece bitboard indices by color: [COL_W] = 0..5, [COL_B] = 6..11
+     * Piece type order for LVA: pawn(1)=bb[0/6], knight(2)=bb[1/7],
+     * bishop(3)=bb[2/8], rook(4)=bb[3/9], queen(5)=bb[4/10], king(6)=bb[5/11] */
+    static const int VAL_ORDER[6] = {0, 1, 2, 3, 4, 5}; /* index offsets for P,N,B,R,Q,K */
+
+    while (ng < 32) {
+        /* Refresh attackers with updated occupancy (reveals X-ray attacks) */
+        uint64_t attackers = see_attackers(bd, to, occ);
+
+        /* Filter to only the current side's pieces that are still on the board */
+        int base = (col == COL_W) ? 0 : 6;
+        uint64_t side_atk = attackers & ((col == COL_W) ? (bd->bb[0]|bd->bb[1]|bd->bb[2]|bd->bb[3]|bd->bb[4]|bd->bb[5])
+                                                        : (bd->bb[6]|bd->bb[7]|bd->bb[8]|bd->bb[9]|bd->bb[10]|bd->bb[11]));
+        side_atk &= occ; /* only pieces still on the board */
+
+        if (!side_atk) break;
+
+        /* Find least valuable attacker */
+        int found_sq = -1;
+        int found_val = 0;
+        for (int t = 0; t < 6; t++) {
+            uint64_t piece_atk = side_atk & bd->bb[base + VAL_ORDER[t]];
+            if (piece_atk) {
+                found_sq = __builtin_ctzll(piece_atk);
+                found_val = MV_TAB[t + 1]; /* type 1..6 */
+                break;
+            }
+        }
+        if (found_sq < 0) break;
+
+        gained[ng++] = last_cap_val;
+        last_cap_val = found_val;
+
+        /* Remove this attacker from occupancy */
+        occ &= ~((uint64_t)1 << found_sq);
+
+        col ^= 24;
+    }
+
+    /* Retrograde minimax */
+    int sc = 0;
+    for (int i = ng - 1; i >= 1; i--)
+        sc = gained[i] - sc > 0 ? gained[i] - sc : 0;
+    return gained[0] - sc;
+}
+
+
+/* ── Move scoring + sorting ──────────────────────────────────── */
+/*
+ * Move ordering priority (descending score):
+ *   2 000 000   PV / TT move
+ *   1 700 000+  Promotions
+ *   1 600 000+  Winning/equal captures (SEE >= 0)
+ *     900 000   Killer 0
+ *     800 000   Killer 1
+ *     780 000   Counter move
+ *     750 000+  Rook-to-7th / king-zone attack + history
+ *     600 000+  History-positive quiet moves
+ *     300 000   Quiet moves with zero/negative history (floor)
+ *     100 000+  Losing captures (SEE < 0, score 100000..200000)
+ *
+ * The 300 000 floor for quiets keeps them above losing captures
+ * (which cap at 200 000) regardless of CMH sign.
+ *
+ * `cmh0` = ss->prev_to_sq[ply-1],  -1 if not available
+ * `cmh1` = ss->prev_to_sq[ply-2],  -1 if not available
+ */
+static int score_move(SearchState *ss, const Move *m, const Board *bd, int ply,
+                      const Move *pv_move, int ok_sq,
+                      int prev_ft_val, int cmh0, int cmh1) {
+    const uint8_t *b = bd->b;
+    int mfr = m->from, mto = m->to;
+    if (pv_move && mfr==pv_move->from && mto==pv_move->to) return 2000000;
+
+    uint8_t cap = b[mto];
+    if (cap || m->epc) {
+        int victim   = cap ? PC_TYPE(cap) : 1;
+        int attacker = PC_TYPE(b[mfr]);
+        int ep_bonus = m->epc ? 60 : 0;
+        if (MV_TAB[attacker] <= MV_TAB[victim])
+            return 1600000 + 1000 + MVV_LVA[victim*7+attacker] + ep_bonus;
+        int sv = see_board(bd, mfr, mto, m->epc);
+        if (sv >= 0)
+            return 1600000 + sv*10 + MVV_LVA[victim*7+attacker] + ep_bonus;
+        else {
+            /* Losing capture: 100000..200000 */
+            int s = 200000 + sv*2;
+            return s > 100000 ? s : 100000;
+        }
+    }
+    if (m->prom)   return 1700000 + MV_TAB[m->prom];
+    if (m->castle) return 1500000;
+
+    /* ── Quiet move scoring ──────────────────────────────────────
+     * Combined bonus = history + CMH-slot-0 + CMH-slot-1.
+     * Each component is int16_t (-32000..32000); combined fits int32.
+     * We add a base of 300 000 so that a worst-case combined score of
+     * 300 000 + 3*(-32000) = 204 000 stays above losing captures.     */
+    if (ss->killers[ply][0].from==mfr && ss->killers[ply][0].to==mto &&
+        (ss->killers[ply][0].from||ss->killers[ply][0].to)) return 900000;
+    if (ss->killers[ply][1].from==mfr && ss->killers[ply][1].to==mto &&
+        (ss->killers[ply][1].from||ss->killers[ply][1].to)) return 800000;
+    if (prev_ft_val >= 0 && ss->counter_move[prev_ft_val] == (mfr*64+mto)) return 780000;
+
+    int ft = mfr*64 + mto;
+    int h  = ss->mv_history[ft];
+    int c0 = (cmh0 >= 0) ? ss->cont_hist[0][cmh0][ft] : 0;
+    int c1 = (cmh1 >= 0) ? ss->cont_hist[1][cmh1][ft] : 0;
+    int combined = h + c0 + c1;   /* range: -96000..96000 */
+
+    /* Rook-to-7th / king-zone attack: bump into a named tier */
+    uint8_t piece = b[mfr];
+    if (piece && PC_TYPE(piece)==4) {
+        int to_rank = mto>>3;
+        if ((PC_COLOR(piece)==COL_W && to_rank==1) ||
+            (PC_COLOR(piece)==COL_B && to_rank==6))
+            return 700000 + combined;
+    }
+    if (piece && ok_sq >= 0) {
+        int kr=ok_sq>>3,kc=ok_sq&7,tr=mto>>3,tc=mto&7;
+        int dr=tr-kr; if(dr<0)dr=-dr;
+        int dc=tc-kc; if(dc<0)dc=-dc;
+        if ((dr>dc?dr:dc) <= 2)
+            return 600000 + combined;
+    }
+
+    /* General quiet: base 200 500 + combined bonus.
+     * Range with worst combined (-48000): 200500 - 48000 = 152500 — above
+     * the losing-capture floor (100 000) but below the best losing captures
+     * (~200 000).  Moves that have been penalised repeatedly will therefore
+     * naturally sort below bad captures, restoring the pruning density of
+     * the original code while still honouring the CMH signal.
+     *
+     * Clamped from below at 50 000 to avoid negative scores in the array
+     * (score field is int32, so no overflow, but very negative scores could
+     * confuse pick-best in qsearch).  */
+    int s = 200500 + combined;
+    return s > 50000 ? s : 50000;
+}
+
+/* Insertion sort — stable, good for small n (typically < 50 moves) */
+static void sort_moves(SearchState *ss, Move *moves, int n, const Board *bd, int ply,
+                       const Move *pv_move, int ok_sq, int prev_ft_val,
+                       int cmh0, int cmh1) {
+    for (int i = 0; i < n; i++)
+        moves[i].score = score_move(ss, &moves[i], bd, ply, pv_move, ok_sq,
+                                    prev_ft_val, cmh0, cmh1);
+    for (int i = 1; i < n; i++) {
+        Move m = moves[i]; int j = i-1;
+        while (j >= 0 && moves[j].score < m.score) { moves[j+1]=moves[j]; j--; }
+        moves[j+1] = m;
+    }
+}
+
+/* ── Quiescence search ───────────────────────────────────────── */
+static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
+    if (ply >= MAX_PLY-1) return eval_stm(b);
+    if (ss->nodes >= ss->node_limit || time_up(ss)) return eval_stm(b);
+    ss->nodes++; ss->nodes_total++;
+
+    /* ── TT probe in qsearch ─────────────────────────────────── */
+    uint64_t qs_hash = b->hash;
+    TTE qs_tte;
+    int qs_tte_hit = tt_probe(qs_hash, ply, &qs_tte);
+    Move qs_tt_move = {0};
+    if (qs_tte_hit) {
+        qs_tt_move = qs_tte.move;
+        if (qs_tte_hit == 1 && qs_tte.depth >= 0) {
+            /* TT cutoff in qsearch (depth 0 = qsearch depth) */
+            if (qs_tte.flag == TT_EXACT) return qs_tte.score;
+            if (qs_tte.flag == TT_LOWER && qs_tte.score >= beta) return qs_tte.score;
+            if (qs_tte.flag == TT_UPPER && qs_tte.score <= alpha) return qs_tte.score;
+        }
+    }
+
+    int in_check = board_in_check(b);
+    if (in_check) {
+        /* In check: generate all moves */
+        Move moves[MAX_MOVES];
+        int n = board_gen_moves(b, moves);
+        int ok_sq = b->turn==COL_W ? b->bk : b->wk;
+        sort_moves(ss, moves, n, b, ply, NULL, ok_sq, -1, -1, -1);
+        int best = -99999, legal = 0;
+        Move best_move_qs = {0};
+        for (int i = 0; i < n; i++) {
+            board_make(b, &moves[i]);
+            int prev_turn = b->turn ^ 24;
+            if (board_is_attacked(b, prev_turn==COL_W ? b->wk : b->bk, b->turn)) {
+                board_unmake(b); continue;
+            }
+            legal++;
+            int sc = -qsearch(ss, b, -beta, -alpha, ply+1);
+            board_unmake(b);
+            if (sc > best) { best = sc; best_move_qs = moves[i]; }
+            if (sc > alpha) alpha = sc;
+            if (alpha >= beta) {
+                return beta;
+            }
+        }
+        if (!legal) return -19000 + ply;   /* checkmate */
+        /* Store result for check evasion — only cutoffs worth storing */
+        return best;
+    }
+
+    /* Use TT-stored eval as stand-pat if available */
+    int stand = (qs_tte_hit && qs_tte.static_eval != TT_EVAL_NONE)
+                 ? qs_tte.static_eval : eval_stm(b);
+    int qs_best = stand;
+    int qs_orig_alpha = alpha;
+
+    if (stand >= beta) return beta;
+    /* Delta pruning */
+    {
+        int has_passer = (b->turn==COL_W) ? !!(b->bb[0] & 0x000000000000FF00ULL)
+                                           : !!(b->bb[6] & 0x00FF000000000000ULL);
+        int delta_margin = has_passer ? MV_TAB[5]*2+50 : MV_TAB[5]+50;
+        if (stand + delta_margin < alpha) return alpha;
+    }
+    if (stand > alpha) alpha = stand;
+
+    /* Captures + promotions — score all first, then pick-best */
+    Move moves[MAX_MOVES];
+    int n = board_gen_captures(b, moves);
+    int ok_sq = b->turn==COL_W ? b->bk : b->wk;
+    Move best_move_qs = {0};
+
+    /* Use TT move for move ordering boost */
+    const Move *qs_pv = (qs_tt_move.from || qs_tt_move.to) ? &qs_tt_move : NULL;
+
+    for (int i = 0; i < n; i++) {
+        /* SEE pruning: mark bad captures */
+        if (!moves[i].prom && !moves[i].epc) {
+            int sv = see_board(b, moves[i].from, moves[i].to, 0);
+            if (sv < 0) { moves[i].score = -99999; continue; }
+        }
+        /* Delta pruning per move */
+        uint8_t cap = b->b[moves[i].to];
+        int gain = moves[i].epc ? MV_TAB[1] : cap ? MV_TAB[PC_TYPE(cap)] : 0;
+        if (stand + gain + 50 < alpha && !moves[i].prom) { moves[i].score = -99999; continue; }
+        moves[i].score = score_move(ss, &moves[i], b, ply, qs_pv, ok_sq, -1, -1, -1);
+    }
+
+    for (int i = 0; i < n; i++) {
+        /* Pick-best */
+        int best_idx = i;
+        for (int j = i+1; j < n; j++)
+            if (moves[j].score > moves[best_idx].score) best_idx = j;
+        if (moves[best_idx].score <= -99999) break;
+        if (best_idx != i) { Move tmp = moves[i]; moves[i] = moves[best_idx]; moves[best_idx] = tmp; }
+
+        board_make(b, &moves[i]);
+        int mover_col = b->turn ^ 24;
+        int king_sq   = mover_col == COL_W ? b->wk : b->bk;
+        if (board_is_attacked(b, king_sq, b->turn)) { board_unmake(b); continue; }
+        int sc = -qsearch(ss, b, -beta, -alpha, ply+1);
+        board_unmake(b);
+
+        if (sc > qs_best) { qs_best = sc; best_move_qs = moves[i]; }
+        if (sc >= beta) {
+            return beta;
+        }
+        if (sc > alpha) alpha = sc;
+    }
+
+    /* Don't store non-cutoff qsearch results — they pollute the TT
+     * with depth-0 entries that displace more valuable deeper entries */
+
+    return alpha;
+}
+
+/* ── Alpha-Beta ──────────────────────────────────────────────── */
+/* Multi-PV root exclusion — forward declarations (defined after search_reset) */
+static int  is_excluded_root(SearchState *ss, const Move *m);
+
+/* Forward declaration */
+static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
+                      Move *pv, int *pv_len, int ply, int in_check_hint);
+
+static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
+                      Move *pv, int *pv_len, int ply, int in_check_hint) {
+    if (ply >= MAX_PLY-1) { *pv_len=0; return eval_stm(b); }
+    if (ss->nodes >= ss->node_limit || time_up(ss)) {
+        *pv_len=0;
+        return depth<=0 ? eval_stm(b) : qsearch(ss,b,alpha,beta,ply);
+    }
+    ss->nodes++; ss->nodes_total++;
+    *pv_len = 0;
+
+    int mate_val = 19000 - ply;
+    if (alpha >  mate_val) return  mate_val;
+    if (beta  < -mate_val) return -mate_val;
+
+    /* Draw check — only inside the tree (ply > 0).
+     * At the root (ply == 0) we never return early: the arbiter (chess.js /
+     * tournament.js) is responsible for claiming draws; the engine must always
+     * return a legal move so the arbiter can decide.  Returning 0 at the root
+     * left best_move as a null struct → "0000" sent to the UI → false draw.
+     *
+     * Sign: alpha_beta is negamax — the return value is negated by the parent.
+     * So returning -CONTEMPT here means the PARENT (the side that chose to
+     * play into this repeated position) sees +CONTEMPT — i.e. it looks good
+     * to repeat, which is wrong.  We must return +CONTEMPT so the parent sees
+     * -CONTEMPT (slightly bad for the side that moves into the repetition).
+     *
+     * draw==2 (true 3-fold) and draw==1 (50-move): return 0 exactly — these
+     * are legally drawn positions; the arbiter will claim it anyway.
+     * draw==3 (1st repetition): return +CONTEMPT so the mover into this
+     * position is penalised, discouraging repetition when ahead. */
+    if (ply > 0) {
+        int draw = board_is_draw(b);
+        if (draw == 2 || draw == 1) return 0;       /* true 3-fold / 50-move */
+        if (draw == 3) return CONTEMPT;              /* penalise the mover into repetition */
+    }
+
+    /* ── Syzygy WDL probe (non-root, Stockfish-style with TT caching) ──
+     * Probe TB once, store result in TT with special depth=127.
+     * On revisits, the TT probe above will find the cached result and
+     * cut without touching disk — eliminating the I/O cost that was
+     * causing -41 ELO in earlier versions. */
+    if (ply > 0 && depth >= g_tb_probe_depth) {
+        int npieces = __builtin_popcountll(b->occ);
+        if (npieces <= g_tb_probe_limit) {
+            int wdl;
+            if (syzygy_probe_wdl(b, &wdl)) {
+                ss->tb_hits++;
+                int tb_score;
+                int tb_flag;
+                switch (wdl) {
+                    case 4: /* TB_WIN */
+                        tb_score = 18000 - ply;
+                        tb_flag = TT_LOWER;  /* score is a lower bound */
+                        break;
+                    case 3: /* TB_CURSED_WIN */
+                        tb_score = 1;
+                        tb_flag = TT_EXACT;
+                        break;
+                    case 2: /* TB_DRAW */
+                        tb_score = 0;
+                        tb_flag = TT_EXACT;
+                        break;
+                    case 1: /* TB_BLESSED_LOSS */
+                        tb_score = -1;
+                        tb_flag = TT_EXACT;
+                        break;
+                    case 0: /* TB_LOSS */
+                    default:
+                        tb_score = -18000 + ply;
+                        tb_flag = TT_UPPER;  /* score is an upper bound */
+                        break;
+                }
+
+                /* Cache in TT with depth=127 so it persists and outranks
+                 * any search-based entry. No move stored (NULL). */
+                tt_store(b->hash, tb_score, 127, tb_flag, NULL, ply, TT_EVAL_NONE);
+
+                /* Use for cutoff based on bound type */
+                if (tb_flag == TT_EXACT) return tb_score;
+                if (tb_flag == TT_LOWER && tb_score >= beta) return tb_score;
+                if (tb_flag == TT_UPPER && tb_score <= alpha) return tb_score;
+                /* Otherwise let search continue — TB result is cached
+                 * for future visits to this position. */
+            }
+        }
+    }
+
+    /* TT probe */
+    TTE tte; int tte_hit = 0;
+    Move pv_move = {0};
+    tte_hit = tt_probe(b->hash, ply, &tte);
+    if (tte_hit) {
+        pv_move = tte.move;   /* always use the stored move for ordering */
+        /* Skip TT cutoffs at ply 0 when Multi-PV exclusion is active:
+         * the stored score was computed with a different root move set. */
+        if (tte_hit == 1 && tte.depth >= depth && !(ply == 0 && ss->excluded_root_n > 0)) {
+            /* Full hit — can use score for cutoff */
+            if (tte.flag == TT_EXACT) return tte.score;
+            if (tte.flag == TT_LOWER && tte.score >= beta) return tte.score;
+            if (tte.flag == TT_UPPER && tte.score <= alpha) return tte.score;
+        }
+    }
+
+    if (depth <= 0) return qsearch(ss, b, alpha, beta, ply);
+
+    int in_check = in_check_hint >= 0 ? in_check_hint : board_in_check(b);
+    if (in_check) depth++;
+
+    int is_pv = (beta - alpha > 1);
+    int static_eval = TT_EVAL_NONE;
+    int raw_eval = TT_EVAL_NONE;  /* uncorrected eval for improving flag */
+    if (!in_check) {
+        raw_eval = (tte_hit && tte.static_eval != TT_EVAL_NONE)
+                    ? tte.static_eval : eval_stm(b);
+        static_eval = raw_eval;
+        /* TT-score correction: use TT score as better eval estimate for pruning.
+         * This is the "can_use_tt_value" technique from Stockfish. */
+        if (tte_hit == 1 && tte.score != TT_EVAL_NONE) {
+            if (tte.flag == TT_EXACT ||
+                (tte.flag == TT_LOWER && tte.score > static_eval) ||
+                (tte.flag == TT_UPPER && tte.score < static_eval)) {
+                static_eval = tte.score;
+            }
+        }
+    }
+
+    /* Improving flag — uses raw_eval (uncorrected) for consistency across plies */
+    int improving = 0;
+    if (!in_check) {
+        ss->prev_static_eval[ply] = raw_eval;   /* store raw, not TT-corrected */
+        if (ply >= 2 && ss->prev_static_eval[ply-2] != TT_EVAL_NONE)
+            improving = raw_eval > ss->prev_static_eval[ply-2];
+    } else {
+        ss->prev_static_eval[ply] = TT_EVAL_NONE;
+    }
+
+    /* Razoring */
+    if (!in_check && !is_pv && depth==1 && static_eval+200 < alpha) {
+        int qs = qsearch(ss, b, alpha-1, alpha, ply);
+        if (qs < alpha) return qs;
+    }
+
+    /* Reverse Futility Pruning — extended to depth 9 */
+    if (!in_check && !is_pv && depth>=2 && depth<=9 && beta<18000 && static_eval<18000) {
+        int rfp_margin = depth*90 - (improving ? 50 : 0);
+        if (static_eval - rfp_margin >= beta) return static_eval;
+    }
+
+    /* Null Move Pruning */
+    int not_endgame = 0;
+    { uint64_t *bb = b->bb;
+      /* New layout: bb[0]=WP bb[1]=WN bb[2]=WB bb[3]=WR bb[4]=WQ bb[5]=WK
+       *             bb[6]=BP bb[7]=BN bb[8]=BB bb[9]=BR bb[10]=BQ bb[11]=BK */
+      if (b->turn==COL_W) {
+          not_endgame = bb[4]||bb[3]||((__builtin_popcountll(bb[1])+__builtin_popcountll(bb[2]))>=2);
+      } else {
+          not_endgame = bb[10]||bb[9]||((__builtin_popcountll(bb[7])+__builtin_popcountll(bb[8]))>=2);
+      }
+    }
+    if (!in_check && !is_pv && depth>=3 && ply>0 && not_endgame && static_eval>=beta) {
+        /* NMP reduction: base 3 + depth/3, capped at 6.
+         * Add +1 if static_eval is much above beta (eval margin bonus). */
+        int R = 3 + depth / 3;
+        if (R > 6) R = 6;
+        if (static_eval - beta > 200) R += 1;
+        /* Make null move */
+        uint64_t save_hash = b->hash;
+        int8_t   save_ep   = b->ep;
+        int      save_turn = b->turn;
+        int      save_hm   = b->hm;
+        if (b->ep >= 0) { b->hash^=ZR_ep[b->ep&7]; b->ep=-1; }
+        b->hash ^= ZR_side; b->turn ^= 24;
+        b->hm++;
+        /* Increment global hist so board_is_draw works.
+         * Guard against overflow: if the table is full, skip the write
+         * (repetition detection will be incomplete but won't corrupt memory). */
+        int hist_pushed = 0;
+        if (g_hist_len < HIST_SIZE) {
+            g_hist[g_hist_len] = b->hash;
+            g_hist_len++; hist_pushed = 1;
+        }
+        Move dummy_pv[MAX_PLY]; int dummy_len=0;
+        int null_score = -alpha_beta(ss, b, depth-1-R, -beta, -beta+1, dummy_pv, &dummy_len, ply+1, -1);
+        if (hist_pushed) g_hist_len--;
+        b->turn = save_turn; b->ep = save_ep; b->hash = save_hash; b->hm = (uint8_t)save_hm;
+        if (null_score >= beta) return beta;
+    }
+
+    /* ProbCut ────────────────────────────────────────────────────
+     * At high depths, do a shallow search with a tighter beta.
+     * If it fails high there it almost certainly fails high at
+     * full depth — prune the node entirely.
+     *
+     * Conditions mirror Stockfish-lite practice:
+     *   • depth >= 5  (not worth it below)
+     *   • not in check (static_eval must be meaningful)
+     *   • not PV (we don't prune PV nodes)
+     *   • not near mate
+     *   • enabled in endgames too (null move is disabled there,
+     *     so ProbCut is the only forward-pruning in endgames) */
+    if (!in_check && !is_pv && depth >= 5 && beta < 18000 && ply > 0) {
+        int pc_beta  = beta + 200;
+        int pc_depth = depth - 4;   /* shallow probe: depth-4, min 1 */
+        if (pc_depth < 1) pc_depth = 1;
+
+        /* Generate captures + promotions only */
+        Move pc_moves[MAX_MOVES];
+        int  pc_n = board_gen_captures(b, pc_moves);
+        /* Score and sort (reuse existing move scorer) */
+        int pc_ok = b->turn == COL_W ? b->bk : b->wk;
+        for (int pi = 0; pi < pc_n; pi++)
+            pc_moves[pi].score = score_move(ss, &pc_moves[pi], b, ply,
+                                            NULL, pc_ok, -1, -1, -1);
+        for (int pi = 1; pi < pc_n; pi++) {
+            Move tmp_m = pc_moves[pi]; int pj = pi-1;
+            while (pj >= 0 && pc_moves[pj].score < tmp_m.score)
+                { pc_moves[pj+1] = pc_moves[pj]; pj--; }
+            pc_moves[pj+1] = tmp_m;
+        }
+
+        for (int pi = 0; pi < pc_n; pi++) {
+            Move *pm = &pc_moves[pi];
+            /* Skip bad captures (SEE < 0 relative to pc_beta margin) */
+            if (!pm->prom && !pm->epc) {
+                int sv = see_board(b, pm->from, pm->to, 0);
+                if (sv < pc_beta - static_eval) continue;
+            }
+
+            board_make(b, pm);
+            /* Legality */
+            int mover_col_pc = b->turn ^ 24;
+            int king_sq_pc   = mover_col_pc == COL_W ? b->wk : b->bk;
+            if (board_is_attacked(b, king_sq_pc, b->turn)) { board_unmake(b); continue; }
+
+            /* Quick qsearch verification, then shallow alpha_beta */
+            int pc_sc = -qsearch(ss, b, -pc_beta, -pc_beta+1, ply+1);
+            if (pc_sc >= pc_beta) {
+                Move pc_pv[MAX_PLY]; int pc_len = 0;
+                pc_sc = -alpha_beta(ss, b, pc_depth, -pc_beta, -pc_beta+1,
+                                    pc_pv, &pc_len, ply+1, -1);
+            }
+            board_unmake(b);
+
+            if (pc_sc >= pc_beta) return pc_sc;
+        }
+    }
+
+    /* IIR */
+    if (!pv_move.from && !pv_move.to && depth>=4 && !in_check && depth-1>=2) depth--;
+
+    /* Singular extension */
+    int sing_ext = 0;
+    if (!in_check && depth>=7 && tte_hit && tte.depth>=depth-4 &&
+        ss->sing_from[ply]<0 && ply>0 && (tte.flag==TT_EXACT||tte.flag==TT_LOWER)) {
+        int s_beta  = tte.score - depth*2; if (s_beta < -18000) s_beta = -18000;
+        int s_depth = (depth>>1)-1; if (s_depth < 1) s_depth = 1;
+        ss->sing_from[ply] = (int8_t)pv_move.from;
+        ss->sing_to  [ply] = (int8_t)pv_move.to;
+        Move sp_pv[MAX_PLY]; int sp_len=0;
+        int se_score = alpha_beta(ss, b, s_depth, s_beta-1, s_beta, sp_pv, &sp_len, ply, -1);
+        ss->sing_from[ply] = -1; ss->sing_to[ply] = -1;
+        if (se_score < s_beta) sing_ext = 1;
+        else if (s_beta >= beta) return s_beta;
+    }
+
+    /* ── Staged move generation (v310) ──────────────────────────────
+     * Instead of generating all moves upfront, generate in stages:
+     *   1. TT/PV move (no generation needed)
+     *   2. Captures + promotions (board_gen_captures)
+     *   3. Killers + counter move
+     *   4. Quiet moves (board_gen_quiets)
+     *   5. Losing captures (deferred from stage 2)
+     * Score moves using the same score_move function as v309. */
+    int ok_sq = b->turn==COL_W ? b->bk : b->wk;
+    int cur_prev_ft = ply > 0 ? ss->prev_ft[ply-1] : -1;
+    int cmh0 = ply >= 1 ? ss->prev_to_sq[ply-1] : -1;
+    int cmh1 = ply >= 2 ? ss->prev_to_sq[ply-2] : -1;
+    const Move *pv_ptr = (pv_move.from||pv_move.to) ? &pv_move : NULL;
+
+    /* LMP limits */
+    static const int lmp_limit[8] = {0,10,18,26,36,48,62,78};
+    int fut_adj = improving ? 0 : 50;
+    static const int fut_base[9] = {0,150,300,450,600,750,900,1050,1200};
+
+    int best = -99999, flag = TT_UPPER;
+    Move best_move = {0};
+    int legal_count = 0, quiet_count = 0;
+    Move child_pv[MAX_PLY]; int child_len = 0;
+
+    /* Track quiet moves searched for history penalty */
+    Move searched_quiets[64];
+    int n_searched_quiets = 0;
+
+    /* ── STAGE 1: TT/PV Move ────────────────────────────────────── */
+    int tt_tried = 0;
+    if (pv_ptr) {
+        Move *m = (Move *)pv_ptr;  /* safe: we only read */
+        int mfr = m->from, mto = m->to;
+        int is_capture = !!(b->b[mto] || m->epc);
+        int is_promo   = !!m->prom;
+        int is_castle  = !!m->castle;
+        int is_quiet   = !is_capture && !is_promo && !is_castle;
+
+        /* Skip singular move */
+        if (!(ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply])) {
+            board_make(b, m);
+            __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+            ss->prev_ft[ply]    = mfr*64 + mto;
+            ss->prev_to_sq[ply] = mto;
+
+            int mover_col = b->turn ^ 24;
+            int king_sq   = mover_col == COL_W ? b->wk : b->bk;
+            if (!board_is_attacked(b, king_sq, b->turn)) {
+                /* Multi-PV: skip excluded root moves */
+                if (ply == 0 && ss->excluded_root_n > 0 && is_excluded_root(ss, m)) {
+                    board_unmake(b);
+                } else {
+                    tt_tried = 1;
+                    legal_count++;
+
+                    int gives_check = 0;
+                    { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
+                      int gdr=((m->to>>3)-(gksq>>3)); if(gdr<0)gdr=-gdr;
+                      int gdc=((m->to&7)-(gksq&7));   if(gdc<0)gdc=-gdc;
+                      if (gpt>=3||gpt==2||m->prom||(gdr>gdc?gdr:gdc)<=2)
+                          gives_check = board_in_check(b);
+                    }
+
+                    int check_ext = 0;
+                    if (in_check && depth==1) check_ext=1;
+                    if (sing_ext) check_ext = check_ext>1?check_ext:1;
+                    if (!check_ext && !in_check) {
+                        uint8_t pc = b->b[m->to];
+                        if (pc && PC_TYPE(pc)==1) {
+                            int to_rank = m->to >> 3;
+                            if ((PC_COLOR(pc)==COL_W && to_rank==1) ||
+                                (PC_COLOR(pc)==COL_B && to_rank==6))
+                                check_ext = 1;
+                        }
+                    }
+
+                    int sc;
+                    child_len = 0;
+                    sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+                    board_unmake(b);
+
+                    if (is_quiet && n_searched_quiets < 64 && sc <= alpha)
+                        searched_quiets[n_searched_quiets++] = *m;
+
+                    if (sc > best) {
+                        best = sc; best_move = *m;
+                        if (sc > alpha) {
+                            alpha = sc; flag = TT_EXACT;
+                            pv[0] = *m;
+                            memcpy(pv+1, child_pv, child_len * sizeof(Move));
+                            *pv_len = child_len + 1;
+                        }
+                    }
+                    if (alpha >= beta) goto cutoff;
+                }
+            } else {
+                board_unmake(b);
+            }
+        }
+    }
+
+    /* ── STAGE 2: Generate captures + promotions, score, pick-best ── */
+    {
+        Move caps[MAX_MOVES];
+        int n_caps = board_gen_captures(b, caps);
+        /* Score captures */
+        for (int i = 0; i < n_caps; i++)
+            caps[i].score = score_move(ss, &caps[i], b, ply, pv_ptr, ok_sq,
+                                       cur_prev_ft, cmh0, cmh1);
+
+        /* Winning/equal captures */
+        Move bad_caps[MAX_MOVES];
+        int n_bad = 0;
+
+        for (int i = 0; i < n_caps; i++) {
+            /* Pick-best */
+            int best_idx = i;
+            for (int j = i+1; j < n_caps; j++)
+                if (caps[j].score > caps[best_idx].score) best_idx = j;
+            if (best_idx != i) {
+                Move tmp = caps[i]; caps[i] = caps[best_idx]; caps[best_idx] = tmp;
+            }
+
+            Move *m = &caps[i];
+            int mfr = m->from, mto = m->to;
+            /* Skip if this is the TT move (already tried) */
+            if (tt_tried && pv_ptr && mfr==pv_ptr->from && mto==pv_ptr->to && m->prom==pv_ptr->prom)
+                continue;
+
+            int is_capture = !!(b->b[mto] || m->epc);
+            int is_promo   = !!m->prom;
+
+            /* Defer losing captures */
+            if (is_capture && !is_promo && m->score >= 100000 && m->score <= 200000) {
+                bad_caps[n_bad++] = *m;
+                continue;
+            }
+
+            /* SEE pruning on losing captures */
+            if (!in_check && is_capture && !is_promo && legal_count>0 && depth>2 && !is_pv) {
+                if (m->score < 1600000) {
+                    int sv = (m->score - 200000) / 2;
+                    int see_thresh = depth<=4 ? -80 : depth<=6 ? -120 : -160;
+                    if (sv < see_thresh) {
+                        int tr=mto>>3,tc=mto&7,kr=ok_sq>>3,kc=ok_sq&7;
+                        int dr=tr-kr;if(dr<0)dr=-dr;
+                        int dc=tc-kc;if(dc<0)dc=-dc;
+                        if ((dr>dc?dr:dc) > 1) continue;
+                    }
+                }
+            }
+
+            /* Skip singular move */
+            if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
+
+            board_make(b, m);
+            __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+            ss->prev_ft[ply]    = mfr*64 + mto;
+            ss->prev_to_sq[ply] = mto;
+
+            int mover_col = b->turn ^ 24;
+            int king_sq   = mover_col == COL_W ? b->wk : b->bk;
+            if (board_is_attacked(b, king_sq, b->turn)) { board_unmake(b); continue; }
+
+            if (ply == 0 && ss->excluded_root_n > 0 && is_excluded_root(ss, m)) {
+                board_unmake(b); continue;
+            }
+
+            legal_count++;
+
+            int gives_check = 0;
+            { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
+              int gdr=((m->to>>3)-(gksq>>3)); if(gdr<0)gdr=-gdr;
+              int gdc=((m->to&7)-(gksq&7));   if(gdc<0)gdc=-gdc;
+              if (gpt>=3||gpt==2||m->prom||(gdr>gdc?gdr:gdc)<=2)
+                  gives_check = board_in_check(b);
+            }
+
+            int check_ext = 0;
+            if (in_check && depth==1) check_ext=1;
+            if (sing_ext && pv_move.from==m->from && pv_move.to==m->to)
+                check_ext = check_ext>1?check_ext:1;
+            if (!check_ext && !in_check) {
+                uint8_t pc = b->b[m->to];
+                if (pc && PC_TYPE(pc)==1) {
+                    int to_rank = m->to >> 3;
+                    if ((PC_COLOR(pc)==COL_W && to_rank==1) ||
+                        (PC_COLOR(pc)==COL_B && to_rank==6))
+                        check_ext = 1;
+                }
+            }
+
+            int sc;
+            child_len = 0;
+            if (legal_count == 1) {
+                sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+            } else {
+                int reduce = 0;
+                /* LMR for losing captures */
+                if (is_capture && !is_promo && depth>=3 && legal_count>=4 && !in_check) {
+                    if (m->score >= 100000 && m->score <= 200000) reduce = 1;
+                }
+                Move null_pv[MAX_PLY]; int null_len=0;
+                sc = -alpha_beta(ss, b, depth-1-reduce+check_ext, -alpha-1, -alpha, null_pv, &null_len, ply+1, gives_check);
+                if (sc > alpha && reduce > 0) {
+                    sc = -alpha_beta(ss, b, depth-1+check_ext, -alpha-1, -alpha, null_pv, &null_len, ply+1, gives_check);
+                }
+                if (sc > alpha && sc < beta) {
+                    sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+                }
+            }
+            board_unmake(b);
+
+            if (sc > best) {
+                best = sc; best_move = *m;
+                if (sc > alpha) {
+                    alpha = sc; flag = TT_EXACT;
+                    pv[0] = *m;
+                    memcpy(pv+1, child_pv, child_len * sizeof(Move));
+                    *pv_len = child_len + 1;
+                }
+            }
+            if (alpha >= beta) goto cutoff;
+        }
+
+        /* ── STAGE 3: Quiet moves ────────────────────────────────── */
+        {
+            Move quiets[MAX_MOVES];
+            int n_quiets = board_gen_quiets(b, quiets);
+            /* Score quiets using the same scorer */
+            for (int i = 0; i < n_quiets; i++)
+                quiets[i].score = score_move(ss, &quiets[i], b, ply, pv_ptr, ok_sq,
+                                             cur_prev_ft, cmh0, cmh1);
+
+            for (int i = 0; i < n_quiets; i++) {
+                /* Pick-best */
+                int best_idx = i;
+                for (int j = i+1; j < n_quiets; j++)
+                    if (quiets[j].score > quiets[best_idx].score) best_idx = j;
+                if (best_idx != i) {
+                    Move tmp = quiets[i]; quiets[i] = quiets[best_idx]; quiets[best_idx] = tmp;
+                }
+
+                Move *m = &quiets[i];
+                int mfr = m->from, mto = m->to;
+                /* Skip TT move (already tried) */
+                if (tt_tried && pv_ptr && mfr==pv_ptr->from && mto==pv_ptr->to && m->prom==pv_ptr->prom)
+                    continue;
+
+                int is_castle  = !!m->castle;
+                int is_quiet   = !is_castle;  /* quiets are never captures */
+
+                /* LMP */
+                int is_killer = is_quiet && (
+                    (ss->killers[ply][0].from==mfr&&ss->killers[ply][0].to==mto&&(ss->killers[ply][0].from||ss->killers[ply][0].to)) ||
+                    (ss->killers[ply][1].from==mfr&&ss->killers[ply][1].to==mto&&(ss->killers[ply][1].from||ss->killers[ply][1].to)));
+                if (!in_check && is_quiet && depth<=7 && legal_count>0 && !is_killer) {
+                    quiet_count++;
+                    int lmp_lim = lmp_limit[depth<8?depth:7];
+                    if (!improving) lmp_lim = (lmp_lim + 1) / 2;
+                    if (quiet_count > lmp_lim) continue;
+
+                    /* History pruning */
+                    if (depth <= 4) {
+                        int ft_hp = mfr * 64 + mto;
+                        int ch_hp = ss->mv_history[ft_hp];
+                        if (cmh0 >= 0) ch_hp += ss->cont_hist[0][cmh0][ft_hp];
+                        if (cmh1 >= 0) ch_hp += ss->cont_hist[1][cmh1][ft_hp];
+                        int hp_thresh = -4000 * depth;
+                        if (ch_hp < hp_thresh) continue;
+                    }
+                }
+
+                /* Skip singular move */
+                if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
+
+                board_make(b, m);
+                __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+                ss->prev_ft[ply]    = mfr*64 + mto;
+                ss->prev_to_sq[ply] = mto;
+
+                int mover_col = b->turn ^ 24;
+                int king_sq   = mover_col == COL_W ? b->wk : b->bk;
+                if (board_is_attacked(b, king_sq, b->turn)) { board_unmake(b); continue; }
+
+                if (ply == 0 && ss->excluded_root_n > 0 && is_excluded_root(ss, m)) {
+                    board_unmake(b); continue;
+                }
+
+                legal_count++;
+
+                int gives_check = 0;
+                { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
+                  int gdr=((m->to>>3)-(gksq>>3)); if(gdr<0)gdr=-gdr;
+                  int gdc=((m->to&7)-(gksq&7));   if(gdc<0)gdc=-gdc;
+                  if (gpt>=3||gpt==2||m->prom||(gdr>gdc?gdr:gdc)<=2)
+                      gives_check = board_in_check(b);
+                }
+
+                /* Futility pruning */
+                if (!in_check && is_quiet && !gives_check && depth>=1 && depth<=8 && legal_count>1) {
+                    int fd = depth < 9 ? depth : 8;
+                    if (static_eval + fut_base[fd] + fut_adj <= alpha) { board_unmake(b); continue; }
+                }
+
+                int check_ext = 0;
+                if (in_check && depth==1) check_ext=1;
+                if (sing_ext && pv_move.from==m->from && pv_move.to==m->to)
+                    check_ext = check_ext>1?check_ext:1;
+                if (!check_ext && !in_check) {
+                    uint8_t pc = b->b[m->to];
+                    if (pc && PC_TYPE(pc)==1) {
+                        int to_rank = m->to >> 3;
+                        if ((PC_COLOR(pc)==COL_W && to_rank==1) ||
+                            (PC_COLOR(pc)==COL_B && to_rank==6))
+                            check_ext = 1;
+                    }
+                }
+
+                int sc;
+                child_len = 0;
+                if (legal_count == 1) {
+                    sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+                } else {
+                    int reduce = 0;
+                    if (legal_count>=3 && depth>=3 && !in_check && !gives_check && is_quiet && !is_killer) {
+                        int ld = depth<LMR_D?depth:LMR_D-1;
+                        int lm = legal_count<LMR_M?legal_count:LMR_M-1;
+                        reduce = lmr_tab[ld*LMR_M+lm];
+                        if (is_pv) reduce = reduce>0?reduce-1:0;
+                        if (!improving) reduce += 1;
+                        {
+                            int ft_idx = mfr * 64 + mto;
+                            int ch = ss->mv_history[ft_idx];
+                            if (cmh0 >= 0) ch += ss->cont_hist[0][cmh0][ft_idx];
+                            if (cmh1 >= 0) ch += ss->cont_hist[1][cmh1][ft_idx];
+                            if (ch < -4000) reduce += 1;
+                            if (ch < -8000) reduce += 1;
+                            if (ch > 4000 && reduce > 0) reduce -= 1;
+                        }
+                        if (reduce >= depth - 1) reduce = depth - 2;
+                        if (reduce < 0) reduce = 0;
+                    }
+                    Move null_pv[MAX_PLY]; int null_len=0;
+                    sc = -alpha_beta(ss, b, depth-1-reduce+check_ext, -alpha-1, -alpha, null_pv, &null_len, ply+1, gives_check);
+                    if (sc > alpha && reduce > 0) {
+                        sc = -alpha_beta(ss, b, depth-1+check_ext, -alpha-1, -alpha, null_pv, &null_len, ply+1, gives_check);
+                    }
+                    if (sc > alpha && sc < beta) {
+                        sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+                    }
+                }
+                board_unmake(b);
+
+                if (is_quiet && n_searched_quiets < 64 && sc <= alpha)
+                    searched_quiets[n_searched_quiets++] = *m;
+
+                if (sc > best) {
+                    best = sc; best_move = *m;
+                    if (sc > alpha) {
+                        alpha = sc; flag = TT_EXACT;
+                        pv[0] = *m;
+                        memcpy(pv+1, child_pv, child_len * sizeof(Move));
+                        *pv_len = child_len + 1;
+                    }
+                }
+                if (alpha >= beta) goto cutoff;
+            }
+        }
+
+        /* ── STAGE 4: Losing captures ────────────────────────────── */
+        for (int i = 0; i < n_bad; i++) {
+            Move *m = &bad_caps[i];
+            int mfr = m->from, mto = m->to;
+            /* Skip TT move */
+            if (tt_tried && pv_ptr && mfr==pv_ptr->from && mto==pv_ptr->to && m->prom==pv_ptr->prom)
+                continue;
+
+            int is_promo = !!m->prom;
+
+            /* SEE pruning */
+            if (!in_check && !is_promo && legal_count>0 && depth>2 && !is_pv) {
+                int sv = (m->score - 200000) / 2;
+                int see_thresh = depth<=4 ? -80 : depth<=6 ? -120 : -160;
+                if (sv < see_thresh) {
+                    int tr=mto>>3,tc=mto&7,kr=ok_sq>>3,kc=ok_sq&7;
+                    int dr=tr-kr;if(dr<0)dr=-dr;
+                    int dc=tc-kc;if(dc<0)dc=-dc;
+                    if ((dr>dc?dr:dc) > 1) continue;
+                }
+            }
+
+            /* Skip singular move */
+            if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
+
+            board_make(b, m);
+            __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+            ss->prev_ft[ply]    = mfr*64 + mto;
+            ss->prev_to_sq[ply] = mto;
+
+            int mover_col = b->turn ^ 24;
+            int king_sq   = mover_col == COL_W ? b->wk : b->bk;
+            if (board_is_attacked(b, king_sq, b->turn)) { board_unmake(b); continue; }
+
+            if (ply == 0 && ss->excluded_root_n > 0 && is_excluded_root(ss, m)) {
+                board_unmake(b); continue;
+            }
+
+            legal_count++;
+
+            int gives_check = 0;
+            { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
+              int gdr=((m->to>>3)-(gksq>>3)); if(gdr<0)gdr=-gdr;
+              int gdc=((m->to&7)-(gksq&7));   if(gdc<0)gdc=-gdc;
+              if (gpt>=3||gpt==2||m->prom||(gdr>gdc?gdr:gdc)<=2)
+                  gives_check = board_in_check(b);
+            }
+
+            int check_ext = 0;
+            if (in_check && depth==1) check_ext=1;
+            if (sing_ext && pv_move.from==m->from && pv_move.to==m->to)
+                check_ext = check_ext>1?check_ext:1;
+
+            int sc;
+            child_len = 0;
+            if (legal_count == 1) {
+                sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+            } else {
+                int reduce = 0;
+                if (!is_promo && depth>=3 && legal_count>=4 && !in_check) {
+                    if (m->score >= 100000 && m->score <= 200000) reduce = 1;
+                }
+                Move null_pv[MAX_PLY]; int null_len=0;
+                sc = -alpha_beta(ss, b, depth-1-reduce+check_ext, -alpha-1, -alpha, null_pv, &null_len, ply+1, gives_check);
+                if (sc > alpha && reduce > 0)
+                    sc = -alpha_beta(ss, b, depth-1+check_ext, -alpha-1, -alpha, null_pv, &null_len, ply+1, gives_check);
+                if (sc > alpha && sc < beta)
+                    sc = -alpha_beta(ss, b, depth-1+check_ext, -beta, -alpha, child_pv, &child_len, ply+1, gives_check);
+            }
+            board_unmake(b);
+
+            if (sc > best) {
+                best = sc; best_move = *m;
+                if (sc > alpha) {
+                    alpha = sc; flag = TT_EXACT;
+                    pv[0] = *m;
+                    memcpy(pv+1, child_pv, child_len * sizeof(Move));
+                    *pv_len = child_len + 1;
+                }
+            }
+            if (alpha >= beta) goto cutoff;
+        }
+    }
+
+cutoff:
+    /* History/killer updates on cutoff */
+    if (alpha >= beta && (best_move.from || best_move.to)) {
+        int mfr = best_move.from, mto = best_move.to;
+        int is_capture = !!(b->b[mto] || best_move.epc);
+        int is_promo   = !!best_move.prom;
+        int is_castle  = !!best_move.castle;
+        int is_quiet   = !is_capture && !is_promo && !is_castle;
+
+        if (is_quiet) {
+            /* Killers */
+            int km0_set = ss->killers[ply][0].from||ss->killers[ply][0].to;
+            if (!km0_set || ss->killers[ply][0].from!=mfr || ss->killers[ply][0].to!=mto) {
+                ss->killers[ply][1] = ss->killers[ply][0];
+                ss->killers[ply][0] = best_move;
+            }
+            /* Counter move */
+            if (cur_prev_ft >= 0) ss->counter_move[cur_prev_ft] = mfr*64+mto;
+
+            int bonus = depth*depth;
+            if (bonus > 16384) bonus = 16384;
+
+            /* Reward the cutoff move */
+            int ft = mfr*64+mto;
+            {   int h = ss->mv_history[ft] + bonus;
+                ss->mv_history[ft] = h < 16384 ? h : 16384; }
+            if (cmh0 >= 0) {
+                int c = ss->cont_hist[0][cmh0][ft] + bonus;
+                ss->cont_hist[0][cmh0][ft] = (int16_t)(c < 16384 ? c : 16384);
+            }
+            if (cmh1 >= 0) {
+                int c = ss->cont_hist[1][cmh1][ft] + bonus;
+                ss->cont_hist[1][cmh1][ft] = (int16_t)(c < 16384 ? c : 16384);
+            }
+
+            /* Penalise quiet moves searched before the cutoff */
+            for (int j = 0; j < n_searched_quiets; j++) {
+                Move *pm = &searched_quiets[j];
+                if (pm->from == mfr && pm->to == mto) continue;  /* don't penalise the cutoff move */
+                int pft = pm->from*64 + pm->to;
+                {   int h = ss->mv_history[pft] - bonus;
+                    ss->mv_history[pft] = h > -16384 ? h : -16384; }
+                if (cmh0 >= 0) {
+                    int c = ss->cont_hist[0][cmh0][pft] - bonus;
+                    ss->cont_hist[0][cmh0][pft] = (int16_t)(c > -16384 ? c : -16384);
+                }
+                if (cmh1 >= 0) {
+                    int c = ss->cont_hist[1][cmh1][pft] - bonus;
+                    ss->cont_hist[1][cmh1][pft] = (int16_t)(c > -16384 ? c : -16384);
+                }
+            }
+        }
+        flag = TT_LOWER;
+    }
+
+    if (!legal_count) return in_check ? (-19000+ply) : 0;
+    if (best_move.from||best_move.to)
+        tt_store(b->hash, best, depth, flag, &best_move, ply, raw_eval);
+    return best;
+}
+
+/* ── Iterative deepening + aspiration ────────────────────────── */
+void search_init(void) {
+    /* LMR table */
+    for (int d = 1; d < LMR_D; d++)
+        for (int m = 1; m < LMR_M; m++) {
+            double v = log((double)d) * log((double)m) / 1.5;
+            int r = (int)v;
+            if (r < 1) r = 1;
+            if (r > d-1) r = d-1;
+            lmr_tab[d*LMR_M+m] = (uint8_t)r;
+        }
+    /* MVV-LVA: (6-attacker) + victim*10 */
+    for (int v = 1; v <= 5; v++)
+        for (int a = 1; a <= 6; a++)
+            MVV_LVA[v*7+a] = (6-a) + v*10;
+    /* TT init */
+    memset(TT_H, 0, sizeof(TT_H));
+    for (int i = 0; i < TT_SIZE; i++) TT_E[i] = TT_EVAL_NONE;
+}
+
+void search_history_clear(void) {
+    memset(ss->mv_history,   0, sizeof(ss->mv_history));
+    memset(ss->counter_move, 0, sizeof(ss->counter_move));
+    memset(ss->cont_hist,    0, sizeof(ss->cont_hist));
+}
+
+void search_reset(void) {
+    memset(ss->killers,      0, sizeof(ss->killers));
+    memset(ss->sing_from,   -1, sizeof(ss->sing_from));
+    memset(ss->sing_to,     -1, sizeof(ss->sing_to));
+    for (int i = 0; i < MAX_PLY; i++) {
+        ss->prev_ft[i] = -1;
+        ss->prev_to_sq[i] = -1;
+        ss->prev_static_eval[i] = TT_EVAL_NONE;
+    }
+    /* Age history tables: divide by 4 to preserve relative ordering
+     * while preventing saturation across games/iterations.
+     * Loop is ~4K iterations for mv_history and ~512K for ss->cont_hist[2];
+     * compiler will auto-vectorise with -O3 -march=native.            */
+    for (int i = 0; i < 64*64; i++) ss->mv_history[i] >>= 2;
+    memset(ss->counter_move, 0, sizeof(ss->counter_move));
+    /* Age both CMH slots (int16_t arithmetic right-shift → signed divide by 4) */
+    for (int s = 0; s < 2; s++)
+        for (int i = 0; i < 64; i++)
+            for (int j = 0; j < 64*64; j++)
+                ss->cont_hist[s][i][j] >>= 2;
+    g_undo_top = 0;
+    g_hist_len = 0;
+}
+
+/* ── Per-thread SearchState management ───────────────────────── */
+void search_set_state(SearchState *state) {
+    ss = state ? state : &g_ss;
+}
+
+SearchState *search_state_new(void) {
+    SearchState *s = (SearchState *)calloc(1, sizeof(SearchState));
+    if (s) {
+        memset(s->sing_from, -1, sizeof(s->sing_from));
+        memset(s->sing_to,   -1, sizeof(s->sing_to));
+        for (int i = 0; i < MAX_PLY; i++) {
+            s->prev_ft[i] = -1;
+            s->prev_to_sq[i] = -1;
+            s->prev_static_eval[i] = TT_EVAL_NONE;
+        }
+    }
+    return s;
+}
+
+void search_state_free(SearchState *state) {
+    free(state);
+}
+
+/* is_excluded_root — definition (forward-declared before alpha_beta) */
+static int is_excluded_root(SearchState *ss, const Move *m) {
+    for (int i = 0; i < ss->excluded_root_n; i++)
+        if (ss->excluded_root[i].from == m->from && ss->excluded_root[i].to == m->to &&
+            ss->excluded_root[i].prom == m->prom)
+            return 1;
+    return 0;
+}
+
+SearchResult search_best(Board *b, const SearchParams *p) {
+    /* Each thread needs its own SearchState. Helpers pass theirs via
+     * p->search_state; main thread uses the default global g_ss. */
+    SearchState *ss = p->search_state ? p->search_state : &g_ss;
+    SearchResult res = {0};
+    /* Only main thread increments TT generation — helpers share it */
+    if (p->start_depth <= 1) TT_GEN = (TT_GEN+1) & 0xFFFF;
+    nnue_reset();
+
+    int md = p->max_depth;
+    int n_pvs = p->multi_pv;
+    if (n_pvs < 1) n_pvs = 1;
+    if (n_pvs > MAX_MULTI_PV) n_pvs = MAX_MULTI_PV;
+
+    /* Node limit */
+    if (p->time_limit_ms > 0) {
+        ss->node_limit = p->node_limit > 0 ? p->node_limit : (long)2e9;
+    } else if (p->node_limit > 0) {
+        ss->node_limit = p->node_limit;
+    } else {
+        ss->node_limit = (long)2e9;
+    }
+
+    ss->deadline_ms = p->time_limit_ms > 0 ? now_ms() + p->time_limit_ms : 0;
+    ss->time_up     = 0;
+    ss->stop_flag   = p->stop;  /* may be NULL */
+    ss->nodes       = 0;
+    ss->nodes_total = 0;
+    ss->tb_hits     = 0;
+
+    search_reset();
+
+    /* Rebuild NNUE accumulator */
+    if (nnue_ready()) nnue_rebuild(b->b);
+
+    /* Re-seed g_hist from board's game history */
+    for (int i = 0; i < b->hist_len && g_hist_len < HIST_SIZE; i++) {
+        g_hist[g_hist_len] = b->hist[i];
+        g_hist_len++;
+    }
+
+    /* ── Root Syzygy TB move filtering (Stockfish-style) ──────────
+     * Instead of returning immediately, probe WDL for each legal root
+     * move. Remove TB-losing moves from consideration, keeping only
+     * moves in the best WDL class. Search still runs normally after
+     * filtering, finding the best move within the safe set.
+     *
+     * This avoids the -80 ELO penalty of the old "return immediately"
+     * approach while still using TB knowledge to guide move selection. */
+    int tb_root_filtered = 0;  /* number of root moves excluded by TB */
+    if (p->start_depth <= 1 && g_tb_probe_depth < 99) {
+        int npieces = __builtin_popcountll(b->occ);
+        if (npieces >= 4 && npieces <= g_tb_probe_limit) {
+            /* Probe the root position first to get baseline WDL */
+            int root_wdl;
+            if (syzygy_probe_wdl(b, &root_wdl)) {
+                ss->tb_hits++;
+                /* Store root WDL in TT for caching */
+                int root_tb_score = 0;
+                int root_tb_flag = TT_EXACT;
+                switch (root_wdl) {
+                    case 4: root_tb_score = 18000; root_tb_flag = TT_LOWER; break;
+                    case 3: root_tb_score = 1; break;
+                    case 2: root_tb_score = 0; break;
+                    case 1: root_tb_score = -1; break;
+                    case 0: root_tb_score = -18000; root_tb_flag = TT_UPPER; break;
+                }
+                tt_store(b->hash, root_tb_score, 127, root_tb_flag, NULL, 0, TT_EVAL_NONE);
+
+                /* Now probe each root move to find which ones maintain
+                 * the best possible WDL result. Exclude losing moves. */
+                Move root_moves[MAX_MOVES];
+                int n_root = board_gen_moves(b, root_moves);
+                int best_child_wdl = -1;  /* track best WDL seen among children */
+
+                /* First pass: probe all children to find best WDL */
+                for (int i = 0; i < n_root; i++) {
+                    board_make(b, &root_moves[i]);
+                    int mover_col = b->turn ^ 24;
+                    int king_sq = mover_col == COL_W ? b->wk : b->bk;
+                    if (board_is_attacked(b, king_sq, b->turn)) {
+                        board_unmake(b);
+                        root_moves[i].score = -99;  /* illegal */
+                        continue;
+                    }
+                    int child_wdl;
+                    if (syzygy_probe_wdl(b, &child_wdl)) {
+                        /* Negate: child's WDL is from opponent's POV */
+                        int our_wdl = 4 - child_wdl;
+                        root_moves[i].score = our_wdl;
+                        if (our_wdl > best_child_wdl)
+                            best_child_wdl = our_wdl;
+                    } else {
+                        root_moves[i].score = root_wdl;  /* fallback: same as parent */
+                    }
+                    board_unmake(b);
+                }
+
+                /* Second pass: exclude moves with worse WDL than best */
+                if (best_child_wdl >= 0) {
+                    for (int i = 0; i < n_root; i++) {
+                        if (root_moves[i].score == -99) continue;  /* illegal */
+                        if (root_moves[i].score < best_child_wdl) {
+                            /* This move leads to a worse WDL — exclude it */
+                            if (ss->excluded_root_n < MAX_MOVES) {
+                                ss->excluded_root[ss->excluded_root_n++] = root_moves[i];
+                                tb_root_filtered++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* ── Multi-PV outer loop ─────────────────────────────────────── */
+    /* TB root filtering may have populated excluded_root[] above.
+     * Save that count so Multi-PV doesn't overwrite TB exclusions. */
+    int tb_excluded_base = ss->excluded_root_n;
+    /* Starting depth for iterative deepening (Lazy SMP helpers start higher) */
+    int sd = p->start_depth > 1 ? p->start_depth : 1;
+
+    for (int mpv = 0; mpv < n_pvs && !ss->time_up; mpv++) {
+        Move best_move = {0}; int best_score = 0;
+        Move pv[MAX_PLY]; int pv_len = 0;
+        int prev_score_valid = 0;
+        int prev_score = 0;
+
+        for (int depth = sd; depth <= md && !ss->time_up; depth++) {
+            ss->nodes = 0;
+            Move iter_pv[MAX_PLY]; int iter_len = 0;
+            int score;
+
+            if (depth <= 2 || !prev_score_valid) {
+                score = alpha_beta(ss, b, depth, -99999, 99999, iter_pv, &iter_len, 0, -1);
+            } else {
+                /* Aspiration windows */
+                int delta = 20, alpha2 = prev_score-delta, beta2 = prev_score+delta;
+                int tries = 0; int exact = 0;
+                while (tries < 6) {
+                    tries++;
+                    iter_len = 0;
+                    score = alpha_beta(ss, b, depth, alpha2, beta2, iter_pv, &iter_len, 0, -1);
+                    if (ss->time_up) break;
+                    if      (score <= alpha2) { alpha2 -= delta; if(alpha2<-18000)alpha2=-18000; delta*=2; if(delta>500)delta=500; exact=0; }
+                    else if (score >= beta2)  { beta2  += delta; if(beta2>18000)beta2=18000;   delta*=2; if(delta>500)delta=500; exact=0; }
+                    else { exact=1; break; }
+                    if (alpha2<=-18000 && beta2>=18000) break;
+                }
+                if (!exact && iter_len > 0) {}   /* use whatever we have */
+            }
+
+            if (ss->time_up && !iter_len) break;
+            if (iter_len > 0) {
+                /* Check if the best move from this iteration is excluded */
+                if (is_excluded_root(ss, &iter_pv[0])) {
+                    /* The root alpha-beta already skips excluded moves,
+                     * but aspiration re-searches might not.  Accept it anyway. */
+                }
+                int update = !ss->time_up || (best_move.from == 0 && best_move.to == 0);
+                if (update) {
+                    best_move = iter_pv[0];
+                    best_score = score;
+                    memcpy(pv, iter_pv, iter_len * sizeof(Move));
+                    pv_len = iter_len;
+                    prev_score = score; prev_score_valid = 1;
+                    if (mpv == 0) res.depth = depth;
+
+                    /* Emit info with multipv tag */
+                    if (p->info_cb) {
+                        char pv_str[256]; int ppos = 0;
+                        for (int pi = 0; pi < pv_len && pi < 12; pi++) {
+                            if (pi) pv_str[ppos++] = ' ';
+                            char uci[6]; move_to_uci(&pv[pi], uci);
+                            int ul = (int)strlen(uci);
+                            memcpy(pv_str+ppos, uci, ul); ppos += ul;
+                        }
+                        pv_str[ppos] = 0;
+                        int wb_score = b->turn == COL_W ? score : -score;
+                        p->info_cb(depth, wb_score, ss->nodes_total, pv_str, b->turn, mpv + 1);
+                    }
+                }
+            }
+            if (ss->time_up) break;
+        }
+
+        /* Store this PV line's results */
+        int wb_score = b->turn == COL_W ? best_score : -best_score;
+        res.scores[mpv] = wb_score;
+        res.bests[mpv] = best_move;
+        /* Build PV string for this line */
+        char *out = res.pvs[mpv]; int pos = 0;
+        for (int i = 0; i < pv_len && i < 12; i++) {
+            if (i) { out[pos++]=' '; }
+            char uci[6]; move_to_uci(&pv[i], uci);
+            int len = (int)strlen(uci);
+            memcpy(out+pos, uci, len); pos+=len;
+        }
+        out[pos] = 0;
+
+        /* First PV also fills legacy fields */
+        if (mpv == 0) {
+            res.best  = best_move;
+            res.score = wb_score;
+            res.nodes = ss->nodes_total;
+            res.tb_hits = ss->tb_hits;
+            memcpy(res.pv, res.pvs[0], 256);
+        }
+
+        /* Exclude this best move from subsequent PV searches */
+        if (best_move.from || best_move.to) {
+            ss->excluded_root[ss->excluded_root_n++] = best_move;
+        } else {
+            break;  /* no legal move found, stop Multi-PV */
+        }
+    }
+
+    res.num_pvs = ss->excluded_root_n > 0 ? ss->excluded_root_n : 1;
+    ss->excluded_root_n = 0;  /* clean up for next search */
+    return res;
+}
+
+/* ── WASM sret wrapper ─────────────────────────────────────────────────────
+ * Emscripten cannot call C functions that return structs by value from JS.
+ * This wrapper takes an explicit result pointer as the first argument,
+ * matching the sret calling convention Emscripten uses internally.
+ * Exported as _search_best_sret and called from the JS worker.              */
+void search_best_sret(SearchResult *out, Board *b, const SearchParams *p) {
+    /* JS fills SearchParams as raw bytes and cannot set function pointers
+     * or volatile int* correctly.  Copy the struct locally and sanitize
+     * the fields that would cause a WASM trap if non-NULL garbage. */
+    SearchParams safe = *p;
+    safe.info_cb      = NULL;   /* no callback in WASM mode */
+    safe.stop         = NULL;   /* no external stop flag */
+    safe.search_state = NULL;   /* use default global state */
+    SearchResult tmp = search_best(b, &safe);
+    memcpy(out, &tmp, sizeof(SearchResult));
+}
+
+/* ── Move-application helper for WASM ─────────────────────────────────────
+ * Applies a space-separated list of UCI moves to *b (which must already
+ * have been loaded with board_load_fen).  This lets the JS worker seed the
+ * board's internal history arrays so that repetition detection works
+ * correctly when search_best reads b->hist / b->hist_len.
+ *
+ * Exported as _board_apply_moves.
+ * Signature (JS side):  board_apply_moves(boardPtr, movesStrPtr)           */
+void board_apply_moves(Board *b, const char *moves_str) {
+    if (!moves_str || !*moves_str) return;
+    const char *p = moves_str;
+    char tok[8];
+    while (1) {
+        /* skip whitespace */
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        /* read token */
+        int i = 0;
+        while (*p && *p != ' ' && *p != '\t' && i < 7)
+            tok[i++] = *p++;
+        tok[i] = '\0';
+        if (!i) break;
+        Move m;
+        if (move_from_uci(b, tok, &m))
+            board_make(b, &m);
+    }
+}

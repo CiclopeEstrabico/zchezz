@@ -33,19 +33,18 @@ MOVETIME             = 100    # ms per move (applied to ALL engines)
 # ── My Engines (H2H — no anchors) ────────────────────────────────────────────
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v309\zchezz.exe",
-        "label":    "Zchezz-v309",
+        "path":     r"engine\c\zchezz_v310\zchezz.exe",
+        "label":    "Zchezz-v310",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,          # fast: 100ms/move
         "tc_inc":   0,
     },
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
-        "label":    "Zchezz-v309-TB",
+        "label":    "Zchezz-v309",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-        "options":  {"SyzygyPath": r"tablebases\3-4-5"},
     },
 ]
 
@@ -54,11 +53,11 @@ ANCHORS = []
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
 GAMES_VS_EACH_ANCHOR = 0      # not used (no anchors)
-GAMES_SELF_PLAY      = 100    # 100 openings x 2 colors = 200 games
+GAMES_SELF_PLAY      = 125    # 125 openings x 2 colors = 250 games
 SELF_PLAY            = True
 COLOR_SWAP           = True
 
-CONCURRENCY          = 14     # use most cores for speed
+CONCURRENCY          = 15     # use 15 cores
 MAX_PLIES            = 400
 MOVE_TIMEOUT         = 38.0
 REPORT_PERFORMANCE_METRICS = True
