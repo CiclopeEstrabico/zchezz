@@ -1,17 +1,82 @@
+#!/usr/bin/env python3
+"""
+tournament.py — Universal Chess Engine Tournament Runner
+=========================================================
+
+This is the ONE script for all engine testing scenarios. Edit the config
+block below, then run:   python tests/tournament.py
+
+MODES OF OPERATION (all controlled by the config block):
+─────────────────────────────────────────────────────────
+1. HEAD-TO-HEAD (H2H):
+   - Put 2+ engines in MY_ENGINES, set ANCHORS = [], SELF_PLAY = True
+   - Engines play each other directly, ELO difference shown via elo_calc
+
+2. ANCHOR TOURNAMENT (ELO estimation):
+   - Put 1+ engines in MY_ENGINES, fill ANCHORS with Stockfish at known ELOs
+   - Each engine plays against each anchor, absolute ELO is estimated via MLE
+   - Weighted average across anchors for final ELO ± confidence interval
+
+3. FULL TOURNAMENT (H2H + anchors):
+   - Fill both MY_ENGINES and ANCHORS, set SELF_PLAY = True
+   - Engines play against all anchors AND against each other
+   - Shows cross-table, H2H ELO diffs, and absolute ELO estimates
+
+4. SINGLE ENGINE BENCHMARK:
+   - Put 1 engine in MY_ENGINES, 1+ anchors in ANCHORS, SELF_PLAY = False
+   - Simple ELO estimation against Stockfish
+
+FEATURES:
+─────────
+- Concurrent games (CONCURRENCY workers, each with persistent engine processes)
+- Paired openings with color swap (same position played from both sides)
+- Memory-efficient opening index (only byte offsets stored, not positions)
+- Supports EPD and PGN opening books (auto-detects format)
+- Score adjudication: none (plays until game-over, stalemate, or MAX_PLIES)
+- PGN export (optional, SAVE_PGN)
+- EPD training data export (optional, SAVE_EPD) — position + eval + result
+- Live progress counter and periodic cross-table reports
+- Performance metrics: NPS, time/move, nodes/move, depth/move per engine
+- ELO calculation via elo_calc.py (trinomial model, 95% CI, cutechess-style)
+- MLE ELO estimation across multiple Stockfish anchors
+- Graceful SIGINT handling — prints final report before exiting
+- Auto-detects NNUE weights in engine directory
+
+ENGINE CONFIG (each entry in MY_ENGINES or ANCHORS):
+────────────────────────────────────────────────────
+  "path"      — relative or absolute path to engine executable
+  "label"     — display name (must be unique)
+  "tc_mode"   — "movetime" (fixed ms/move), "depth" (fixed ply), "fixedtime" (clock)
+  "tc_value"  — value for tc_mode (ms for movetime, ply for depth)
+  "tc_inc"    — increment in ms (only for fixedtime mode)
+  "options"   — dict of UCI options, e.g. {"SyzygyPath": "tablebases/3-4-5"}
+  "elo"       — known ELO rating (anchors only, used for ELO estimation)
+
+OUTPUT FILES (in RESULTS_DIR):
+──────────────────────────────
+  torneio_YYYYMMDD_HHMMSS.log — full console log
+  torneio_YYYYMMDD_HHMMSS.pgn — PGN games (if SAVE_PGN = True)
+  torneio_YYYYMMDD_HHMMSS.epd — EPD positions with eval (if SAVE_EPD = True)
+"""
+
 import os, json, subprocess, time, math, random, threading, datetime, tempfile, signal, sys, io, struct, glob
 from queue import Queue, Empty
 import chess
 import chess.pgn
 
+# Import shared ELO calculator (trinomial model with proper 95% CI)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_elo
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURAÇÕES
+#  CONFIGURATION — Edit this block to set up your tournament
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ── My Engines ────────────────────────────────────────────────────────────────
+# Engines to test. Add as many as needed. Each plays against all anchors
+# and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
         "path":     r"engine\c\zchezz_v309\zchezz.exe",
@@ -30,6 +95,8 @@ MY_ENGINES = [
     },
 ]
 
+# ── Anchor Engines ────────────────────────────────────────────────────────────
+# Reference engines with known ELO. Set ANCHORS = [] for pure H2H mode.
 ANCHORS = [
     {
         "path":    r"engine\stockfish\stockfish.exe",
@@ -51,35 +118,33 @@ ANCHORS = [
     },
 ]
 
-# ── Torneio ───────────────────────────────────────────────────────────────────
-GAMES_VS_EACH_ANCHOR = 1000   # aberturas por par MY_ENGINE×ANCHOR (com COLOR_SWAP=True gera 2× jogos)
-GAMES_SELF_PLAY      = 1000   # aberturas por par MY_ENGINE×MY_ENGINE (com COLOR_SWAP=True gera 2× jogos)
-SELF_PLAY            = True   # meus engines jogam entre si?
-COLOR_SWAP           = True   # repete cada jogo com cores invertidas?
+# ── Tournament Parameters ─────────────────────────────────────────────────────
+GAMES_VS_EACH_ANCHOR = 1000   # openings per MY_ENGINE×ANCHOR pair (×2 with COLOR_SWAP)
+GAMES_SELF_PLAY      = 1000   # openings per MY_ENGINE×MY_ENGINE pair (×2 with COLOR_SWAP)
+SELF_PLAY            = True   # engines in MY_ENGINES play each other?
+COLOR_SWAP           = True   # repeat each opening with colors reversed?
 
-CONCURRENCY          = 8      # concurrent games
-MAX_PLIES            = 400
-MOVE_TIMEOUT         = 38.0
-REPORT_PERFORMANCE_METRICS = True
+CONCURRENCY          = 8      # number of concurrent games (= worker threads)
+MAX_PLIES            = 400    # max half-moves per game before forced draw
+MOVE_TIMEOUT         = 38.0   # seconds to wait for a move before timeout loss
+REPORT_PERFORMANCE_METRICS = True  # show NPS, time/move etc. in reports
 
-# ── Aberturas ─────────────────────────────────────────────────────────────────
-OPENING_FOLDER       = r"openings"
+# ── Opening Book ──────────────────────────────────────────────────────────────
+OPENING_FOLDER       = r"openings"  # folder with .epd and/or .pgn files
 
-# ── Saída ─────────────────────────────────────────────────────────────────────
-SAVE_PGN             = False
-SAVE_EPD             = True
+# ── Output ────────────────────────────────────────────────────────────────────
+SAVE_PGN             = False  # save all games as PGN
+SAVE_EPD             = True   # save positions + eval as EPD (for NNUE training)
 RESULTS_DIR          = r"tests\complete_results"
-COUNTER_EVERY        = 14    # linha de progresso leve a cada N jogos
-# REPORT_LOOPS: cross-table a cada N mini-ciclos.
-# 1 mini-ciclo = todos os pares jogam 1 abertura (x2 se COLOR_SWAP).
-#   Exemplo: 2 engines, 2 anchors, COLOR_SWAP=True -> mini-ciclo = 10 jogos.
-# REPORT_LOOPS=1 -> cross-table toda vez que cada par completou mais 1 abertura.
+COUNTER_EVERY        = 14     # progress line every N games
+# REPORT_LOOPS: full cross-table every N mini-cycles.
+# 1 mini-cycle = all pairs play 1 opening (×2 if COLOR_SWAP).
 REPORT_LOOPS         = 10
 
-MATE_SCORE           = 999999
+MATE_SCORE           = 999999  # sentinel value for mate scores
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  LOGS
+#  LOGGING — All output goes to both console and log file
 # ═══════════════════════════════════════════════════════════════════════════════
 
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -98,7 +163,8 @@ def log(*args):
         with open(LOG_FILE, "a", encoding="utf-8") as f: f.write(msg + "\n")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  OPENING INDEX
+#  OPENING INDEX — Memory-efficient: stores only byte offsets, not positions
+#  Supports .epd and .pgn files. Caches EPD offsets as .idx binary files.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class OpeningIndex:
@@ -205,7 +271,10 @@ def load_all_openings(folder: str) -> OpeningIndex:
     return idx
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ENGINE INSTANCE  (UCI nativo apenas)
+#  ENGINE INSTANCE — Persistent UCI engine process
+#  Each worker thread creates its own EngineInstance pair per game.
+#  Supports movetime, depth, nodes, and fixedtime time controls.
+#  Auto-detects NNUE weights (nnue_weights.bin) in the engine directory.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class EngineInstance:
@@ -361,7 +430,9 @@ class EngineInstance:
             self.process = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ELO ESTIMATOR  (MLE)
+#  ELO ESTIMATOR — Maximum Likelihood Estimation across anchors
+#  Groups results by anchor ELO, computes per-anchor estimate via elo_calc,
+#  then combines them using inverse-variance weighting for a final estimate.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class EloEstimator:
@@ -401,7 +472,8 @@ class EloEstimator:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  STATS & ELO HELPERS
+#  STATS & ELO HELPERS — Global state for tracking results
+#  Thread-safe via _stats_lock. Updated after each game completes.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _stats_lock = threading.Lock()
@@ -440,7 +512,9 @@ def format_eval(score, elapsed_ms):
     return "{ " + sign + f"{cp:.2f}" + t + " } "
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  PLAY GAME
+#  PLAY GAME — One complete game between two engine instances
+#  Creates engine processes, applies opening, plays until game-over or MAX_PLIES.
+#  Returns result via results_queue (thread-safe).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def play_game(game_id, white_cfg, black_cfg, results_queue, opening=None):
@@ -592,7 +666,7 @@ def play_game(game_id, white_cfg, black_cfg, results_queue, opening=None):
         b_eng.stop()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  REPORTS
+#  REPORTS — Cross-table, ELO estimates, H2H, and performance metrics
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def print_counter():
@@ -685,7 +759,9 @@ def print_cross_table(is_final=False):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SCHEDULE BUILDER
+#  SCHEDULE BUILDER — Creates the full game schedule
+#  Interleaves anchor matches and self-play, applies COLOR_SWAP,
+#  then shuffles for fair concurrency distribution.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def build_schedule(op_idx):
@@ -724,7 +800,8 @@ def build_schedule(op_idx):
     return schedule
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  EPD WRITER
+#  EPD WRITER — Saves positions + evaluations for NNUE training data
+#  Format: FEN c0 "result"; c1 "score_cp"; c2 "evaluator"; c3 "ply_index";
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _epd_lock = threading.Lock()
@@ -759,7 +836,9 @@ def write_epd(f_epd, positions, winner):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  MAIN
+#  MAIN — Tournament orchestration
+#  Loads openings, builds schedule, spawns worker threads, collects results,
+#  writes PGN/EPD, prints periodic reports, and handles graceful shutdown.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
