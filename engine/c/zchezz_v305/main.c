@@ -148,6 +148,7 @@ static int tt_hashfull(void) {
 }
 
 /* ── UCI handlers ──────────────────────────────────────────────── */
+static void auto_load_nnue(void);  /* forward declaration */
 
 static void cmd_uci(void) {
     printf("id name %s %s\n", ENGINE_NAME, ENGINE_VERSION);
@@ -179,6 +180,8 @@ static void cmd_uci(void) {
 }
 
 static void cmd_isready(void) {
+    /* Auto-load NNUE if not yet loaded (e.g. no setoption was sent) */
+    if (!nnue_ready()) auto_load_nnue();
     printf("readyok\n");
     fflush(stdout);
 }
@@ -726,20 +729,40 @@ static void cmd_display(void) {
 }
 
 /* ── Main loop ─────────────────────────────────────────────────── */
+static char g_exe_dir[512] = "";  /* directory containing the executable */
+
 static void auto_load_nnue(void) {
-    static const char *candidates[] = {
-        "nnue_weights.bin",
-        "chess_test/nnue_weights.bin",
-        NULL
-    };
-    for (int i = 0; candidates[i]; i++) {
-        if (nnue_load(candidates[i]) == 0) break;
+    if (nnue_ready()) return;  /* already loaded */
+
+    /* Try CWD first */
+    if (nnue_load("nnue_weights.bin") == 0) return;
+
+    /* Try exe directory */
+    if (g_exe_dir[0]) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/nnue_weights.bin", g_exe_dir);
+        if (nnue_load(path) == 0) return;
     }
+
+    /* Try legacy path */
+    nnue_load("chess_test/nnue_weights.bin");
 }
 
 int main(int argc, char **argv) {
     board_init();
     search_init();
+
+    /* Extract exe directory for auto-loading NNUE */
+    if (argc > 0 && argv[0][0]) {
+        strncpy(g_exe_dir, argv[0], sizeof(g_exe_dir)-1);
+        /* Find last separator */
+        char *sep = NULL;
+        for (char *p = g_exe_dir; *p; p++) {
+            if (*p == '/' || *p == '\\') sep = p;
+        }
+        if (sep) *sep = '\0';
+        else g_exe_dir[0] = '\0';  /* no directory component */
+    }
 
     int do_bench = 0;
     int bench_depth = 13;
