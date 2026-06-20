@@ -21,7 +21,7 @@ tests/tb_test_*.txt
 tests/tournament_v*.py
 tests/tournament_*_sf_*.py
 
-# Deprecated test scripts (replaced by match.py + tournament.py)
+# Deprecated test scripts (replaced by match.py + tournament_complete.py)
 tests/quick_match.py
 tests/concurrent_match.py
 tests/parallel_match.py
@@ -29,7 +29,7 @@ tests/tournament_quick.py
 tests/tournament_h2h.py
 tests/tournament_compare.py
 tests/tournament_elo.py
-tests/tournament_complete.py
+tests/tournament.py
 tests/tb_tournament.py
 tests/test_tournament.py
 
