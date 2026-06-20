@@ -13,7 +13,7 @@ Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantize
 | | |
 |---|---|
 | **Strength** | ~2900 Elo (measured against Stockfish anchors at movetime 200ms) |
-| **Search** | Alpha-beta with aspiration windows, PVS, Lazy SMP (up to 8 threads) |
+| **Search** | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP |
 | **Evaluation** | Custom NNUE — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
 | **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
 | **Opening book** | Polyglot .bin format, with built-in ECO opening name recognition |
@@ -26,6 +26,7 @@ Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantize
 
 - 🧠 **NNUE evaluation** — 799-feature HalfKP input, dual-perspective accumulators, incremental updates, Quantization-Aware Training
 - ⚡ **Lazy SMP** — shared transposition table, staggered helper depths, lock-free design
+- 🔄 **Staged move generation** — TT move → captures → quiets → losing captures, avoiding full move list allocation
 - 🎯 **Full search suite** — null move pruning, LMR, futility, razoring, ProbCut, singular extensions, IIR, SEE pruning
 - 🌐 **Browser play** — complete chess UI with game clock, move animation, sound effects, opening name display, 5 piece styles, 6 board themes
 - 📊 **Analysis mode** — engine analysis with depth control, Multi-PV, eval bar, eval graph, blunder check, FEN/PGN import/export
@@ -306,6 +307,19 @@ Quiescence is entered at depth 0 and searches captures and promotions only (plus
 
 SEE uses the magic bitboard attack tables directly. The attacker board is rebuilt via a bitboard occupancy mask and updated incrementally as pieces are removed, so discovered attackers (X-ray attacks through vacated squares) are revealed automatically. This makes SEE both fast and exact — the full minimax retrograde scoring is computed in a temporary scratch board.
 
+### Staged move generation
+
+From v3.10, the engine uses **staged move generation** in the alpha-beta search. Instead of generating all moves upfront and sorting them, moves are generated in phases:
+
+| Stage | What's generated | Why |
+| ----- | ---------------- | --- |
+| **TT move** | Hash move only (no generation needed) | Best move from a previous search — often causes a cutoff immediately |
+| **Captures** | `board_gen_captures()` — captures + promotions only | MVV-LVA sorted, SEE-pruned; most cutoffs happen here |
+| **Quiets** | `board_gen_quiets()` — non-captures only | Scored by killer/counter/history; LMR/LMP applied |
+| **Losing captures** | Deferred bad captures (SEE < 0) | Rarely searched — only if all quiets fail to produce a cutoff |
+
+This avoids generating quiet moves at all in positions where a capture or the TT move produces a beta cutoff, saving significant move generation overhead. Measured improvement: **+21 ELO** vs v3.09.
+
 ### Move ordering
 
 | Priority         | Score                                                     | Move type |
@@ -536,11 +550,11 @@ Table files are available from [tablebase.sesse.net](http://tablebase.sesse.net/
 
 ```
 zchezz/
-├── engine/c/zchezz_v309/         Engine source code
+├── engine/c/zchezz_v310/         Engine source code (current)
 │   ├── board.c / board.h         Board state, bitboards, magic attacks, make/unmake
-│   ├── search.c / search.h       Alpha-beta, TT, LMR, NMP, Lazy SMP
+│   ├── search.c / search.h       Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
 │   ├── nnue.c / nnue.h           NNUE inference, incremental accumulator, NNU3 loader
-│   ├── main.c                    UCI protocol, entry point, SMP threads
+│   ├── main.c                    UCI protocol, entry point, SMP threads, perft
 │   ├── syzygy.c / syzygy.h       Zchezz ↔ Fathom integration layer
 │   ├── book.c / book.h           Polyglot opening book support
 │   ├── nnue_weights.bin          Trained weights (NNU3 format, ~426 KB)
@@ -590,7 +604,23 @@ zchezz/
 
 ---
 
+## Changelog
+
+### v3.10
+- **Staged move generation** — TT move → captures → quiets → losing captures (+21 ELO vs v3.09)
+- **WASM crash fix** — sanitize SearchParams function pointers in WASM sret wrapper
+- **Perft command** — inline recursive perft with divide output (depth 1-7)
+- **Portable C** — moved nested functions to file scope for Clang/Emscripten compatibility
+
+### v3.09
+- Syzygy tablebase support (3-4-5 piece WDL + DTZ)
+- Lazy SMP multithreading
+- Polyglot opening book
+- Full UCI protocol compliance
+- NNUE quantization-aware training (NNU3 format)
+
 ## Next steps
 
 - Better NNUE structure
-
+- Fix Lazy SMP stability with 4+ threads
+- Improve tablebase hit rate in search
