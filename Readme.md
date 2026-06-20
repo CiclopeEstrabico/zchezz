@@ -1,6 +1,6 @@
 # Zchezz ♟️
 
-**A ~2800 Elo chess engine, entirely vibe coded with Claude Sonnet 4.6.**
+**A ~2900 Elo chess engine, entirely vibe coded with Claude Sonnet 4.6.**
 
 Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantized int8/int16), playable directly in the browser via WebAssembly. Compiles to a single self-contained HTML file that works fully offline — no server, no install, no dependencies. Just double-click and play.
 
@@ -12,7 +12,7 @@ Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantize
 
 | | |
 |---|---|
-| **Strength** | ~2800 Elo (measured against Stockfish anchors at movetime 200ms) |
+| **Strength** | ~2900 Elo (measured against Stockfish anchors at movetime 200ms) |
 | **Search** | Alpha-beta with aspiration windows, PVS, Lazy SMP (up to 8 threads) |
 | **Evaluation** | Custom NNUE — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
 | **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
@@ -536,7 +536,7 @@ Table files are available from [tablebase.sesse.net](http://tablebase.sesse.net/
 
 ```
 zchezz/
-├── engine/c/zchezz_v305/         Engine source code
+├── engine/c/zchezz_v309/         Engine source code
 │   ├── board.c / board.h         Board state, bitboards, magic attacks, make/unmake
 │   ├── search.c / search.h       Alpha-beta, TT, LMR, NMP, Lazy SMP
 │   ├── nnue.c / nnue.h           NNUE inference, incremental accumulator, NNU3 loader
@@ -550,7 +550,20 @@ zchezz/
 │   └── zchezz_bundle.html        Self-contained offline bundle
 │
 ├── pieces/                       SVG piece sets (cburnett, merida, staunty)
-├── tests/                        Test & match scripts (version-agnostic)
+├── tests/                        Test & match scripts
+│   ├── tournament.py             Universal tournament runner (H2H + anchors + ELO)
+│   ├── tournament_quick.py       Quick 200-game H2H regression test
+│   ├── elo_calc.py               Shared ELO calculation (trinomial, 95% CI)
+│   ├── selfplay.py               Self-play data generation for NNUE training
+│   ├── suite_runner.py           EPD test suite runner (WAC, STS, etc.)
+│   ├── suite_compare.py          Compare suite results between versions
+│   ├── uci_test.py               UCI protocol compliance tests
+│   ├── browser_test.py           Browser/WASM interaction tests
+│   ├── test_html_features.py     HTML feature validation
+│   ├── test_move_parsing.py      Move parsing tests
+│   ├── test_uci.py               UCI command tests
+│   └── validate_book.py          Opening book validation
+│
 ├── train/                        NNUE training code (PyTorch)
 ├── sf_analyze/                   Stockfish data generation scripts
 ├── test_suites/                  EPD test suites (WAC, STS, etc.)
@@ -579,7 +592,5 @@ zchezz/
 
 ## Next steps
 
-- Staged move generation — generate captures first, avoid generating quiet moves when a beta cutoff is found early
-- WASM multi-threading — Web Workers for browser SMP support
-- NNUE retraining — new generation of self-play data with v305 for improved evaluation
-- 6-piece Syzygy support — extend tablebase probing to 6-piece endgames
+- Better NNUE structure
+

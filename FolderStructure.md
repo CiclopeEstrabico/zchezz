@@ -13,7 +13,7 @@
 
 ## `engine/` — All Engines
 
-### `engine/c/zchezz_v305/` — v3.05: Current Engine
+### `engine/c/zchezz_v309/` — v3.09: Current Engine
 
 The current and only tracked engine version. Features Lazy SMP, opening book, Syzygy tablebases, MultiPV, and full browser UI.
 
@@ -81,24 +81,24 @@ Each directory contains 12 SVG files: `{w,b}{P,N,B,R,Q,K}.svg`
 
 ## `tests/` — Test & Match Scripts
 
-All scripts auto-detect the latest engine version — no hardcoded paths.
+Two tournament scripts (tournament.py for full testing, tournament_quick.py for quick regression),
+plus shared ELO calculation and supporting test utilities.
 
 | File | Description |
 |------|-------------|
-| `uci_test.py` | UCI protocol compliance tests |
-| `browser_test.py` | Browser/WASM interaction tests (Playwright) |
-| `test_html_features.py` | HTML feature validation (parses HTML, no browser needed) |
-| `test_tournament.py` | Round-robin tournament runner |
-| `validate_book.py` | Opening book legality and quality validation |
-| `concurrent_match.py` | Multi-worker A-vs-B match |
-| `quick_match.py` | Simple A-vs-B match with paired colors |
-| `parallel_match.py` | Parallel match runner |
-| `tournament_complete.py` | Full ELO tournament vs multiple Stockfish anchors |
-| `tournament_elo.py` | ELO estimation vs configured anchor engines |
+| `tournament.py` | **Universal tournament runner** — H2H, anchor ELO estimation, full tournament. Config-block driven. |
+| `tournament_quick.py` | **Quick 200-game H2H** — same engine as tournament.py, fast regression test preset |
+| `elo_calc.py` | **Shared ELO calculator** — trinomial model, 95% CI, cutechess-style (used by both tournament scripts) |
 | `selfplay.py` | Self-play data generation for NNUE training |
 | `suite_runner.py` | EPD test suite runner (WAC, STS, etc.) |
 | `suite_compare.py` | Compare suite results between engine versions |
-| `debug_engine.py` | Engine debugging utilities (gitignored) |
+| `uci_test.py` | UCI protocol compliance tests |
+| `browser_test.py` | Browser/WASM interaction tests (Playwright) |
+| `test_html_features.py` | HTML feature validation (parses HTML, no browser needed) |
+| `test_move_parsing.py` | Move parsing correctness tests |
+| `test_uci.py` | UCI command tests |
+| `test_debug_game.py` | Debug game tests |
+| `validate_book.py` | Opening book legality and quality validation |
 
 ---
 
@@ -187,7 +187,7 @@ These directories exist locally but are excluded from git:
 
 ### Windows (GCC/MinGW)
 ```bash
-cd engine/c/zchezz_v305
+cd engine/c/zchezz_v309
 mingw32-make native    # Windows
 make native            # Linux
 
