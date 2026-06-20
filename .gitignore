@@ -27,7 +27,6 @@ tests/concurrent_match.py
 tests/parallel_match.py
 tests/tournament_quick.py
 tests/tournament_h2h.py
-tests/tournament_compare.py
 tests/tournament_elo.py
 tests/tournament.py
 tests/tb_tournament.py
