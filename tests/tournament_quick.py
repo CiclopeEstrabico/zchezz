@@ -6,6 +6,9 @@ from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import chess, chess.pgn
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference
+
 MOVETIME = 100
 MAX_PLIES = 400
 GAMES = 200      # 100 openings x 2 colors
@@ -238,20 +241,15 @@ def run_match(a_cfg, b_cfg, label=""):
 
     total_a = w + d * 0.5
     n = w + d + l
-    pct = total_a / n if n > 0 else 0.5
-    if 0 < pct < 1:
-        elo_diff = -400 * math.log10(1.0 / pct - 1)
-    elif pct >= 1:
-        elo_diff = 400
-    else:
-        elo_diff = -400
+    pct = total_a / n * 100 if n > 0 else 50
+    elo_diff, ci_95, _ = elo_difference(w, d, l)
 
     print(f"\n  {'=' * 56}")
     print(f"  {a_name} vs {b_name} FINAL: +{w} ={d} -{l}")
-    print(f"  Score: {total_a:.1f}/{n} ({pct*100:.1f}%)")
-    print(f"  ELO diff: {a_name} is {elo_diff:+.0f} vs {b_name}")
+    print(f"  Score: {total_a:.1f}/{n} ({pct:.1f}%)")
+    print(f"  ELO diff: {a_name} is {elo_diff:+.0f} ±{ci_95:.0f} vs {b_name}")
     print(f"  {'=' * 56}")
-    return {"a": a_name, "b": b_name, "w": w, "d": d, "l": l, "elo": elo_diff}
+    return {"a": a_name, "b": b_name, "w": w, "d": d, "l": l, "elo": elo_diff, "ci": ci_95}
 
 
 def main():

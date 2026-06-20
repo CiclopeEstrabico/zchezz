@@ -13,6 +13,9 @@ Usage:
 import subprocess, sys, os, time, glob, io, threading, math
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference
+
 os.environ['PYTHONUNBUFFERED'] = '1'
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
@@ -224,16 +227,12 @@ def run_test(mode, n_games=200, workers=8, movetime=100):
     score_b = total_b / n_games * 100
 
     # Elo difference
-    if 0 < score_a / 100 < 1:
-        elo_diff = -400 * math.log10(1 / (score_a / 100) - 1)
-    else:
-        elo_diff = 0
+    elo_diff, ci_95, _ = elo_difference(wins_a, draws, wins_b)
 
     print(f"\n{'=' * 60}")
     print(f"  RESULT: {label_a}={wins_a}W  {label_b}={wins_b}W  D={draws}")
     print(f"  {label_a} score: {score_a:.1f}%   {label_b} score: {score_b:.1f}%")
-    if abs(elo_diff) > 0:
-        print(f"  Elo diff: {elo_diff:+.0f} ({label_a} vs {label_b})")
+    print(f"  Elo diff: {elo_diff:+.0f} ±{ci_95:.0f} ({label_a} vs {label_b})")
     if score_a > 55:
         print(f"  ✅ {label_a} is stronger")
     elif score_b > 55:

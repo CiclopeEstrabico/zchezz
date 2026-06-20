@@ -5,6 +5,9 @@
 import subprocess, os, sys, time, math, random, threading, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference, estimated_elo
+
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -221,21 +224,6 @@ def play_game(anchor_elo, opening, zchezz_white):
     eng_w.quit(); eng_b.quit()
     return 0.5
 
-# ── Stats ──────────────────────────────────────────────
-def elo_diff(pct):
-    if pct >= 1.0: return 999
-    if pct <= 0.0: return -999
-    return -400 * math.log10(1/pct - 1)
-
-def elo_error(w, d, l, n):
-    if n < 2: return 999
-    pct = (w + d * 0.5) / n
-    w_p, d_p, l_p = w/n, d/n, l/n
-    var = w_p*(1-pct)**2 + d_p*(0.5-pct)**2 + l_p*(0-pct)**2
-    se = math.sqrt(var / n)
-    if se == 0 or pct <= 0 or pct >= 1: return 999
-    return abs(400 / (math.log(10) * pct * (1-pct))) * se * 1.96
-
 # ── Run one anchor match ──────────────────────────────
 def run_anchor(anchor_elo, total_games, openings):
     n_pairs = total_games // 2
@@ -275,13 +263,12 @@ def run_anchor(anchor_elo, total_games, openings):
 
                     if completed >= next_report or completed == total_games:
                         pts = w + d * 0.5
-                        pct = pts / completed
-                        diff = elo_diff(pct)
-                        err = elo_error(w, d, l, completed)
+                        pct = pts / completed * 100
+                        diff, err, _ = elo_difference(w, d, l)
                         est = anchor_elo + diff
                         elapsed = time.time() - start_time
                         gps = completed / elapsed if elapsed > 0 else 0
-                        log(f"  [vs SF {anchor_elo}] {completed:3d}/{total_games} | W={w} D={d} L={l} | {pct*100:.1f}% | diff={diff:+.1f} +/-{err:.1f} | Est: {est:.0f} | {gps:.1f} g/s")
+                        log(f"  [vs SF {anchor_elo}] {completed:3d}/{total_games} | W={w} D={d} L={l} | {pct:.1f}% | diff={diff:+.1f} ±{err:.1f} | Est: {est:.0f} | {gps:.1f} g/s")
                         next_report = ((completed // 50) + 1) * 50
     except Exception as e:
         log(f"  [vs SF {anchor_elo}] FATAL ERROR: {e}")
@@ -331,12 +318,11 @@ def main():
         total = r["w"] + r["d"] + r["l"]
         if total == 0: continue
         pts = r["w"] + r["d"] * 0.5
-        pct = pts / total
-        diff = elo_diff(pct)
-        err = elo_error(r["w"], r["d"], r["l"], total)
+        pct = pts / total * 100
+        diff, err, _ = elo_difference(r["w"], r["d"], r["l"])
         est = elo + diff
         elos.append(est)
-        log(f"  vs SF {elo}: {pts:.1f}/{total} ({pct*100:.1f}%) | "
+        log(f"  vs SF {elo}: {pts:.1f}/{total} ({pct:.1f}%) | "
               f"W={r['w']} D={r['d']} L={r['l']} | "
               f"Δ={diff:+.1f} ±{err:.1f} | Estimated: {est:.0f} ±{err:.0f}")
 

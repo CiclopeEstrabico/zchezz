@@ -3,6 +3,9 @@ from queue import Queue, Empty
 import chess
 import chess.pgn
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference as _elo_difference
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURAÇÕES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -397,9 +400,8 @@ def random_opening(n_plies: int, start_board=None) -> dict:
 def elo_diff(wins, losses, draws):
     N = wins + losses + draws
     if N == 0: return "N/A"
-    E = (wins + draws * 0.5) / N
-    elo = -800.0 if E==0 else (800.0 if E==1 else -400 * math.log10(1/E - 1))
-    return f"{'+' if elo>=0 else ''}{elo:.1f}"
+    elo, ci, _ = _elo_difference(wins, draws, losses)
+    return f"{'+' if elo>=0 else ''}{elo:.1f} ±{ci:.0f}"
 
 def print_status(is_final: bool = False):
     global completed_games, _real_total_games, start_time, stats, h2h

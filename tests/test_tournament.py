@@ -13,6 +13,9 @@ import subprocess, threading, time, sys, io, math, random, traceback, os, glob
 os.environ['PYTHONUNBUFFERED'] = '1'
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference as _elo_diff_fn
+
 def find_latest_engine():
     base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engine", "c")
     dirs = sorted(glob.glob(os.path.join(base, "zchezz_v*")))
@@ -218,17 +221,8 @@ def play_game(eng_w, eng_b):
     return 'd', 'max_plies' if ply >= MAX_PLIES else 'stalemate', ply
 
 def elo_diff(w, l, d):
-    t = w + l + d
-    if t == 0: return 0, 0
-    s = (w + d*0.5) / t
-    if s <= 0.001: return -800, 0
-    if s >= 0.999: return 800, 0
-    e = -400 * math.log10(1/s - 1)
-    wr, dr, lr = w/t, d/t, l/t
-    v = wr*(1-s)**2 + dr*(0.5-s)**2 + lr*(0-s)**2
-    se = math.sqrt(v/t) if t > 0 else 0
-    ese = 400 * se / (math.log(10) * s * (1-s)) if 0 < s < 1 else 0
-    return e, ese
+    elo, ci, _ = _elo_diff_fn(w, d, l)
+    return elo, ci
 
 def main():
     random.seed(42)

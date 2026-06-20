@@ -4,6 +4,9 @@ No Stockfish — direct comparison between the three engines."""
 
 import subprocess, threading, time, os, sys, math, random
 from queue import Queue, Empty
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import chess, chess.pgn
 
@@ -347,15 +350,10 @@ def main():
         pr = pair_results[(a_name, b_name)]
         n = pr["w"] + pr["d"] + pr["l"]
         s = pr["w"] + pr["d"] * 0.5
-        pct = s / n if n > 0 else 0.5
-        if 0 < pct < 1:
-            elo_diff = -400 * math.log10(1.0 / pct - 1)
-        elif pct >= 1:
-            elo_diff = 400
-        else:
-            elo_diff = -400
-        print(f"  {a_name} vs {b_name}: {s:.1f}/{n} ({pct*100:.1f}%) -> "
-              f"{a_name} is {elo_diff:+.0f} ELO vs {b_name}")
+        pct = s / n * 100 if n > 0 else 50
+        elo_diff, ci_95, _ = elo_difference(pr["w"], pr["d"], pr["l"])
+        print(f"  {a_name} vs {b_name}: {s:.1f}/{n} ({pct:.1f}%) -> "
+              f"{a_name} is {elo_diff:+.0f} ±{ci_95:.0f} ELO vs {b_name}")
 
     print("\nDone!")
 

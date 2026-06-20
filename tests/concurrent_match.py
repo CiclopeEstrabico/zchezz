@@ -9,6 +9,9 @@ Example (400 games, 4 workers = 4x100 games in parallel):
 """
 import subprocess, sys, os, time, math, re, tempfile, threading, glob
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference
+
 # Auto-detect the latest engine version
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE_C_DIR = os.path.join(BASE_DIR, "engine", "c")
@@ -26,22 +29,7 @@ OPENINGS_PGN = sys.argv[7] if len(sys.argv) > 7 else r"c:\Zchezz\openings\Blitz_
 
 QUICK_MATCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quick_match.py")
 
-def elo_diff(pct):
-    if pct >= 1.0: return 999
-    if pct <= 0.0: return -999
-    return -400 * math.log10(1/pct - 1)
 
-def elo_error(wins, draws, losses, total):
-    if total < 2: return 999
-    pct = (wins + draws * 0.5) / total
-    w_pct = wins / total
-    d_pct = draws / total
-    l_pct = losses / total
-    var = w_pct * (1 - pct)**2 + d_pct * (0.5 - pct)**2 + l_pct * (0 - pct)**2
-    se = math.sqrt(var / total)
-    if se == 0 or pct <= 0 or pct >= 1: return 999
-    elo_se = abs(400 / (math.log(10) * pct * (1 - pct))) * se * 1.96
-    return elo_se
 
 # Results aggregator
 lock = threading.Lock()
@@ -80,10 +68,7 @@ def run_worker(worker_id, games_per_worker):
         results["done"] += 1
         
         total = results["wins_a"] + results["draws"] + results["wins_b"]
-        pts_a = results["wins_a"] + results["draws"] * 0.5
-        pct = pts_a / total if total > 0 else 0.5
-        elo = elo_diff(pct)
-        err = elo_error(results["wins_a"], results["draws"], results["wins_b"], total)
+        elo, err, _ = elo_difference(results["wins_a"], results["draws"], results["wins_b"])
         print(f"  [AGG {results['done']}/{WORKERS}] {total} games: "
               f"W={results['wins_a']} D={results['draws']} L={results['wins_b']} "
               f"| ELO: {elo:+.1f} ±{err:.1f}", flush=True)
@@ -115,13 +100,12 @@ def main():
     elapsed = time.time() - t0
     total = results["wins_a"] + results["draws"] + results["wins_b"]
     pts_a = results["wins_a"] + results["draws"] * 0.5
-    pct = pts_a / total if total > 0 else 0.5
-    elo = elo_diff(pct)
-    err = elo_error(results["wins_a"], results["draws"], results["wins_b"], total)
+    pct = pts_a / total * 100 if total > 0 else 50
+    elo, err, _ = elo_difference(results["wins_a"], results["draws"], results["wins_b"])
     
     print("\n" + "=" * 70, flush=True)
     print(f"FINAL: {NAME_A} vs {NAME_B} ({total} games)", flush=True)
-    print(f"  {NAME_A}: {pts_a:.1f}/{total} ({pct*100:.1f}%)", flush=True)
+    print(f"  {NAME_A}: {pts_a:.1f}/{total} ({pct:.1f}%)", flush=True)
     print(f"  W={results['wins_a']} D={results['draws']} L={results['wins_b']}", flush=True)
     print(f"  ELO difference: {elo:+.1f} ±{err:.1f}", flush=True)
     print(f"  Elapsed: {elapsed:.0f}s ({elapsed/60:.1f}min)", flush=True)

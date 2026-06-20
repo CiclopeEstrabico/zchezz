@@ -3,6 +3,9 @@ from queue import Queue, Empty
 import chess
 import chess.pgn
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_elo
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  AUTO-DETECT LATEST ENGINE VERSION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -369,30 +372,31 @@ class EloEstimator:
 
     def estimate_mle(self):
         if not self.results: return None, None
-        smoothing = [(r[0], 0.5) for r in self.results[:2]] if len(self.results) > 10 else []
-        tmp = self.results + smoothing
-        p = sum(r[1] for r in tmp) / len(tmp)
-        avg_opp = sum(r[0] for r in tmp) / len(tmp)
-        if 0 < p < 1:
-            E = avg_opp + (-400 * math.log10(1.0/p - 1))
-        else:
-            E = avg_opp + (400 if p >= 1 else -400)
-        hess = 0
-        for _ in range(50):
-            grad, hess = 0, 0
-            for A, s in tmp:
-                exp_t = 10 ** ((A - E) / 400)
-                pi = 1 / (1 + exp_t) if exp_t < 1e15 else 0.0
-                grad += s - pi
-                hess += -pi * max(1e-15, 1 - pi) * (math.log(10) / 400)
-            if abs(grad) < 1e-4 or abs(hess) < 1e-18: break
-            E -= grad / (hess if hess != 0 else -1e-18)
+        # Group by anchor ELO
+        per_anchor = {}
+        for anchor_elo, score in self.results:
+            if anchor_elo not in per_anchor:
+                per_anchor[anchor_elo] = {"w": 0, "d": 0, "l": 0}
+            if score == 1.0: per_anchor[anchor_elo]["w"] += 1
+            elif score == 0.0: per_anchor[anchor_elo]["l"] += 1
+            else: per_anchor[anchor_elo]["d"] += 1
         
-        # O grad e hess no loop estão divididos por k = math.log(10)/400 para simplificar o Newton step.
-        # Para a variância (Erro Padrão), precisamos do Hessian verdadeiro: hess_true = hess * k
-        true_hess = hess * (math.log(10) / 400)
-        se = 1 / math.sqrt(abs(true_hess)) if abs(true_hess) > 0 else 0
-        return E, se * 1.96
+        # Weighted average across anchors
+        weighted_elo = 0.0
+        combined_var = 0.0
+        for a_elo, s in per_anchor.items():
+            est, ci = _estimated_elo(s["w"], s["d"], s["l"], a_elo)
+            se = ci / 1.96 if ci < float('inf') and ci > 0 else float('inf')
+            if se == 0 or se == float('inf'): continue
+            weight = 1.0 / se ** 2
+            weighted_elo += est * weight
+            combined_var += weight
+        
+        if combined_var > 0:
+            final_elo = weighted_elo / combined_var
+            final_se = 1.0 / math.sqrt(combined_var)
+            return final_elo, final_se * 1.96
+        return None, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -418,18 +422,9 @@ def _new_stats():
 def elo_diff(wins, losses, draws):
     N = wins + losses + draws
     if N == 0: return "N/A"
-    pts = wins + draws * 0.5
-    E_s = (pts + 0.5) / (N + 1)
-    elo = 400 * math.log10(E_s / (1 - E_s))
-    w_s = (wins  + 0.33) / (N + 1)
-    d_s = (draws + 0.33) / (N + 1)
-    l_s = (losses+ 0.33) / (N + 1)
-    var = w_s*(1-E_s)**2 + d_s*(0.5-E_s)**2 + l_s*(0-E_s)**2
-    se  = math.sqrt(var / (N + 1))
-    deriv = 400 / (math.log(10) * E_s * (1 - E_s))
-    margin = 1.96 * se * deriv
+    elo, ci, _ = _elo_calc(wins, draws, losses)
     sign = "+" if elo >= 0 else ""
-    return f"{sign}{elo:.1f} +/-{margin:.1f}"
+    return f"{sign}{elo:.1f} ±{ci:.1f}"
 
 
 def format_eval(score, elapsed_ms):

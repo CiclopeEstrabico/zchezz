@@ -6,6 +6,9 @@ Usage:
 """
 import subprocess, random, os, sys, time, math, re, glob
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from elo_calc import elo_difference
+
 # Auto-detect the latest engine version
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE_C_DIR = os.path.join(BASE_DIR, "engine", "c")
@@ -157,22 +160,7 @@ def play_game(eng_w, eng_b, fen, opening_moves):
         moves.append(move)
     return 0.5
 
-def elo_diff(pct):
-    if pct >= 1.0: return 999
-    if pct <= 0.0: return -999
-    return -400 * math.log10(1/pct - 1)
 
-def elo_error(wins, draws, losses, total):
-    if total < 2: return 999
-    pct = (wins + draws * 0.5) / total
-    w_pct = wins / total
-    d_pct = draws / total
-    l_pct = losses / total
-    var = w_pct * (1 - pct)**2 + d_pct * (0.5 - pct)**2 + l_pct * (0 - pct)**2
-    se = math.sqrt(var / total)
-    if se == 0 or pct <= 0 or pct >= 1: return 999
-    elo_se = abs(400 / (math.log(10) * pct * (1 - pct))) * se * 1.96
-    return elo_se
 
 def main():
     # Load openings from PGN
@@ -229,22 +217,20 @@ def main():
 
         if total % 10 == 0:
             pts_a = wins_a + draws * 0.5
-            pct = pts_a / total if total > 0 else 0.5
-            elo = elo_diff(pct)
-            err = elo_error(wins_a, draws, wins_b, total)
+            pct = pts_a / total * 100 if total > 0 else 50
+            elo, err, _ = elo_difference(wins_a, draws, wins_b)
             elapsed = time.time() - t_start
-            print(f"  [{total:3d}] {NAME_A}: {pts_a:.1f}/{total} ({pct*100:.1f}%) "
+            print(f"  [{total:3d}] {NAME_A}: {pts_a:.1f}/{total} ({pct:.1f}%) "
                   f"| W={wins_a} D={draws} L={wins_b} | ELO: {elo:+.1f} ±{err:.1f} [{elapsed:.0f}s]", flush=True)
 
     pts_a = wins_a + draws * 0.5
-    pct = pts_a / total if total > 0 else 0.5
-    elo = elo_diff(pct)
-    err = elo_error(wins_a, draws, wins_b, total)
+    pct = pts_a / total * 100 if total > 0 else 50
+    elo, err, _ = elo_difference(wins_a, draws, wins_b)
     elapsed = time.time() - t_start
 
     print("\n" + "=" * 70, flush=True)
     print(f"FINAL: {NAME_A} vs {NAME_B}", flush=True)
-    print(f"  {NAME_A}: {pts_a:.1f}/{total} ({pct*100:.1f}%)", flush=True)
+    print(f"  {NAME_A}: {pts_a:.1f}/{total} ({pct:.1f}%)", flush=True)
     print(f"  W={wins_a} D={draws} L={wins_b}", flush=True)
     print(f"  ELO difference: {elo:+.1f} ±{err:.1f}", flush=True)
     print(f"  Elapsed: {elapsed:.0f}s", flush=True)
