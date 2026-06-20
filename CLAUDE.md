@@ -9,7 +9,7 @@ Zchezz is a chess engine written in C with NNUE evaluation, targeting both nativ
 ```
 Zchezz/
 ├── engine/
-│   └── c/zchezz_v305/        # Current engine (v3.05 — Lazy SMP, opening book, TB)
+│   └── c/zchezz_v309/        # Current engine (v3.09 — Lazy SMP, opening book, TB)
 │       ├── *.c / *.h          # Engine source files
 │       ├── nnue_weights.bin   # NNUE weights (~426 KB, NNU3 format)
 │       ├── Makefile           # Build targets: native, wasm, bundle
@@ -23,22 +23,23 @@ Zchezz/
 │   ├── merida/                # Merida SVGs
 │   └── staunty/               # Staunty SVGs
 │
-├── openings/                  # Opening books (PGN format)
-│   └── Blitz_Testing_4moves.pgn  # 13K+ openings for testing
+├── openings/                  # Opening books (PGN/EPD format)
+│   ├── Blitz_Testing_4moves.pgn  # 13K+ openings for testing
+│   └── 8moves_v3.pgn            # 30K+ deep openings
 │
-├── tests/                     # Test & match scripts (version-agnostic)
+├── tests/                     # Test & match scripts
+│   ├── tournament.py          # Universal tournament runner (H2H + anchors + ELO)
+│   ├── tournament_quick.py    # Quick 200-game H2H regression test
+│   ├── elo_calc.py            # Shared ELO calculation (trinomial, 95% CI)
+│   ├── selfplay.py            # Self-play data generation for NNUE training
+│   ├── suite_runner.py        # EPD test suite runner (WAC, STS, etc.)
+│   ├── suite_compare.py       # Compare suite results between versions
 │   ├── uci_test.py            # UCI protocol compliance tests
 │   ├── browser_test.py        # Browser/WASM interaction tests
-│   ├── quick_match.py         # Generic A-vs-B match (PGN openings, paired colors)
-│   ├── concurrent_match.py    # Parallel multi-worker match runner
-│   ├── tournament_elo.py      # ELO estimation vs Stockfish anchors
-│   ├── tournament_complete.py # Full tournament with multiple anchors
-│   ├── validate_book.py       # Opening book legality and quality validation
 │   ├── test_html_features.py  # HTML feature validation (no browser needed)
-│   ├── suite_runner.py        # Test suite runner (WAC, STS, etc.)
-│   ├── suite_compare.py       # Compare suite results between versions
-│   ├── selfplay.py            # Self-play data generation for NNUE training
-│   └── test_tournament.py     # Round-robin tournament runner
+│   ├── test_move_parsing.py   # Move parsing tests
+│   ├── test_uci.py            # UCI command tests
+│   └── validate_book.py       # Opening book validation
 │
 ├── train/                     # NNUE training code (PyTorch)
 │   ├── mixtrain.py            # Main training script (QAT, NNU3)
@@ -65,7 +66,7 @@ Zchezz/
 ### Native (Windows/Linux)
 
 ```bash
-cd engine/c/zchezz_v305
+cd engine/c/zchezz_v309
 mingw32-make native    # Windows
 make native            # Linux
 ./zchezz --nnue nnue_weights.bin
@@ -81,12 +82,12 @@ gcc -O3 -ffast-math -D_GNU_SOURCE -std=c11 -mavxvnni -mavx2 \
     -static -lm -pthread
 ```
 
-Note: v305 includes `syzygy.c`, `tbprobe.c`, and `book.c` in the build. For WASM, add `-DNO_TABLEBASES -DNO_BOOK` and omit those files.
+Note: v309 includes `syzygy.c`, `tbprobe.c`, and `book.c` in the build. For WASM, add `-DNO_TABLEBASES -DNO_BOOK` and omit those files.
 
 ### WebAssembly (Emscripten)
 
 ```bash
-cd engine/c/zchezz_v305
+cd engine/c/zchezz_v309
 build_wasm.bat         # Windows (calls emcc + bundle.py)
 # Or:
 make wasm              # Produces zchezz_wasm.js + zchezz_wasm.wasm
@@ -96,38 +97,32 @@ make bundle            # Produces zchezz_bundle.html (self-contained)
 ### Android/Termux
 
 ```bash
-cd engine/c/zchezz_v305
+cd engine/c/zchezz_v309
 make termux
 ```
 
 ## Testing
 
-All test scripts auto-detect the latest engine version. No hardcoded paths.
+Two tournament scripts cover all testing scenarios:
 
-### Quick Match (version comparison)
-
-```bash
-python tests/quick_match.py ENGINE_A.exe ENGINE_B.exe NameA NameB 200 openings/Blitz_Testing_4moves.pgn
-```
-
-### ELO Estimation (vs Stockfish anchors)
+### Full Tournament (ELO estimation + H2H)
 
 ```bash
-python tests/tournament_elo.py
-python tests/tournament_complete.py
+python tests/tournament.py
 ```
 
-### HTML Feature Validation
+Edit the config block at the top of `tournament.py` to set engines, anchors, time control, and game count. Modes:
+- **H2H only**: set `ANCHORS = []`, `SELF_PLAY = True`
+- **Anchor ELO**: fill `ANCHORS` with Stockfish at known ELOs
+- **Full tournament**: both MY_ENGINES and ANCHORS with self-play
+
+### Quick H2H Regression Test (200 games)
 
 ```bash
-python tests/test_html_features.py
+python tests/tournament_quick.py
 ```
 
-### Opening Book Validation
-
-```bash
-python tests/validate_book.py
-```
+Same engine as tournament.py, preset for fast 200-game H2H (100ms/move, 14 workers).
 
 ## Architecture Notes
 
@@ -192,13 +187,14 @@ The `SearchResult` struct is 1920 bytes, mapped in JS via `DataView`:
 - Comments in English, user-facing strings may be in Portuguese
 - Piece encoding: COL_W=16, COL_B=24, type 1-6 (P,N,B,R,Q,K)
 - Square encoding: a8=0, h1=63 (rank 0 = rank 8, file 0 = file a)
-- Test scripts auto-detect the latest engine version (no hardcoded paths)
+- Test scripts: engine path configured in tournament.py config block (no auto-detection)
 
 ## Version History
 
 | Version | Changes |
 |---------|---------|
-| v3.05 | **Current** — Lazy SMP fix, opening book, TB root probing, SVG piece sets |
+| v3.09 | **Current** — ~2900 Elo, Lazy SMP, opening book, TB, consolidated tournament scripts |
+| v3.05 | Lazy SMP fix, opening book, TB root probing, SVG piece sets |
 
 ## Syzygy Tablebases
 
