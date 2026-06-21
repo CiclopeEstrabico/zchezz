@@ -75,25 +75,19 @@ from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_el
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Time Control ──────────────────────────────────────────────────────────────
-MOVETIME             = 200    # ms per move (applied to ALL engines and anchors)
+MOVETIME             = 200    # ms per move (Phase 9-2: ELO calibration 200ms)
 
 # ── My Engines ────────────────────────────────────────────────────────────────
 # Engines to test. Add as many as needed. Each plays against all anchors
 # and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v310\zchezz.exe",
-        "label":    "Zchezz-v310",
+        "path":     r"engine\c\zchezz_v313\zchezz.exe",
+        "label":    "Zchezz-v313",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-    },
-    {
-        "path":     r"engine\c\zchezz_v309\zchezz.exe",
-        "label":    "Zchezz-v309",
-        "tc_mode":  "movetime",
-        "tc_value": MOVETIME,
-        "tc_inc":   0,
+        "options":  {"SyzygyPath": r"C:\Zchezz\tablebases"},
     },
 ]
 
@@ -112,7 +106,7 @@ ANCHORS = [
 ]
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
-GAMES_VS_EACH_ANCHOR = 200   # openings per MY_ENGINE×ANCHOR pair (×2 with COLOR_SWAP)
+GAMES_VS_EACH_ANCHOR = 100   # 100 openings × 2 colors = 200 games (Phase 9-2)
 GAMES_SELF_PLAY      = 200   # openings per MY_ENGINE×MY_ENGINE pair (×2 with COLOR_SWAP)
 SELF_PLAY            = False  # engines in MY_ENGINES play each other?
 COLOR_SWAP           = True   # repeat each opening with colors reversed?

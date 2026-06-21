@@ -12,7 +12,7 @@ Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantize
 
 | | |
 |---|---|
-| **Strength** | ~2900 Elo (measured against Stockfish anchors at movetime 200ms) |
+| **Strength** | ~2750 Elo @ 200ms / ~2650 Elo @ 100ms (measured against Stockfish 2800 anchor) |
 | **Search** | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP |
 | **Evaluation** | Custom NNUE — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
 | **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
@@ -528,10 +528,12 @@ The bundled engine exposes `window.zchezzSearch(params, cb)` for programmatic us
 
 ## Syzygy tablebases
 
-v3.00 supports **Syzygy endgame tablebases** (3-4-5 piece) via the [Fathom](https://github.com/jdart1/Fathom) library.
+v3.00+ supports **Syzygy endgame tablebases** (3-4-5 piece) via the [Fathom](https://github.com/jdart1/Fathom) library.
 
 - **WDL probing** during search — returns exact Win/Draw/Loss scores for positions with ≤5 pieces
 - **DTZ probing** at the root — selects the fastest winning move
+- **Draw cutoff** (v3.13+) — Stockfish-style WDL draw handling: draws return 0cp immediately, wins/losses stored in TT at depth+6
+- **Insufficient material** (v3.13+) — KvK, KBvK, KNvK detected as dead draws via fast bitboard check
 - **Thread-safe** — WDL probes can be called from search threads
 - **No tablebases required** — the engine works identically without them
 - **WASM builds** automatically exclude tablebase code (compiled with `-DNO_TABLEBASES`)
@@ -550,7 +552,7 @@ Table files are available from [tablebase.sesse.net](http://tablebase.sesse.net/
 
 ```
 zchezz/
-├── engine/c/zchezz_v311/         Engine source code (current)
+├── engine/c/zchezz_v313/         Engine source code (current)
 │   ├── board.c / board.h         Board state, bitboards, magic attacks, make/unmake
 │   ├── search.c / search.h       Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
 │   ├── nnue.c / nnue.h           NNUE inference, incremental accumulator, NNU3 loader
@@ -558,6 +560,8 @@ zchezz/
 │   ├── syzygy.c / syzygy.h       Zchezz ↔ Fathom integration layer
 │   ├── book.c / book.h           Polyglot opening book support
 │   ├── nnue_weights.bin          Trained weights (NNU3 format, ~426 KB)
+│   ├── compile_zchezz.bat        Windows one-click compile (MinGW)
+│   ├── build_wasm.bat            WASM compile + bundle + deploy
 │   ├── Makefile                  Native / WASM build targets
 │   ├── bundle.py                 HTML bundler (WASM + weights → single offline file)
 │   ├── zchezz_wasm.html          Browser UI source
@@ -567,6 +571,7 @@ zchezz/
 ├── tests/                        Test & match scripts
 │   ├── tournament.py             Universal tournament runner (H2H + anchors + ELO)
 │   ├── tournament_quick.py       Quick 200-game H2H regression test
+│   ├── bench_nps.py              50-position NPS + eval sanity benchmark
 │   ├── elo_calc.py               Shared ELO calculation (trinomial, 95% CI)
 │   ├── selfplay.py               Self-play data generation for NNUE training
 │   ├── suite_runner.py           EPD test suite runner (WAC, STS, etc.)
@@ -578,11 +583,13 @@ zchezz/
 │   ├── test_uci.py               UCI command tests
 │   └── validate_book.py          Opening book validation
 │
+├── utils/                        Utility scripts & Termux reference
+│   ├── RunZchezzTermux.sh        Automated Termux test suite
+│   └── RunZchezzTermux.md        Termux quick reference guide
+│
 ├── train/                        NNUE training code (PyTorch)
 ├── sf_analyze/                   Stockfish data generation scripts
-├── test_suites/                  EPD test suites (WAC, STS, etc.)
-├── docs/                         GitHub Pages (serves zchezz_bundle.html)
-└── utils/                        Utility scripts
+└── test_suites/                  EPD test suites (WAC, STS, etc.)
 ```
 
 ---
@@ -605,6 +612,16 @@ zchezz/
 ---
 
 ## Changelog
+
+### v3.13
+- **TB draw cutoff** — Stockfish-style WDL draw handling in search. TB draws (WDL=2) now return 0cp immediately instead of continuing search where NNUE would override the correct TB result. Wins/losses stored in TT at depth+6 (Stockfish convention)
+- **Insufficient material detection** — fast bitboard check for KvK, KBvK, KNvK dead draws (6 OR operations + popcount, ~zero overhead). Previously evaluated KvK at +2cp, KBvK at +124cp — now all correctly 0cp
+- **3-piece TB probing** — `npieces < 3` guard enables KPK probing safely while skipping KvK (which would crash Fathom)
+- **New test infrastructure** — `bench_nps.py` (50-position NPS + eval sanity benchmark), `RunZchezzTermux.sh` (automated Termux test suite), `RunZchezzTermux.md` (Termux quick reference guide)
+- **CLAUDE.md** — updated with comprehensive 9-phase testing workflow (pre-flight → TB tests → regression → multi-thread → WASM → docs → deploy → ELO calibration)
+- **ELO calibration:** 2748 ±45 @ 200ms / 2657 ±28 @ 100ms (vs Stockfish 2800 anchor, 800 total games)
+- **TB impact:** +6.9 ELO in openings, +24.4 ELO in endgames, +1.7 to +2.5 plies deeper search, negligible NPS overhead (<1%)
+- **Verified:** 37/37 perft, 50-position benchmark, 700-game regression test (−3.5 ELO vs v3.12 — within noise), WASM bundle OK
 
 ### v3.12
 - **Performance fix** — v3.11's per-Board undo stack (36 KB `UndoFrame undo[512]` embedded in Board struct) caused L1 cache thrashing, producing a ~15 ELO regression vs v3.10
@@ -633,5 +650,5 @@ zchezz/
 ## Next steps
 
 - Better NNUE structure
-- Improve tablebase hit rate in search
-- Stronger endgame play
+- Improve Multithread performance
+
