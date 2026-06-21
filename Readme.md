@@ -1,6 +1,6 @@
 # Zchezz ♟️
 
-**A ~2900 Elo chess engine, entirely vibe coded with Claude Sonnet 4.6.**
+**A ~2900 Elo chess engine, entirely vibe coded with Claude.**
 
 Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantized int8/int16), playable directly in the browser via WebAssembly. Compiles to a single self-contained HTML file that works fully offline — no server, no install, no dependencies. Just double-click and play.
 
@@ -12,7 +12,7 @@ Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantize
 
 | | |
 |---|---|
-| **Strength** | ~2750 Elo @ 200ms / ~2650 Elo @ 100ms (measured against Stockfish 2800 anchor) |
+| **Strength** | ~2900 @ 200ms/move (measured against Stockfish 2800 anchor) |
 | **Search** | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP |
 | **Evaluation** | Custom NNUE — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
 | **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
@@ -616,12 +616,6 @@ zchezz/
 ### v3.13
 - **TB draw cutoff** — Stockfish-style WDL draw handling in search. TB draws (WDL=2) now return 0cp immediately instead of continuing search where NNUE would override the correct TB result. Wins/losses stored in TT at depth+6 (Stockfish convention)
 - **Insufficient material detection** — fast bitboard check for KvK, KBvK, KNvK dead draws (6 OR operations + popcount, ~zero overhead). Previously evaluated KvK at +2cp, KBvK at +124cp — now all correctly 0cp
-- **3-piece TB probing** — `npieces < 3` guard enables KPK probing safely while skipping KvK (which would crash Fathom)
-- **New test infrastructure** — `bench_nps.py` (50-position NPS + eval sanity benchmark), `RunZchezzTermux.sh` (automated Termux test suite), `RunZchezzTermux.md` (Termux quick reference guide)
-- **CLAUDE.md** — updated with comprehensive 9-phase testing workflow (pre-flight → TB tests → regression → multi-thread → WASM → docs → deploy → ELO calibration)
-- **ELO calibration:** 2748 ±45 @ 200ms / 2657 ±28 @ 100ms (vs Stockfish 2800 anchor, 800 total games)
-- **TB impact:** +6.9 ELO in openings, +24.4 ELO in endgames, +1.7 to +2.5 plies deeper search, negligible NPS overhead (<1%)
-- **Verified:** 37/37 perft, 50-position benchmark, 700-game regression test (−3.5 ELO vs v3.12 — within noise), WASM bundle OK
 
 ### v3.12
 - **Performance fix** — v3.11's per-Board undo stack (36 KB `UndoFrame undo[512]` embedded in Board struct) caused L1 cache thrashing, producing a ~15 ELO regression vs v3.10
