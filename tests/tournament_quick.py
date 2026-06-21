@@ -28,24 +28,25 @@ from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_el
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Time Control ──────────────────────────────────────────────────────────────
-MOVETIME             = 300    # ms per move
+MOVETIME             = 100    # ms per move (Phase 5B: multi-thread)
 
-# ── Stage 8: v312 TB vs v312 no-TB ──────────────────────────────────────────
+# ── Phase 5B: Thread safety (Threads=1 vs Threads=4) ────────────────
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v312\zchezz.exe",
-        "label":    "v312-TB",
+        "path":     r"engine\c\zchezz_v313\zchezz_v313_clean.exe",
+        "label":    "v313-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-        "options":  {"SyzygyPath": r"C:\Zchezz\tablebases"},
+        "options":  {"Threads": "1"},
     },
     {
-        "path":     r"engine\c\zchezz_v312\zchezz.exe",
-        "label":    "v312-noTB",
+        "path":     r"engine\c\zchezz_v313\zchezz_v313_clean.exe",
+        "label":    "v313-4T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
+        "options":  {"Threads": "4"},
     },
 ]
 
@@ -54,11 +55,11 @@ ANCHORS = []
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
 GAMES_VS_EACH_ANCHOR = 0
-GAMES_SELF_PLAY      = 100    # 100 openings x 2 colors = 200 games
+GAMES_SELF_PLAY      = 50     # 50 openings x 2 colors = 100 games (Phase 5B)
 SELF_PLAY            = True
 COLOR_SWAP           = True
 
-CONCURRENCY          = 4      # 4 concurrent
+CONCURRENCY          = 1      # 1 concurrent (multi-thread test needs full CPU)
 MAX_PLIES            = 400
 MOVE_TIMEOUT         = 38.0
 REPORT_PERFORMANCE_METRICS = True

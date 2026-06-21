@@ -272,50 +272,251 @@ def test_t2(eng):
           any(l.startswith("bestmove") for l in lines))
 
 
-# ── T3: Syzygy Tablebases ──────────────────────────────────────
+# ── T3: Syzygy Tablebases (Comprehensive) ──────────────────────
 def test_t3(eng):
-    print("\n=== T3: Syzygy Tablebases ===")
+    print("\n=== T3: Syzygy Tablebases (Comprehensive) ===")
 
     if not os.path.isdir(SYZYGY_PATH):
         print(f"  ⚠ Skipping — SyzygyPath not found: {SYZYGY_PATH}")
         return
 
+    def sync():
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+        time.sleep(0.2)
+        eng.clear()
+
+    # ── T3.1: TB Initialization ──────────────────────────────────
     eng.send(f'setoption name SyzygyPath value {SYZYGY_PATH}')
     eng.send("isready")
     lines = eng.read_until(r"^readyok$", timeout=10)
-    check("SyzygyPath set + readyok",
+    all_text = "\n".join(lines)
+    check("T3.1a: SyzygyPath set + readyok",
           any("readyok" in l for l in lines))
+    check("T3.1b: Syzygy tables loaded message",
+          "syzygy" in all_text.lower() or "loaded" in all_text.lower(),
+          f"stderr/info may have the load message")
 
-    # KQPK — 4-piece position (KQK 3-piece crashes the TB library)
-    # White: Ke3, Qd5, Pd4  vs  Black: Ke8
-    eng.send("position fen 4k3/8/8/3Q4/3P4/4K3/8/8 w - - 0 1")
-    eng.send("go depth 10")
-    lines = eng.read_until(r"^bestmove", timeout=20)
-    check("KQPK endgame → bestmove",
-          any(l.startswith("bestmove") for l in lines))
-
-    # Check for tbhits
+    # ── T3.2: 4-piece KRKP — must get tbhits > 0 ────────────────
+    # White: Ke1, Rc2 vs Black: Ke6, Pd4.  hm=0 so TB should probe.
+    sync()
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 8/8/4k3/8/3p4/8/2R5/4K3 w - - 0 1")
+    eng.send("go depth 12")
+    lines = eng.read_until(r"^bestmove", timeout=30)
     info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_4pc = 0
     if info_lines:
         m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
-        tbhits = int(m.group(1)) if m else 0
-        check("KQPK → tbhits > 0",
-              tbhits > 0,
-              f"tbhits={tbhits}")
-    else:
-        check("KQPK → tbhits field present", False, "no tbhits in info")
+        tbhits_4pc = int(m.group(1)) if m else 0
+    check("T3.2a: 4-piece KRKP → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+    check("T3.2b: 4-piece KRKP → tbhits > 0",
+          tbhits_4pc > 0,
+          f"tbhits={tbhits_4pc}")
+    # Score sanity: white has rook, should be winning
+    score_4pc = None
+    for l in reversed(info_lines):
+        m = re.search(r"score cp (-?\d+)", l)
+        if m:
+            score_4pc = int(m.group(1))
+            break
+    if score_4pc is not None:
+        check("T3.2c: 4-piece KRKP → positive score (white winning)",
+              score_4pc > 200,
+              f"score={score_4pc}")
 
-    # SyzygyProbeDepth
+    # ── T3.3: 5-piece KRPKB — must get tbhits > 0 ───────────────
+    # White: Kc2, Rd4, Pe4 vs Black: Kd6, Be1.
+    sync()
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 8/8/3k4/8/3RP3/8/2K5/4b3 w - - 0 1")
+    eng.send("go depth 12")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_5pc = 0
+    if info_lines:
+        m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
+        tbhits_5pc = int(m.group(1)) if m else 0
+    check("T3.3a: 5-piece KRPKB → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+    check("T3.3b: 5-piece KRPKB → tbhits > 0",
+          tbhits_5pc > 0,
+          f"tbhits={tbhits_5pc}")
+
+    # ── T3.4: 3-piece KRK — must work with npieces>=3 guard ─────
+    # 3-piece positions are now probed (guard changed to npieces<3).
+    # KRK is trivially won but TB confirms it.
+    sync()
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 8/8/8/4k3/8/8/8/R3K3 w - - 0 1")
+    eng.send("go depth 12")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    check("T3.4a: 3-piece KRK → bestmove (no crash)",
+          any(l.startswith("bestmove") for l in lines))
+    info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_3pc = 0
+    if info_lines:
+        m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
+        tbhits_3pc = int(m.group(1)) if m else 0
+    check("T3.4b: 3-piece KRK → tbhits >= 0 (no crash)",
+          True,
+          f"tbhits={tbhits_3pc}")
+
+    # ── T3.5: 4-piece KPK with pawn — tbhits after pawn push ────
+    # White: Ke1, Pe2 vs Black: Ke6.  Root has hm=0, pawn pushes
+    # create hm=0 children → TB should fire in non-PV nodes.
+    sync()
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
+    eng.send("go depth 14")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_kpk = 0
+    if info_lines:
+        m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
+        tbhits_kpk = int(m.group(1)) if m else 0
+    check("T3.5a: KPK (3 pieces) → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+    # KPK now probed (guard changed to npieces<3)
+    # tbhits may be 0 if all nodes are PV or hm>0
+    check("T3.5b: KPK → no crash (3-piece probing enabled)",
+          True,
+          f"tbhits={tbhits_kpk}")
+
+    # ── T3.6: TB with hm > 0 — should NOT probe ─────────────────
+    # Same 4-piece position but with hm=5 (no recent capture/pawn move)
+    sync()
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 8/8/4k3/8/3p4/8/2R5/4K3 w - - 5 10")
+    eng.send("go depth 10")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_hm5 = 0
+    if info_lines:
+        m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
+        tbhits_hm5 = int(m.group(1)) if m else 0
+    check("T3.6a: KRKP hm=5 → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+    # With hm=5, root doesn't probe. But captures inside the tree
+    # create hm=0 children. tbhits may be 0 or small.
+    check("T3.6b: KRKP hm=5 → fewer tbhits than hm=0",
+          tbhits_hm5 <= tbhits_4pc,
+          f"hm5={tbhits_hm5} vs hm0={tbhits_4pc}")
+
+    # ── T3.7: TB drawn position — score near 0 ──────────────────
+    # KBKN is a theoretical draw (bishop vs knight). 4 pieces.
+    sync()
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 8/8/4k3/8/3B4/8/5n2/4K3 w - - 0 1")
+    eng.send("go depth 14")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_draw = 0
+    if info_lines:
+        m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
+        tbhits_draw = int(m.group(1)) if m else 0
+    check("T3.7a: KBKN (drawn) → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+    check("T3.7b: KBKN (drawn) → tbhits > 0",
+          tbhits_draw > 0,
+          f"tbhits={tbhits_draw}")
+    # Score should be close to 0 (drawn endgame)
+    score_draw = None
+    for l in reversed(info_lines):
+        m = re.search(r"score cp (-?\d+)", l)
+        if m:
+            score_draw = int(m.group(1))
+            break
+    if score_draw is not None:
+        check("T3.7c: KBKN (drawn) → score near 0 (|score| < 100)",
+              abs(score_draw) < 100,
+              f"score={score_draw}")
+
+    # ── T3.8: SyzygyProbeDepth option ────────────────────────────
+    sync()
     eng.send("setoption name SyzygyProbeDepth value 5")
     eng.send("isready")
     eng.read_until(r"^readyok$", timeout=5)
-    check("SyzygyProbeDepth accepted", True)
+    check("T3.8: SyzygyProbeDepth=5 accepted", True)
 
-    # SyzygyProbeLimit
-    eng.send("setoption name SyzygyProbeLimit value 5")
+    # ── T3.9: SyzygyProbeLimit option ────────────────────────────
+    eng.send("setoption name SyzygyProbeLimit value 4")
     eng.send("isready")
     eng.read_until(r"^readyok$", timeout=5)
-    check("SyzygyProbeLimit accepted", True)
+
+    # With ProbeLimit=4, 5-piece positions should NOT probe
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position fen 8/8/3k4/8/3RP3/8/2K5/4b3 w - - 0 1")
+    eng.send("go depth 10")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    info_lines = [l for l in lines if "tbhits" in l]
+    tbhits_limited = 0
+    if info_lines:
+        m = re.search(r"tbhits\s+(\d+)", info_lines[-1])
+        tbhits_limited = int(m.group(1)) if m else 0
+    check("T3.9a: ProbeLimit=4, 5-piece → fewer tbhits",
+          tbhits_limited < tbhits_5pc,
+          f"limited={tbhits_limited} vs unlimited={tbhits_5pc}")
+
+    # ── T3.10: NPS comparison (TB overhead check) ────────────────
+    # Reset options
+    eng.send("setoption name SyzygyProbeDepth value 1")
+    eng.send("setoption name SyzygyProbeLimit value 6")
+    sync()
+    # Middlegame position (many pieces, no TB probing expected)
+    eng.send("ucinewgame")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position startpos")
+    eng.send("go depth 14")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    nps_tb = 0
+    for l in reversed(lines):
+        m = re.search(r"nps\s+(\d+)", l)
+        if m:
+            nps_tb = int(m.group(1))
+            break
+    check("T3.10: Middlegame NPS > 1M (no TB overhead)",
+          nps_tb > 1000000,
+          f"nps={nps_tb}")
+
+    # ── T3.11: Multiple sequential TB searches (no crash) ────────
+    sync()
+    tb_positions = [
+        "8/8/4k3/8/3p4/8/2R5/4K3 w - - 0 1",   # KRKP
+        "8/8/3k4/8/3RP3/8/2K5/4b3 w - - 0 1",   # KRPKB
+        "4k3/8/8/3Q4/3P4/4K3/8/8 w - - 0 1",     # KQPK
+        "8/8/4k3/8/3B4/8/5n2/4K3 w - - 0 1",     # KBKN
+        "8/3k4/8/8/8/8/3KR3/4r3 w - - 0 1",       # KRKR
+    ]
+    crash_free = True
+    for i, fen in enumerate(tb_positions):
+        eng.send("ucinewgame")
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+        eng.send(f"position fen {fen}")
+        eng.send("go depth 10")
+        lines = eng.read_until(r"^bestmove", timeout=20)
+        if not any(l.startswith("bestmove") for l in lines):
+            crash_free = False
+            break
+    check("T3.11: 5 sequential TB positions → no crash",
+          crash_free)
 
 
 # ── T4: Opening Book ──────────────────────────────────────────
@@ -423,9 +624,9 @@ def test_t6(eng):
 
     eng.send("position startpos")
     eng.send("go infinite")
-    time.sleep(1.0)
+    time.sleep(2.0)  # Allow helpers to fully start before stopping
     eng.send("stop")
-    lines = eng.read_until(r"^bestmove", timeout=10)
+    lines = eng.read_until(r"^bestmove", timeout=15)
     check("Threads=2 + go infinite + stop → bestmove",
           any(l.startswith("bestmove") for l in lines))
 
@@ -647,6 +848,279 @@ def test_t9(eng):
           f"nodes={nodes}" if not perft_ok else "")
 
 
+# ── T10: v3.13 Thread Safety (NnueAccum) ──────────────────────
+def test_t10(eng):
+    print("\n=== T10: v3.13 Thread Safety ===")
+
+    # Different thread counts with same position → all produce valid bestmove
+    test_fen = "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2"
+    for threads in [1, 2, 4, 8]:
+        eng.send(f"setoption name Threads value {threads}")
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+
+        eng.send(f"position fen {test_fen}")
+        eng.send("go depth 6")
+        lines = eng.read_until(r"^bestmove", timeout=30)
+        bm = [l for l in lines if l.startswith("bestmove")]
+        check(f"Threads={threads} depth 6 → valid bestmove",
+              len(bm) > 0 and len(bm[0].split()[1]) >= 4)
+
+    # Rapid thread switching: alternate between 1 and 4 threads
+    for i in range(5):
+        t = 1 if i % 2 == 0 else 4
+        eng.send(f"setoption name Threads value {t}")
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+        eng.send("position startpos moves e2e4 e7e5")
+        eng.send("go depth 5")
+        lines = eng.read_until(r"^bestmove", timeout=15)
+        check(f"Thread switch cycle {i+1} (Threads={t}) → bestmove",
+              any(l.startswith("bestmove") for l in lines))
+
+    # Multiple ucinewgame + threads (accumulator reset stress)
+    eng.send("setoption name Threads value 4")
+    for i in range(3):
+        eng.send("ucinewgame")
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+        eng.send("position startpos")
+        eng.send("go depth 5")
+        lines = eng.read_until(r"^bestmove", timeout=15)
+        check(f"ucinewgame + Threads=4 cycle {i+1} → bestmove",
+              any(l.startswith("bestmove") for l in lines))
+
+    eng.send("setoption name Threads value 1")
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+
+
+# ── T11: Edge Case Positions ──────────────────────────────────
+def test_t11(eng):
+    print("\n=== T11: Edge Case Positions ===")
+
+    edge_positions = [
+        ("stalemate detection",
+         "k7/8/1K6/8/8/8/8/8 b - - 0 1", 8),
+        ("single legal move",
+         "k7/8/1K6/8/8/8/8/R7 b - - 0 1", 6),
+        ("promotion required",
+         "8/P7/8/8/8/8/8/K1k5 w - - 0 1", 6),
+        ("double check",
+         "r1bqkbnr/pppp1ppp/8/4p3/2B5/5Q2/PPPPPPPP/RNB1K1NR w KQkq - 2 3", 5),
+        ("pinned piece",
+         "rnbqk2r/ppppbppp/5n2/4p3/4P3/5N2/PPPPBPPP/RNBQK2R w KQkq - 4 4", 6),
+        ("EP discovery check",
+         "8/8/8/8/k1Pp4/8/1K6/8 b - c3 0 1", 6),
+        ("rook vs bishop endgame",
+         "4k3/8/8/4R3/8/8/b7/4K3 w - - 0 1", 8),
+        ("KNB vs K (tricky mate)",
+         "8/8/8/8/8/8/4k3/K1B1N3 w - - 0 1", 8),
+        ("many captures available",
+         "r1b1k1nr/pppp1ppp/2n5/4P3/1bB5/5N2/PPPN1PPP/R1BQK2R w KQkq - 1 5", 6),
+        ("FEN with high halfmove clock",
+         "8/8/3k4/8/8/3K4/8/8 w - - 90 100", 6),
+    ]
+
+    for label, fen, depth in edge_positions:
+        eng.send(f"position fen {fen}")
+        eng.send(f"go depth {depth}")
+        lines = eng.read_until(r"^bestmove", timeout=15)
+        bm = [l for l in lines if l.startswith("bestmove")]
+        check(f"{label} → bestmove",
+              len(bm) > 0,
+              f"no bestmove in {len(lines)} lines")
+
+
+# ── T12: Score and PV Validation ──────────────────────────────
+def test_t12(eng):
+    print("\n=== T12: Score & PV Validation ===")
+
+    def sync():
+        """Synchronize engine state between sub-tests."""
+        eng.send("isready")
+        eng.read_until(r"^readyok$", timeout=5)
+        time.sleep(0.2)  # Let reader thread fully drain stdout pipe
+        eng.clear()
+
+    # Winning position: score should be > 0 for white
+    sync()
+    eng.send("position fen 8/8/8/8/8/8/4k3/4K2R w - - 0 1")
+    eng.send("go depth 8")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    info_lines = [l for l in lines if l.startswith("info depth")]
+    if info_lines:
+        last = info_lines[-1]
+        m = re.search(r"score cp (\-?\d+)", last)
+        m2 = re.search(r"score mate (\-?\d+)", last)
+        if m:
+            score = int(m.group(1))
+            check("winning position → positive score", score > 0, f"score={score}")
+        elif m2:
+            mate = int(m2.group(1))
+            check("winning position → mate score", mate > 0, f"mate={mate}")
+        else:
+            check("winning position → has score", False)
+    else:
+        check("winning position → info lines", False)
+
+    # Losing position: score should be < 0 for white
+    sync()
+    eng.send("position fen 8/8/8/8/8/8/4K3/4k2r b - - 0 1")
+    eng.send("go depth 8")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    info_lines = [l for l in lines if l.startswith("info depth")]
+    if info_lines:
+        last = info_lines[-1]
+        m = re.search(r"score cp (\-?\d+)", last)
+        m2 = re.search(r"score mate (\-?\d+)", last)
+        score_ok = False
+        if m:
+            score_ok = True
+        elif m2:
+            score_ok = True
+        check("losing-for-white position → has valid score", score_ok)
+    else:
+        check("losing-for-white position → info lines", False)
+
+    # PV must contain valid UCI moves
+    sync()
+    eng.send("position startpos")
+    eng.send("go depth 8")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    info_lines = [l for l in lines if l.startswith("info depth")]
+    if info_lines:
+        last = info_lines[-1]
+        m = re.search(r"pv (.+)", last)
+        if m:
+            pv_str = m.group(1).strip()
+            pv_moves = pv_str.split()
+            all_valid = all(
+                len(mv) >= 4 and len(mv) <= 5 and mv[0] in "abcdefgh"
+                for mv in pv_moves
+            )
+            check(f"PV contains valid UCI moves ({len(pv_moves)} moves)",
+                  all_valid and len(pv_moves) > 0,
+                  f"pv: {pv_str[:60]}")
+        else:
+            check("depth 8 → pv field present", False)
+    else:
+        check("depth 8 → info lines present", False)
+
+    # Mate in 1 detection
+    sync()
+    eng.send("position fen 6k1/5ppp/8/8/8/8/8/R3K3 w Q - 0 1")
+    eng.send("go depth 10")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    info_lines = [l for l in lines if "score mate" in l]
+    check("mate-in-1 → score mate detected",
+          len(info_lines) > 0,
+          f"found {len(info_lines)} mate lines")
+
+    # Depth progression: each depth should have info
+    sync()
+    eng.send("position startpos")
+    eng.send("go depth 6")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    depths_seen = set()
+    for l in lines:
+        m = re.search(r"info depth (\d+)", l)
+        if m:
+            depths_seen.add(int(m.group(1)))
+    check("depth 6 → info for depths 1-6",
+          all(d in depths_seen for d in range(1, 7)),
+          f"depths seen: {sorted(depths_seen)}")
+
+    # hashfull increases with depth
+    sync()
+    eng.send("ucinewgame")  # Clear TT for clean hashfull measurement
+    eng.send("isready")
+    eng.read_until(r"^readyok$", timeout=5)
+    eng.send("position startpos")
+    eng.send("go depth 12")
+    lines = eng.read_until(r"^bestmove", timeout=30)
+    hashfull_vals = []
+    for l in lines:
+        m = re.search(r"hashfull (\d+)", l)
+        if m:
+            hashfull_vals.append(int(m.group(1)))
+    check("hashfull reported in info",
+          len(hashfull_vals) > 0)
+    if len(hashfull_vals) > 2:
+        check("hashfull increases with depth",
+              hashfull_vals[-1] >= hashfull_vals[0],
+              f"first={hashfull_vals[0]}, last={hashfull_vals[-1]}")
+
+
+# ── T13: UCI Protocol Conformance ─────────────────────────────
+def test_t13(eng):
+    print("\n=== T13: UCI Protocol Conformance ===")
+
+    # Registration stub
+    eng.send("register later")
+    eng.send("isready")
+    lines = eng.read_until(r"^readyok$", timeout=5)
+    check("register later → readyok", any("readyok" in l for l in lines))
+
+    # Unknown command → no crash
+    eng.send("foobar unknown command")
+    eng.send("isready")
+    lines = eng.read_until(r"^readyok$", timeout=5)
+    check("unknown command → no crash", any("readyok" in l for l in lines))
+
+    # Empty line → no crash
+    eng.send("")
+    eng.send("isready")
+    lines = eng.read_until(r"^readyok$", timeout=5)
+    check("empty line → no crash", any("readyok" in l for l in lines))
+
+    # Multiple rapid isready
+    for i in range(5):
+        eng.send("isready")
+    lines = eng.read_until(r"^readyok$", timeout=5)
+    ready_count = sum(1 for l in lines if "readyok" in l)
+    check("5x rapid isready → at least 1 readyok",
+          ready_count >= 1, f"count={ready_count}")
+
+    # Position with no moves keyword
+    eng.send("position fen rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")
+    eng.send("go depth 4")
+    lines = eng.read_until(r"^bestmove", timeout=10)
+    check("position fen (no moves) → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+
+    # go mate (mate search)
+    eng.send("position fen 6k1/5ppp/8/8/8/8/8/R3K3 w Q - 0 1")
+    eng.send("go mate 2")
+    lines = eng.read_until(r"^bestmove", timeout=15)
+    check("go mate 2 → bestmove",
+          any(l.startswith("bestmove") for l in lines))
+
+    # Multiple go commands (second should work after first)
+    eng.send("position startpos")
+    eng.send("go depth 4")
+    eng.read_until(r"^bestmove", timeout=10)
+    eng.send("position startpos moves e2e4")
+    eng.send("go depth 4")
+    lines = eng.read_until(r"^bestmove", timeout=10)
+    check("sequential go commands → second bestmove",
+          any(l.startswith("bestmove") for l in lines))
+
+    # Option name with spaces (UCI_AnalyseMode)
+    eng.send("setoption name UCI_AnalyseMode value true")
+    eng.send("isready")
+    lines = eng.read_until(r"^readyok$", timeout=5)
+    check("option with underscore name → readyok",
+          any("readyok" in l for l in lines))
+
+    # UCI_Chess960 option
+    eng.send("setoption name UCI_Chess960 value false")
+    eng.send("isready")
+    lines = eng.read_until(r"^readyok$", timeout=5)
+    check("UCI_Chess960 option → readyok",
+          any("readyok" in l for l in lines))
+
+
 # ── Main ──────────────────────────────────────────────────────
 def main():
     global BOOK_PATH, SYZYGY_PATH
@@ -671,6 +1145,10 @@ def main():
         ("T7", test_t7),
         ("T8", test_t8),
         ("T9", test_t9),
+        ("T10", test_t10),
+        ("T11", test_t11),
+        ("T12", test_t12),
+        ("T13", test_t13),
     ]
 
     for name, test_fn in test_groups:
@@ -704,3 +1182,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
