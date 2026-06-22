@@ -292,6 +292,8 @@ The engine supports **Lazy SMP** with up to 8 threads. Each worker thread runs a
 - **UCI option**: `setoption name Threads value <N>` (1–128, default 1)
 - **WASM**: single-threaded only (browser SharedArrayBuffer requires COOP/COEP headers not available on file:// protocol)
 - **Thread safety**: TT is lock-free (struct-of-arrays layout); per-board undo stack and repetition history ensure thread isolation
+- **TT move validation**: corrupt TT entries from hash collisions are detected and skipped (piece/color/castle bounds checking) before board_make, preventing rare crashes under heavy TT contention
+- **Helper thread management**: asynchronous cancellation with timed-join fallback and 8 MB stacks for reliable cleanup
 
 ### Quiescence search
 
@@ -552,7 +554,7 @@ Table files are available from [tablebase.sesse.net](http://tablebase.sesse.net/
 
 ```
 zchezz/
-├── engine/c/zchezz_v313/         Engine source code (current)
+├── engine/c/zchezz_v314/         Engine source code (current)
 │   ├── board.c / board.h         Board state, bitboards, magic attacks, make/unmake
 │   ├── search.c / search.h       Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
 │   ├── nnue.c / nnue.h           NNUE inference, incremental accumulator, NNU3 loader
@@ -613,6 +615,14 @@ zchezz/
 
 ## Changelog
 
+### v3.14
+- **SMP crash fix — TT move validation** — lockless transposition table race conditions could produce corrupt move entries (empty from-square, invalid castle field). These caused `P2BI[0]=-1` → `b->bb[-1]` out-of-bounds access → segfault. Fixed with bounds-checking guards in Stage 1 (search.c) and systemic guards in board_make/uf_bb_clr/uf_bb_set (board.c)
+- **NNUE thread safety** — fixed `acc_dirty` flag checking global state instead of per-thread accumulator, causing all NNUE evaluations to return 0 in helper threads
+- **Helper thread stability** — set `PTHREAD_CANCEL_ASYNCHRONOUS` with timed-join + cancel fallback; 8 MB stacks for all threads to prevent stack overflow in deep searches
+- **Castle field validation** — added `m->castle <= 4` bounds check in `board_make` to prevent `CASTLE_SQ` array out-of-bounds from corrupt TT entries
+- **Bitboard index guards** — `uf_bb_clr` and `uf_bb_set` now reject invalid bitboard indices (`bi < 0` or `bi >= 12`), catching any remaining corrupt moves before they touch bitboards
+- **Verified:** 200/200 stability searches (4T, 0 crashes), 600 games v3.14 vs v3.13 at 100ms (+5.8 ±21.4 ELO, no regression), 300 games at 200ms (-2.3 ±27.2 ELO, no regression), 4T vs 1T +100 ELO
+
 ### v3.13
 - **TB draw cutoff** — Stockfish-style WDL draw handling in search. TB draws (WDL=2) now return 0cp immediately instead of continuing search where NNUE would override the correct TB result. Wins/losses stored in TT at depth+6 (Stockfish convention)
 - **Insufficient material detection** — fast bitboard check for KvK, KBvK, KNvK dead draws (6 OR operations + popcount, ~zero overhead). Previously evaluated KvK at +2cp, KBvK at +124cp — now all correctly 0cp
@@ -644,5 +654,5 @@ zchezz/
 ## Next steps
 
 - Better NNUE structure
-- Improve Multithread performance
+- Ponder support
 

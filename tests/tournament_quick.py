@@ -22,31 +22,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from elo_calc import elo_difference as _elo_calc, estimated_elo as _estimated_elo
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION — Quick H2H regression test
+#  CONFIGURATION — v3.14 vs v3.13 regression test (1T, 200 games)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Time Control ──────────────────────────────────────────────────────────────
-MOVETIME             = 100    # ms per move (Phase 5B: multi-thread)
+MOVETIME             = 100    # ms per move
 
-# ── Phase 5B: Thread safety (Threads=1 vs Threads=4) ────────────────
+# ── v3.14 1T vs v3.13 1T regression ────────────────
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v313\zchezz_v313_clean.exe",
-        "label":    "v313-1T",
+        "path":     r"engine\c\zchezz_v314\zchezz.exe",
+        "label":    "v314-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
         "options":  {"Threads": "1"},
     },
     {
-        "path":     r"engine\c\zchezz_v313\zchezz_v313_clean.exe",
-        "label":    "v313-4T",
+        "path":     r"engine\c\zchezz_v313\zchezz.exe",
+        "label":    "v313-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME,
         "tc_inc":   0,
-        "options":  {"Threads": "4"},
+        "options":  {"Threads": "1"},
     },
 ]
 
@@ -55,11 +55,11 @@ ANCHORS = []
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
 GAMES_VS_EACH_ANCHOR = 0
-GAMES_SELF_PLAY      = 50     # 50 openings x 2 colors = 100 games (Phase 5B)
+GAMES_SELF_PLAY      = 300    # 300 openings x 2 colors = 600 games
 SELF_PLAY            = True
 COLOR_SWAP           = True
 
-CONCURRENCY          = 1      # 1 concurrent (multi-thread test needs full CPU)
+CONCURRENCY          = 14     # 14 concurrent (1T engines)
 MAX_PLIES            = 400
 MOVE_TIMEOUT         = 38.0
 REPORT_PERFORMANCE_METRICS = True
