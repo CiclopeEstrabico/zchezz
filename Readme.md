@@ -4,7 +4,7 @@
 
 Written in C with a custom-trained NNUE evaluation (799→256→64→1, quantized int8/int16), playable directly in the browser via WebAssembly. Compiles to a single self-contained HTML file that works fully offline — no server, no install, no dependencies. Just double-click and play.
 
-▶ **[Play against Zchezz in your browser](https://ciclopeestrabico.github.io/zchezz/)**
+▶ **[Play against Zchezz in your browser](https://gitzambrano.github.io/zchezz/)**
 
 ---
 
