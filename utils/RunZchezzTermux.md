@@ -35,7 +35,7 @@ pkg install emscripten -y
 cp -r ~/storage/downloads/zchezz_${VER} ~/
 
 # ── Option B: Clone from GitHub ──
-git clone https://github.com/CiclopeEstrabico/zchezz.git
+git clone https://github.com/gitzambrano/zchezz.git
 cp -r ~/zchezz/engine/c/zchezz_${VER} ~/
 ```
 
