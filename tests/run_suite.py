@@ -42,7 +42,7 @@ copy of the literal). Examples:
   check that path first.
 
   Sampling (SAMPLE_N / SAMPLE_PCT / SAMPLE_ALL) is mutually exclusive —
-  set exactly one, leave the others at None/False; SAMPLE_SEED is fixed so
+  set exactly one, leave the others at None/False; SEED is fixed so
   the SAME sampled positions are used for engine 1 and engine 2 in a
   comparison run, which is what makes the per-suite delta meaningful
   (otherwise a score change could just be sampling noise).
@@ -63,33 +63,15 @@ OUTPUT: a JSON file (RESULTS_DIR, or --output) with full per-position
 results for both engines plus the printed comparison table — no PGN/EPD
 export, this tool doesn't produce training data or game records.
 
-── SHARED CONFIGURATION VOCABULARY ─────────────────────────────────────────
+── CONFIGURATION NAMES ─────────────────────────────────────────────────────
 
-Every tests/run_*.py harness uses the SAME name for the same concept, so a
-value means the same thing whichever harness you are reading (CLAUDE.md
-rule 8: the constant lives in the CONFIGURATION block once, and the CLI's
-`default=` IS that constant, never a second copy of the literal).
+Every tool uses the same constant name for the same concept, so a value
+means the same thing whichever tool you are reading. The full list lives in
+ONE place: utils/cliconf.py, section "SHARED CONFIGURATION VOCABULARY".
+A `DEFAULT_` prefix marks a knob specific to this tool alone.
 
-  GAMES           number of games to play
-  CONCURRENCY     parallel GAMES, not threads per game. 0 = autodetect cores
-                  in the harnesses that wrap a C exe (arena, selfplay_native)
-  MOVETIME_MS     per-move budget in milliseconds
-  NODES           per-move node budget; used only when MOVETIME_MS == 0
-  MAX_PLIES       half-move cap before a game is scored a draw (400 project-wide)
-  SEED            RNG seed for opening cycling / game order
-  TT_MB           per-TTable memory budget in MB
-  OPENING_FOLDER  openings/lines, walked recursively for .pgn/.epd files
-  RESULTS_DIR     tests/<tool>_results — every harness writes under tests/
-  SAVE_PGN        write standard PGN game records
-  SAVE_EPD        write positions + eval as EPD
-  SAVE_BIN        write packed training samples (train/dataset.py SAMPLE_DTYPE)
-
-SAVE_PGN / SAVE_EPD / SAVE_BIN are INDEPENDENT flags, not a choice of one
-(CLAUDE.md rule 9: the native path is a faster path for the same job, never a
-reduced one — losing PGN because a tool prefers .bin is a regression).
-
-A `DEFAULT_` prefix marks a knob specific to ONE tool (DEFAULT_TEMPERATURE,
-DEFAULT_ALPHA, ...) and is deliberately not shared.
+SAVE_PGN / SAVE_EPD / SAVE_BIN are independent switches, not a choice of
+one: any combination can be on in the same run.
 """
 
 # Windows consoles default to cp1252, which cannot encode the em-dashes and box
@@ -157,7 +139,7 @@ SAMPLE_N   = None                   # ex: 50
 SAMPLE_PCT = 0.10                   # ex: 0.20  (20%)
 SAMPLE_ALL = False                  # True  →  ignora SAMPLE_N e SAMPLE_PCT
 
-SAMPLE_SEED = 42                    # semente fixa → mesmas posições nos dois engines
+SEED = 42                    # semente fixa → mesmas posições nos dois engines
 
 # ── Seleção de suites ─────────────────────────────────────────────────────────
 # []  →  usa todas as suites encontradas em SUITES_DIR
@@ -624,10 +606,13 @@ def main():
     am.add_argument('--pct', type=float, default=None, metavar='F', help='Fracao 0-1 por suite (override SAMPLE_PCT)')
     am.add_argument('--all', action='store_true',                   help='Todas as posicoes (override SAMPLE_ALL)')
 
-    parser.add_argument('--seed',    type=int, default=None, help='Semente aleatoria (override SAMPLE_SEED)')
+    parser.add_argument('--seed',    type=int, default=None, help='Semente aleatoria (override SEED)')
     parser.add_argument('--workers', type=int, default=None, help='Workers paralelos (override WORKERS)')
     parser.add_argument('--output',  default=None, metavar='FILE', help='Arquivo JSON de saida')
 
+    parser.add_argument("--show-config", action="store_true",
+                    help="print the resolved configuration and exit "
+                         "(runs nothing, writes nothing)")
     args = parser.parse_args()
 
     # ── Resolve CONFIG vs CLI ─────────────────────────────────────────────────
@@ -637,7 +622,7 @@ def main():
     nnue2_path = args.nnue2 or NNUE_2
     suites_dir = args.suites_dir or SUITES_DIR
     workers    = args.workers if args.workers is not None else WORKERS
-    seed       = args.seed    if args.seed    is not None else SAMPLE_SEED
+    seed       = args.seed    if args.seed    is not None else SEED
 
     # search mode: CLI > CONFIG; MOVETIME_MS > DEPTH
     if   args.movetime is not None: depth = None;         movetime = args.movetime
@@ -656,6 +641,20 @@ def main():
     elif SAMPLE_ALL:            sample_n = None;     sample_pct = None
     elif SAMPLE_N is not None:  sample_n = SAMPLE_N; sample_pct = None
     else:                       sample_n = None;     sample_pct = SAMPLE_PCT
+
+    if args.show_config:
+        print("Resolved configuration:")
+        for _k, _v in (("ENGINE_1", e1_path), ("ENGINE_2", e2_path),
+                       ("NNUE_1", nnue1_path), ("NNUE_2", nnue2_path),
+                       ("DEPTH", depth), ("MOVETIME_MS", movetime),
+                       ("SUITES_DIR", suites_dir), ("RESULTS_DIR", RESULTS_DIR),
+                       ("SAMPLE_N", sample_n), ("SAMPLE_PCT", sample_pct),
+                       ("SAMPLE_ALL", sample_n is None and sample_pct is None),
+                       ("SEED", seed), ("WORKERS", workers),
+                       ("INCLUDE_SUITES", include), ("EXCLUDE_SUITES", exclude),
+                       ("ENGINE_TIMEOUT_S", ENGINE_TIMEOUT_S)):
+            print(f"  {_k.ljust(16)} = {_v!r}")
+        sys.exit(0)
 
     # ── Validacoes ───────────────────────────────────────────────────────────
     if not e1_path:

@@ -67,10 +67,7 @@ FAIL_FAST = False       # True = stop at the first file that fails verification
 # so a wrong entry here is caught rather than applied — but do not rely on
 # that as a substitute for knowing.
 RENAMES = {
-    # Already applied (kept for the record): extra_quiet_raw_wdl's `wdl`
-    # column held exactly {0.0, 0.5, 1.0} over all 47,495,908 rows -> it was
-    # the game outcome, renamed to `result`. Re-running is a no-op: the
-    # verifier refuses a file that already has a `result` column.
+    # "dataset folder": ("column to rename", "new name")
 }
 
 # Columns to DELETE, per dataset. A column is dropped when it is either
@@ -124,6 +121,32 @@ RESULT_VALUES = (0.0, 0.5, 1.0)
 REQUIRED_MATCH_FRACTION = 1.0    # 1.0 = every non-null value must be in the set
 SAMPLE_ROWS_PER_FILE = 0         # 0 = verify ALL rows of the file (recommended)
 # ═════════════════════════════════════════════════════════════════════════════
+
+# One-off restriction, without editing RENAMES/DROPS: process only these
+# dataset folders (empty = every folder named in RENAMES/DROPS).
+ONLY = []
+
+# ═══════════════════════════════ COMMAND LINE ════════════════════════════════
+# The CONFIGURATION block above is the primary interface — a bare
+# `python train/labeling/fix_column_names.py` does exactly what it says.
+# Every constant is ALSO a flag that overrides it, and `--show-config` prints
+# the resolved settings and exits. See utils/cliconf.py and CLAUDE.md rule 8.
+# ═════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "utils"))
+from cliconf import force_utf8_stdio, override_from_cli  # noqa: E402
+
+force_utf8_stdio()
+
+CLI = [
+    ("DRY_RUN",                 "--dry-run",       bool, "report only, write nothing"),
+    ("DATA_DIR",                "--data-dir",      str,  "root holding one folder per dataset"),
+    ("BACKUP",                  "--backup",        bool, "keep <file>.bak next to each rewritten file"),
+    ("FAIL_FAST",               "--fail-fast",     bool, "stop at the first file that fails verification"),
+    ("ONLY",                    "--only",          list, "restrict to this dataset folder (repeatable)"),
+    ("REQUIRED_MATCH_FRACTION", "--match-fraction", float, "fraction of non-null values that must be in the expected set"),
+    ("SAMPLE_ROWS_PER_FILE",    "--sample-rows",   int,  "rows verified per file (0 = all)"),
+]
 
 
 def verify_is_result(path: str, column: str) -> tuple[bool, str]:
@@ -254,8 +277,22 @@ def main() -> int:
     print(f"{'DRY RUN — nothing will be written' if DRY_RUN else 'APPLYING CHANGES'}")
     print(f"backup={'on' if BACKUP else 'OFF'}  data_dir={DATA_DIR}\n")
 
+    # --only restricts the run to a subset of the configured datasets; an
+    # --only naming nothing configured is a typo, so it is reported rather
+    # than silently doing nothing.
+    renames, drops = RENAMES, DROPS
+    if ONLY:
+        renames = {k: v for k, v in RENAMES.items() if k in ONLY}
+        drops   = {k: v for k, v in DROPS.items()   if k in ONLY}
+        unknown = [o for o in ONLY if o not in RENAMES and o not in DROPS]
+        if unknown:
+            print(f"[Warning] --only names datasets absent from RENAMES/DROPS: {unknown}")
+        if not renames and not drops:
+            print("Nothing to do: --only matched no configured dataset.")
+            return 0
+
     total_ok = total_skip = 0
-    for dataset, (old, new) in RENAMES.items():
+    for dataset, (old, new) in renames.items():
         folder = os.path.join(DATA_DIR, dataset)
         files = sorted(glob.glob(os.path.join(folder, "*.parquet")))
         print(f"-- {dataset}: {len(files)} file(s), rename '{old}' -> '{new}'")
@@ -287,7 +324,7 @@ def main() -> int:
         total_skip += len(skipped)
         print()
 
-    for dataset, cols in DROPS.items():
+    for dataset, cols in drops.items():
         folder = os.path.join(DATA_DIR, dataset)
         files = sorted(glob.glob(os.path.join(folder, "*.parquet")))
         print(f"-- {dataset}: {len(files)} file(s), drop {cols}")
@@ -332,4 +369,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="fix_column_names.py")
     sys.exit(main())

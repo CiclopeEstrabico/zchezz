@@ -10,7 +10,10 @@ byte-for-byte identical to run_tournament.py; if you fix a bug in the
 shared machinery (OpeningIndex, EngineInstance, play_game, the reporting
 functions) here, mirror the fix there too — there is no shared module
 between them, on purpose, so each file stays a single edit-and-run script
-per CLAUDE.md rule 8's config-block convention. NO CLI, same as both.
+per CLAUDE.md rule 8's config-block convention. Like the other two, the
+config block is the primary interface and every constant is ALSO a CLI flag
+that overrides it (see the COMMAND LINE block after the config;
+`--show-config` prints the resolved settings and runs nothing).
 
   python tests/run_tournament_quick.py
 
@@ -23,10 +26,8 @@ OUTPUT FORMATS: SAVE_PGN / SAVE_EPD / SAVE_BIN are independent and additive
 here) for why .bin, unlike EPD, is restricted to one engine's own moves
 per run (SAVE_BIN_LABEL) rather than recording every mover's eval.
 
-NOTE: this config previously pointed at zchezz_v313, which was removed
-from the repo in commit 5a1f3e3 ("v3.14: SMP crash fixes, remove v313
-from repo"). Updated to v4.00-vs-v3.14 since those are the two engine
-folders that currently exist under engine/c/.
+The two engine folders under engine/c/ are v4.00 and v3.14, which is the
+pair this preset compares.
 
 ── RELATION TO OTHER TOOLS — WHEN TO USE WHICH ────────────────────────────
 
@@ -49,33 +50,15 @@ folders that currently exist under engine/c/.
   run_selfplay.py is unrelated to this file's purpose (training-data
   generation via persistent engine processes, not H2H regression testing).
 
-── SHARED CONFIGURATION VOCABULARY ─────────────────────────────────────────
+── CONFIGURATION NAMES ─────────────────────────────────────────────────────
 
-Every tests/run_*.py harness uses the SAME name for the same concept, so a
-value means the same thing whichever harness you are reading (CLAUDE.md
-rule 8: the constant lives in the CONFIGURATION block once, and the CLI's
-`default=` IS that constant, never a second copy of the literal).
+Every tool uses the same constant name for the same concept, so a value
+means the same thing whichever tool you are reading. The full list lives in
+ONE place: utils/cliconf.py, section "SHARED CONFIGURATION VOCABULARY".
+A `DEFAULT_` prefix marks a knob specific to this tool alone.
 
-  GAMES           number of games to play
-  CONCURRENCY     parallel GAMES, not threads per game. 0 = autodetect cores
-                  in the harnesses that wrap a C exe (arena, selfplay_native)
-  MOVETIME_MS     per-move budget in milliseconds
-  NODES           per-move node budget; used only when MOVETIME_MS == 0
-  MAX_PLIES       half-move cap before a game is scored a draw (400 project-wide)
-  SEED            RNG seed for opening cycling / game order
-  TT_MB           per-TTable memory budget in MB
-  OPENING_FOLDER  openings/lines, walked recursively for .pgn/.epd files
-  RESULTS_DIR     tests/<tool>_results — every harness writes under tests/
-  SAVE_PGN        write standard PGN game records
-  SAVE_EPD        write positions + eval as EPD
-  SAVE_BIN        write packed training samples (train/dataset.py SAMPLE_DTYPE)
-
-SAVE_PGN / SAVE_EPD / SAVE_BIN are INDEPENDENT flags, not a choice of one
-(CLAUDE.md rule 9: the native path is a faster path for the same job, never a
-reduced one — losing PGN because a tool prefers .bin is a regression).
-
-A `DEFAULT_` prefix marks a knob specific to ONE tool (DEFAULT_TEMPERATURE,
-DEFAULT_ALPHA, ...) and is deliberately not shared.
+SAVE_PGN / SAVE_EPD / SAVE_BIN are independent switches, not a choice of
+one: any combination can be on in the same run.
 """
 
 # Windows consoles default to cp1252, which cannot encode the em-dashes and box
@@ -147,7 +130,7 @@ COLOR_SWAP           = True
 
 CONCURRENCY          = 14     # 14 concurrent (1T engines)
 MAX_PLIES            = 400
-MOVE_TIMEOUT         = 38.0
+MOVE_TIMEOUT_S         = 38.0
 REPORT_PERFORMANCE_METRICS = True
 
 # ── Opening Book ──────────────────────────────────────────────────────────────
@@ -171,6 +154,66 @@ COUNTER_EVERY        = 10
 REPORT_LOOPS         = 200    # report at end (200 openings)
 
 MATE_SCORE           = 999999  # sentinel value for mate scores
+
+# ── Head-to-head overrides (change the pair without editing MY_ENGINES) ──────
+# MY_ENGINES above stays the authoritative description of the two players
+# (it carries per-engine UCI options a flag cannot express); these let a
+# scripted A/B point the same setup at a different pair of builds.
+ENGINE_A_PATH  = ""    # "" = keep MY_ENGINES[0]["path"]
+ENGINE_A_LABEL = ""    # "" = keep MY_ENGINES[0]["label"]
+ENGINE_B_PATH  = ""    # "" = keep MY_ENGINES[1]["path"]
+ENGINE_B_LABEL = ""    # "" = keep MY_ENGINES[1]["label"]
+THREADS        = 0     # 0 = keep each engine's own Threads option; >0 = set both
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMMAND LINE — every constant above is also a flag (CLAUDE.md rule 8)
+#
+#  The config block IS the interface: a bare `python tests/run_tournament_quick.py`
+#  runs exactly what the constants say. The flags only OVERRIDE them;
+#  `--show-config` prints the resolved values and exits. See utils/cliconf.py.
+# ═══════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(_BASE_DIR, "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("MOVETIME_MS",          "--movetime",        int,   "ms per move"),
+    ("GAMES_SELF_PLAY",      "--games",           int,   "openings per engine pair (x2 with color swap)"),
+    ("GAMES_VS_EACH_ANCHOR", "--games-vs-anchor", int,   "openings against each anchor (ANCHORS is empty here)"),
+    ("SELF_PLAY",            "--self-play",       bool,  "engines in MY_ENGINES play each other"),
+    ("COLOR_SWAP",           "--color-swap",      bool,  "repeat each opening with colors reversed"),
+    ("CONCURRENCY",          "--concurrency",     int,   "concurrent games (worker threads)"),
+    ("MAX_PLIES",            "--max-plies",       int,   "half-move cap before a forced draw"),
+    ("MOVE_TIMEOUT_S",         "--move-timeout",    float, "seconds to wait for a move before a timeout loss"),
+    ("OPENING_FOLDER",       "--openings",        str,   "folder with .epd/.pgn opening files"),
+    ("OPENING_FILES",        "--opening-file",    list,  "load ONLY these files from --openings"),
+    ("SAVE_PGN",             "--pgn",             bool,  "save all games as PGN"),
+    ("SAVE_EPD",             "--epd",             bool,  "save positions + eval as EPD"),
+    ("SAVE_BIN",             "--bin",             bool,  "save packed .bin training samples"),
+    ("SAVE_BIN_LABEL",       "--bin-label",       str,   "engine label whose moves go into the .bin"),
+    ("RESULTS_DIR",          "--results-dir",     str,   "where the .log/.pgn/.epd/.bin land"),
+    ("COUNTER_EVERY",        "--counter-every",   int,   "progress line every N games"),
+    ("REPORT_LOOPS",         "--report-loops",    int,   "full cross-table every N mini-cycles"),
+    ("REPORT_PERFORMANCE_METRICS", "--perf",      bool,  "show NPS / time-per-move in the reports"),
+    ("ENGINE_A_PATH",        "--engine-a",        str,   "override MY_ENGINES[0] path"),
+    ("ENGINE_A_LABEL",       "--label-a",         str,   "override MY_ENGINES[0] label"),
+    ("ENGINE_B_PATH",        "--engine-b",        str,   "override MY_ENGINES[1] path"),
+    ("ENGINE_B_LABEL",       "--label-b",         str,   "override MY_ENGINES[1] label"),
+    ("THREADS",              "--threads",         int,   "set the Threads UCI option on BOTH engines (0 = leave as configured)"),
+]
+
+if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__,
+                      prog="run_tournament_quick.py")
+    _overrides = ((ENGINE_A_PATH, ENGINE_A_LABEL), (ENGINE_B_PATH, ENGINE_B_LABEL))
+    for _eng, (_p, _l) in zip(MY_ENGINES, _overrides):
+        if _p: _eng["path"]  = _p
+        if _l: _eng["label"] = _l
+        if THREADS:
+            _eng.setdefault("options", {})["Threads"] = str(THREADS)
+        # tc_value was copied from MOVETIME_MS when the list was defined, so
+        # it has to follow a --movetime override.
+        if _eng.get("tc_mode") == "movetime":
+            _eng["tc_value"] = MOVETIME_MS
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  LOGGING — All output goes to both console and log file
@@ -435,7 +478,7 @@ class EngineInstance:
 
         move = None; score = None; nodes = 0; depth = 0
         t0 = time.time()
-        while time.time() - t0 < MOVE_TIMEOUT:
+        while time.time() - t0 < MOVE_TIMEOUT_S:
             try:
                 line = self.queue.get(timeout=0.2)
                 if line.startswith("info "):

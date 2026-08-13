@@ -40,7 +40,7 @@ NOVO (v4) — OUTPUT_FORMATS: ['parquet'], ['bin'], ['parquet','bin'], etc.
 ════════════════════════════════════════════════════════════════════════
 """
 
-import os, re, time, gc, math, random, threading, json, glob
+import os, re, sys, time, gc, math, random, threading, json, glob
 import chess
 import numpy as np
 import pandas as pd
@@ -66,28 +66,27 @@ SF_HASH_MB   = 16
 SF_TIMEOUT_S = 60
 
 # ── Paralelismo ────────────────────────────────────────────────────────────
-N_WORKERS          = max(1, os.cpu_count() - 1)
+WORKERS          = max(1, os.cpu_count() - 1)
 BATCH_SIZE         = 2_000
-MAX_ACTIVE_BATCHES = N_WORKERS * 2
+MAX_ACTIVE_BATCHES = WORKERS * 2
 CHUNK_SIZE_SAVE    = 20_000
 
 POSITIONS_PER_GROUP = 30_000
 
 # State file — persists shuffle seed and progress for safe resume
-STATE_FILE = os.path.join(OUT_DIR, "progress.json")
+# STATE_FILE is derived from OUT_DIR at USE time (see state_file()), because
+# --out can change OUT_DIR after this block runs.
+def state_file() -> str:
+    """Resume state, always next to the CURRENT OUT_DIR."""
+    return os.path.join(OUT_DIR, "progress.json")
 
 # ── WDL curve ──────────────────────────────────────────────────────────────
 CP_MAX_MATE = 3000
 K_DECAY     = 0.07
-# Must match the project-wide cp->wdl temperature (CLAUDE.md rule 10):
-# nnue.c's `_nnL3B * 320.0f` and train_nnue.py's CP_TO_WDL_T are both 320.
-# This was 500, which is why synthetic_endgame_cp_sf_filter_data20260413/2's stored `wdl` column
-# equals sigmoid(cp/500) and disagrees with the rest of the corpus
-# (measured: mean abs error 0.00000 at T=500, 0.029 at T=320). Harmless in
-# practice only because the trainer recomputes wdl from cp and ignores the
-# stored column whenever cp is present — but a stored column that disagrees
-# with the convention is a trap for anything that reads it directly.
-WDL_DIVISOR = 320
+# cp -> wdl temperature. MUST stay 320: the same number appears in nnue.c's
+# output scale and in train_nnue.py. Changing it here alone rescales every
+# label this script writes relative to the rest of the corpus.
+CP_TO_WDL_T = 320
 
 # ── Filtros quiet (cada um individualmente configurável) ───────────────────
 FILTER_IN_CHECK      = True   # rejeita lado-a-mover em xeque
@@ -107,6 +106,47 @@ PIECE_VALUES = {
     chess.KING:   20000,
 }
 EQUAL_CAPTURE_TOLERANCE = 50
+
+# ── Restrição de grupos (opcional) ─────────────────────────────────────────
+ONLY_GROUPS = []      # [] = todos os ENDGAME_GROUPS; senão, lista de labels
+                      # ("KQK", "KRK", ...) a gerar nesta execução
+DRY_RUN     = False   # True = mostra o plano (grupos, contagens, saídas) e sai
+
+# ═══════════════════════════════ COMMAND LINE ════════════════════════════════
+# O bloco CONFIG acima É a interface: `python train/labeling/generate_endgames.py`
+# roda exatamente o que ele diz. Cada constante também é uma flag que a
+# sobrescreve, e `--show-config` imprime a configuração resolvida e sai.
+# Ver utils/cliconf.py e CLAUDE.md regra 8.
+# ═════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "utils"))
+from cliconf import force_utf8_stdio, override_from_cli  # noqa: E402
+
+force_utf8_stdio()
+
+CLI = [
+    ("OUT_DIR",             "--out",            str,  "output folder"),
+    ("OUTPUT_FORMATS",      "--out-format",     list, "output format: parquet | bin | epd (repeatable)"),
+    ("POSITIONS_PER_GROUP", "--per-group",      int,  "positions generated per material group"),
+    ("ONLY_GROUPS",         "--group",          list, "generate ONLY this material label (repeatable)"),
+    ("DRY_RUN",             "--dry-run",        bool, "print the plan and exit, generating nothing"),
+    ("SF_PATH",             "--sf-path",        str,  "Stockfish binary used for labelling"),
+    ("SF_NODES",            "--sf-nodes",       int,  "nodes per position"),
+    ("SF_HASH_MB",          "--sf-hash-mb",     int,  "hash per Stockfish process"),
+    ("SF_TIMEOUT_S",        "--sf-timeout",     float,"per-position timeout, seconds"),
+    ("WORKERS",           "--workers",        int,  "worker processes"),
+    ("BATCH_SIZE",          "--batch-size",     int,  "positions per worker task"),
+    ("MAX_ACTIVE_BATCHES",  "--max-active-batches", int, "in-flight worker tasks"),
+    ("CHUNK_SIZE_SAVE",     "--chunk-size",     int,  "rows per output chunk"),
+    ("CP_MAX_MATE",         "--cp-max-mate",    int,  "|cp| assigned to a forced mate"),
+    ("K_DECAY",             "--k-decay",        float,"distance-to-mate decay in the cp curve"),
+    ("FILTER_IN_CHECK",     "--filter-in-check",     bool, "reject positions in check"),
+    ("FILTER_WIN_CAPTURE",  "--filter-win-capture",  bool, "reject positions with a winning capture"),
+    ("FILTER_EQUAL_CAPTURE","--filter-equal-capture",bool, "reject positions with an equal capture"),
+    ("FILTER_SACRIFICE",    "--filter-sacrifice",    bool, "also check the opponent's captures"),
+    ("FILTER_SCORE_CAP",    "--filter-score-cap",    bool, "reject |cp| above --score-cap"),
+    ("SCORE_CAP_VALUE",     "--score-cap",      int,  "|cp| ceiling for --filter-score-cap"),
+]
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  MATERIAL COMBINATIONS
@@ -239,7 +279,7 @@ def mate_distance_to_cp(mate_dist: int, material_floor: int) -> int:
 
 
 def cp_to_wdl(cp: float) -> float:
-    return 1.0 / (1.0 + math.exp(-cp / WDL_DIVISOR))
+    return 1.0 / (1.0 + math.exp(-cp / CP_TO_WDL_T))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -713,9 +753,9 @@ def format_time(s: float) -> str:
 
 
 def _load_state() -> dict:
-    if os.path.exists(STATE_FILE):
+    if os.path.exists(state_file()):
         try:
-            with open(STATE_FILE) as f:
+            with open(state_file()) as f:
                 return json.load(f)
         except Exception:
             pass
@@ -723,7 +763,7 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict):
-    with open(STATE_FILE, "w") as f:
+    with open(state_file(), "w") as f:
         json.dump(state, f, indent=2)
 
 
@@ -732,7 +772,21 @@ def _save_state(state: dict):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    # --group restricts ENDGAME_GROUPS for this run. It is applied to the
+    # module global because generate_all_records() and the reporting below
+    # both read that list; an unknown label is a typo and aborts rather than
+    # silently generating the full set.
+    global ENDGAME_GROUPS
+    if ONLY_GROUPS:
+        wanted = set(ONLY_GROUPS)
+        unknown = wanted - {lbl for _, _, lbl, _ in ENDGAME_GROUPS}
+        if unknown:
+            raise SystemExit(f"ABORT: --group named unknown material label(s): "
+                             f"{sorted(unknown)}")
+        ENDGAME_GROUPS = [g for g in ENDGAME_GROUPS if g[2] in wanted]
+
+    if not DRY_RUN:                 # a dry run must not even create the folder
+        os.makedirs(OUT_DIR, exist_ok=True)
 
     # ── WDL curve preview ─────────────────────────────────────────────────
     print("\n  WDL curve (mate-distance encoding):")
@@ -762,7 +816,8 @@ def main():
               f"chunk_idx={chunk_idx}.")
     else:
         state["shuffle_seed"] = shuffle_seed
-        _save_state(state)
+        if not DRY_RUN:
+            _save_state(state)
         print(f"  Fresh start. Shuffle seed: {shuffle_seed}")
 
     # ── Generate all positions (fully deterministic) ──────────────────────
@@ -782,6 +837,11 @@ def main():
         print(f"  {lbl:<14} {cnt:>8,}")
     print()
 
+    if DRY_RUN:
+        print("  DRY RUN — the plan above is all that happens; "
+              "no Stockfish is started and nothing is written.")
+        return
+
     if total_to_process <= 0:
         print("  All positions already evaluated. Nothing to do.")
         return
@@ -789,7 +849,7 @@ def main():
     remaining_records = all_records[already_done:]
 
     print(f"  To evaluate this run : {total_to_process:,}")
-    print(f"  Workers              : {N_WORKERS}")
+    print(f"  Workers              : {WORKERS}")
     print(f"  Batch size           : {BATCH_SIZE:,}")
     print(f"  Chunk size           : {CHUNK_SIZE_SAVE:,}")
     print(f"  Output               : {OUT_DIR}\n")
@@ -808,7 +868,7 @@ def main():
 
     print(f"  Starting evaluation ({len(batches)} batches)...\n")
 
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as pool:
+    with ProcessPoolExecutor(max_workers=WORKERS) as pool:
         futures:   dict = {}
         batch_iter      = iter(batches)
         exhausted       = False
@@ -907,10 +967,11 @@ def main():
     print(f"  Speed                    : {saved_this_run/max(elapsed,1e-9):.0f} pos/s")
     print(f"  Engine stats             : {total_stats}")
     print(f"  Output                   : {OUT_DIR}")
-    print(f"  Resume state saved to    : {STATE_FILE}")
+    print(f"  Resume state saved to    : {state_file()}")
     print(f"\n  To add more data, increase POSITIONS_PER_GROUP and re-run.")
-    print(f"  Delete {STATE_FILE} to start completely fresh.")
+    print(f"  Delete {state_file()} to start completely fresh.")
 
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="generate_endgames.py")
     main()

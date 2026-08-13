@@ -112,6 +112,34 @@ READ_BATCH        = 200_000     # streaming read size, bounds peak memory
 COMPRESSION       = "snappy"
 # ═════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════ COMMAND LINE ════════════════════════════════
+# The CONFIGURATION block above is the primary interface: a bare
+# `python train/labeling/normalize_columns.py` does exactly what it says.
+# Every constant is ALSO a flag that overrides it for a one-off run, and
+# `--show-config` prints the resolved settings and exits without touching a
+# file. See utils/cliconf.py and CLAUDE.md rule 8.
+# ═════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "utils"))
+from cliconf import force_utf8_stdio, override_from_cli  # noqa: E402
+
+force_utf8_stdio()
+
+CLI = [
+    ("DRY_RUN",           "--dry-run",        bool, "analyse and report only, write nothing"),
+    ("DRY_RUN_MAX_FILES", "--dry-run-files",  int,  "files per dataset read in a dry run (0 = all)"),
+    ("DATA_DIR",          "--data-dir",       str,  "root holding one folder per dataset"),
+    ("ONLY",              "--only",           list, "restrict to this dataset folder (repeatable; empty = all)"),
+    ("CP_TO_WDL_T",       "--cp-to-wdl-t",    float,"sigmoid temperature; must match nnue.c and train_nnue.py"),
+    ("CP_CLAMP",          "--cp-clamp",       float,"|cp| ceiling when inverting a saturated wdl"),
+    ("SNAP_RESULT",       "--snap-result",    bool, "snap `result` to {0.0, 0.5, 1.0}"),
+    ("DROP_EMPTY_ID",     "--drop-empty-id",  bool, "drop an `id` column that is empty in every row"),
+    ("MAX_ROWS_PER_FILE", "--max-rows-per-file", int, "input files longer than this are split"),
+    ("ROWS_PER_SHARD",    "--rows-per-shard", int,  "rows per output shard when splitting"),
+    ("READ_BATCH",        "--read-batch",     int,  "streaming read size (bounds peak memory)"),
+    ("COMPRESSION",       "--compression",    str,  "parquet compression codec"),
+]
+
 CANON = ("fen", "cp", "wdl", "result")
 
 
@@ -374,4 +402,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="normalize_columns.py")
     sys.exit(main())

@@ -83,7 +83,42 @@ ROWS_PER_OUT_FILE = 2_000_000   # rows per output parquet shard
 READ_BATCH        = 200_000     # streaming batch size for the base side
 VERIFY_SAMPLE     = 20_000      # rows whose FEN is re-compared after the join
 COMPRESSION       = "snappy"
+
+# A single job can also be described entirely from the command line, without
+# editing JOBS — leave these empty to use the JOBS list above.
+JOB_KEY     = ""    # dataset folder holding the column to attach
+JOB_KEY_COL = ""    # which column to carry over from JOB_KEY
+JOB_BASE    = ""    # dataset folder that is streamed
+JOB_OUT     = ""    # output folder name (under DATA_DIR)
+JOB_KEEP    = ["fen", "cp", "result"]   # columns to write, in order
 # ═════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════ COMMAND LINE ════════════════════════════════
+# The block above is the interface: `python train/labeling/merge_datasets.py`
+# runs exactly what it says (a DRY RUN, by design). Every constant is also a
+# flag that overrides it — `--no-dry-run` to actually write, `--key/--base/
+# --out` to describe a one-off job without editing JOBS, `--show-config` to
+# print the resolved settings and stop. See utils/cliconf.py, CLAUDE.md rule 8.
+# ═════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "utils"))
+from cliconf import force_utf8_stdio, override_from_cli  # noqa: E402
+
+force_utf8_stdio()
+
+CLI = [
+    ("DRY_RUN",           "--dry-run",      bool, "verify and report only, write nothing"),
+    ("DATA_DIR",          "--data-dir",     str,  "root holding one folder per dataset"),
+    ("ROWS_PER_OUT_FILE", "--rows-per-file", int, "rows per output parquet shard"),
+    ("READ_BATCH",        "--read-batch",   int,  "streaming batch size for the base side"),
+    ("VERIFY_SAMPLE",     "--verify-sample", int, "rows whose FEN is re-compared after the join"),
+    ("COMPRESSION",       "--compression",  str,  "parquet compression codec"),
+    ("JOB_KEY",           "--key",          str,  "one-off job: dataset holding the column to attach"),
+    ("JOB_KEY_COL",       "--key-col",      str,  "one-off job: column carried over from --key"),
+    ("JOB_BASE",          "--base",         str,  "one-off job: dataset that is streamed"),
+    ("JOB_OUT",           "--out",          str,  "one-off job: output folder name"),
+    ("JOB_KEEP",          "--keep",         list, "one-off job: column to write (repeatable, in order)"),
+]
 
 
 def hash_fens(fens: list[str]) -> np.ndarray:
@@ -207,7 +242,18 @@ def run_job(job: dict) -> None:
 
 def main() -> int:
     print("DRY RUN — nothing will be written" if DRY_RUN else "WRITING")
-    for job in JOBS:
+    # A fully specified --key/--key-col/--base/--out replaces the JOBS list
+    # for this run; anything less falls back to it (a half-described job is a
+    # typo, not a request, so it is refused rather than silently ignored).
+    cli_bits = [JOB_KEY, JOB_KEY_COL, JOB_BASE, JOB_OUT]
+    jobs = JOBS
+    if any(cli_bits):
+        if not all(cli_bits):
+            raise SystemExit("ABORT: --key, --key-col, --base and --out must be given together "
+                             "(or none of them, to use the JOBS block).")
+        jobs = [{"name": JOB_OUT, "key": JOB_KEY, "key_col": JOB_KEY_COL,
+                 "base": JOB_BASE, "out": JOB_OUT, "keep": list(JOB_KEEP)}]
+    for job in jobs:
         run_job(job)
     if DRY_RUN:
         print("\nSet DRY_RUN = False to write the merged dataset.")
@@ -215,4 +261,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="merge_datasets.py")
     sys.exit(main())

@@ -13,10 +13,14 @@ run_tournament_quick.py instead; those are built around that use case
 This script inverts that: EPD is unconditional (the `fe` file handle below is
 always opened), PGN is the opt-in extra (SAVE_PGN).
 
-NO CLI — like run_tournament.py, this is an edit-the-config-block-and-run
-script (CLAUDE.md rule 8's config-block convention still applies: every
-knob below has to be a documented default here, there just isn't an
-argparse layer forwarding CLI flags on top of it).
+CONFIG BLOCK FIRST, CLI SECOND — this is an edit-the-config-block-and-run
+script: every knob has a documented default in the CONFIGURATION block below
+and a bare `python tests/run_selfplay.py` runs exactly what those constants
+say. Each one is ALSO a command-line flag that overrides it for scripted or
+one-off runs (see the COMMAND LINE block right after the config, CLAUDE.md
+rule 8, and utils/cliconf.py). `--show-config` prints the resolved settings
+and exits without playing a game; `--help` lists every flag with the value
+the config block gives it.
 
 ── RELATION TO OTHER TOOLS ─────────────────────────────────────────────────
 
@@ -50,13 +54,13 @@ argparse layer forwarding CLI flags on top of it).
   never a process restart. This is the whole reason self-play can sustain
   CONCURRENCY=16 persistent engine pairs for 20000 games in one run.
 
-── OPENING BOOK — TOTAL_GAMES IS A SLOT BUDGET, NOT A GAME COUNT ──────────
+── OPENING BOOK — GAMES IS A SLOT BUDGET, NOT A GAME COUNT ──────────
 
-  TOTAL_GAMES is divided across engine pairs into per-pair "opening
-  iterations" (raw_iterations = TOTAL_GAMES // num_pairs), and EACH
+  GAMES is divided across engine pairs into per-pair "opening
+  iterations" (raw_iterations = GAMES // num_pairs), and EACH
   iteration expands into 2 actual games because COLOR_SWAP is always on
   (every opening is played from both sides) — so the real game count
-  (_real_total_games) is usually double what TOTAL_GAMES might suggest,
+  (_real_total_games) is usually double what GAMES might suggest,
   before SAME_OPENING_TWICE is even considered. If book positions run out
   before raw_n_book iterations are satisfied, book iterations are silently
   capped to what OPENING_FOLDER actually has and the shortfall is made up
@@ -82,33 +86,15 @@ argparse layer forwarding CLI flags on top of it).
   PGN  (opt-in, SAVE_PGN): same directory, `.pgn` extension.
   LOG  (always): full console transcript, same directory, `.log` extension.
 
-── SHARED CONFIGURATION VOCABULARY ─────────────────────────────────────────
+── CONFIGURATION NAMES ─────────────────────────────────────────────────────
 
-Every tests/run_*.py harness uses the SAME name for the same concept, so a
-value means the same thing whichever harness you are reading (CLAUDE.md
-rule 8: the constant lives in the CONFIGURATION block once, and the CLI's
-`default=` IS that constant, never a second copy of the literal).
+Every tool uses the same constant name for the same concept, so a value
+means the same thing whichever tool you are reading. The full list lives in
+ONE place: utils/cliconf.py, section "SHARED CONFIGURATION VOCABULARY".
+A `DEFAULT_` prefix marks a knob specific to this tool alone.
 
-  GAMES           number of games to play
-  CONCURRENCY     parallel GAMES, not threads per game. 0 = autodetect cores
-                  in the harnesses that wrap a C exe (arena, selfplay_native)
-  MOVETIME_MS     per-move budget in milliseconds
-  NODES           per-move node budget; used only when MOVETIME_MS == 0
-  MAX_PLIES       half-move cap before a game is scored a draw (400 project-wide)
-  SEED            RNG seed for opening cycling / game order
-  TT_MB           per-TTable memory budget in MB
-  OPENING_FOLDER  openings/lines, walked recursively for .pgn/.epd files
-  RESULTS_DIR     tests/<tool>_results — every harness writes under tests/
-  SAVE_PGN        write standard PGN game records
-  SAVE_EPD        write positions + eval as EPD
-  SAVE_BIN        write packed training samples (train/dataset.py SAMPLE_DTYPE)
-
-SAVE_PGN / SAVE_EPD / SAVE_BIN are INDEPENDENT flags, not a choice of one
-(CLAUDE.md rule 9: the native path is a faster path for the same job, never a
-reduced one — losing PGN because a tool prefers .bin is a regression).
-
-A `DEFAULT_` prefix marks a knob specific to ONE tool (DEFAULT_TEMPERATURE,
-DEFAULT_ALPHA, ...) and is deliberately not shared.
+SAVE_PGN / SAVE_EPD / SAVE_BIN are independent switches, not a choice of
+one: any combination can be on in the same run.
 """
 
 # Windows consoles default to cp1252, which cannot encode the em-dashes and box
@@ -142,21 +128,27 @@ import numpy as np
 from dataset import SAMPLE_DTYPE
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION — edit this block and run (no CLI — see header docstring above)
+#  CONFIGURATION — edit this block and run; every constant is also a CLI flag
+#  (see the COMMAND LINE block after the config, and CLAUDE.md rule 8)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Kill any leftover zchezz*.exe processes system-wide before starting. A
-# previous run that was Ctrl-C'd or crashed can leave orphaned engine
-# processes behind (still holding stdin/stdout pipes); starting the next
-# run without this cleanup risks a stale process answering for a worker
-# slot this run thinks it owns. Runs once, at import time, before any
-# config value below is read — deliberately not gated by a config flag.
-cmd = (
-    'Get-CimInstance Win32_Process -Filter "Name = \'zchezz*\'" | '
-    'Invoke-CimMethod -MethodName Terminate'
-)
-subprocess.run(["powershell", "-Command", cmd], capture_output=True)
-print("[OK] Processos Anteriores encerrados.")
+def kill_leftover_engines():
+    """Kill any leftover zchezz*.exe processes system-wide before starting.
+
+    A previous run that was Ctrl-C'd or crashed can leave orphaned engine
+    processes behind (still holding stdin/stdout pipes); starting the next
+    run without this cleanup risks a stale process answering for a worker
+    slot this run thinks it owns.
+
+    Called from main(), NOT at import time: `--help` and `--show-config`
+    must not kill a colleague's running engines just to print text.
+    """
+    cmd = (
+        'Get-CimInstance Win32_Process -Filter "Name = \'zchezz*\'" | '
+        'Invoke-CimMethod -MethodName Terminate'
+    )
+    subprocess.run(["powershell", "-Command", cmd], capture_output=True)
+    print("[OK] Processos Anteriores encerrados.")
 
 # ── Engines ("players") — one persistent process per entry, per worker thread ──
 # Two identical entries (as below) = true self-play (one engine playing
@@ -180,11 +172,11 @@ ENGINES_CFG = [
 ]
 
 # ── Match Volume & Safety ────────────────────────────────────────────────────
-TOTAL_GAMES  = 20000  # opening-slot budget, NOT the final game count — see
+GAMES  = 20000  # opening-slot budget, NOT the final game count — see
                        # "OPENING BOOK" note in the header docstring above
 CONCURRENCY  = 16      # parallel worker threads (= persistent engine-pair count)
 MAX_PLIES    = 400     # half-moves before a game is forced to a draw
-MOVE_TIMEOUT = 35.0    # seconds to wait for one "bestmove" before declaring TIMEOUT
+MOVE_TIMEOUT_S = 35.0    # seconds to wait for one "bestmove" before declaring TIMEOUT
 REPORT_EVERY = 10      # print a status block every N completed games
 
 # ── Output ────────────────────────────────────────────────────────────────────
@@ -210,6 +202,58 @@ OPENING_FOLDER      = r"openings\lines"  # walked recursively for .pgn/.epd file
 RANDOM_PLIES        = 6       # ply count for OPENING_MODE="random"/the "all" mode's random portion
 SAME_OPENING_TWICE  = True    # True: color-swap pair reuses the SAME opening; False: advances to the next one
 COLOR_SWAP          = True    # every opening is always played from both sides (not actually optional — see main())
+
+# ── Engine overrides (change the players without editing ENGINES_CFG) ────────
+# ENGINES_CFG above stays the authoritative description of the field; these
+# let a scripted run point the same setup at another build / time control.
+ENGINE_PATH   = ""    # "" = keep each ENGINES_CFG entry's own path; else set ALL of them
+ENGINE_LABEL  = ""    # "" = keep each entry's own label
+MOVETIME_MS   = 0     # 0 = keep each entry's tc_mode/tc_value; >0 = force movetime on all
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMMAND LINE — every constant above is also a flag (CLAUDE.md rule 8)
+#
+#  The config block IS the interface: a bare `python tests/run_selfplay.py`
+#  runs exactly what the constants say. The flags only OVERRIDE them, and
+#  `--show-config` prints the resolved values and exits without playing a
+#  single game. See utils/cliconf.py.
+#
+#  This must run BEFORE the timestamped output paths below are built, so a
+#  --results-dir override actually reaches them.
+# ═══════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("GAMES",         "--games",           int,   "opening-slot budget (see header: not the final game count)"),
+    ("CONCURRENCY",         "--concurrency",     int,   "parallel worker threads (persistent engine pairs)"),
+    ("MAX_PLIES",           "--max-plies",       int,   "half-move cap before a forced draw"),
+    ("MOVE_TIMEOUT_S",        "--move-timeout",    float, "seconds to wait for one bestmove"),
+    ("REPORT_EVERY",        "--report-every",    int,   "status block every N completed games"),
+    ("SAVE_PGN",            "--pgn",             bool,  "save every game as standard PGN"),
+    ("SAVE_EPD",            "--epd",             bool,  "save positions + eval as EPD"),
+    ("SAVE_BIN",            "--bin",             bool,  "save every game as packed .bin samples"),
+    ("SAVE_OPENING_IN_EPD", "--opening-in-epd",  bool,  "include forced opening plies in the EPD"),
+    ("SAVE_OPENING_IN_BIN", "--opening-in-bin",  bool,  "include forced opening plies in the .bin"),
+    ("RESULTS_DIR",         "--results-dir",     str,   "output directory for .log/.pgn/.epd/.bin"),
+    ("OPENING_MODE",        "--opening-mode",    str,   "book | random | all", ("book", "random", "all")),
+    ("BOOK_PORTION",        "--book-portion",    float, "'all' mode: fraction drawn from the book"),
+    ("OPENING_FOLDER",      "--openings",        str,   "folder walked recursively for .pgn/.epd openings"),
+    ("RANDOM_PLIES",        "--random-plies",    int,   "ply count for the random opening mode"),
+    ("SAME_OPENING_TWICE",  "--same-opening-twice", bool, "color-swap pair reuses the same opening"),
+    ("ENGINE_PATH",         "--engine",          str,   "override the path of EVERY ENGINES_CFG entry"),
+    ("ENGINE_LABEL",        "--engine-label",    str,   "override the label of EVERY ENGINES_CFG entry"),
+    ("MOVETIME_MS",         "--movetime",        int,   "force movetime (ms) on every engine; 0 = keep configured TC"),
+]
+
+if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="run_selfplay.py")
+    for _eng in ENGINES_CFG:
+        if ENGINE_PATH:  _eng["path"]  = ENGINE_PATH
+        if ENGINE_LABEL: _eng["label"] = ENGINE_LABEL
+        if MOVETIME_MS:
+            _eng["tc_mode"]  = "movetime"
+            _eng["tc_value"] = MOVETIME_MS
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SAÍDA E LOGS
@@ -359,7 +403,7 @@ class EngineInstance:
         
         move, score, nodes, depth = None, None, 0, 0
         t_start = time.time()
-        while time.time() - t_start < MOVE_TIMEOUT:
+        while time.time() - t_start < MOVE_TIMEOUT_S:
             try:
                 line = self.queue.get(timeout=0.1)
                 if line.startswith("info "):
@@ -830,6 +874,7 @@ def play_game(game_id, w_engine, b_engine, opening, results_queue):
 
 def main():
     global completed_games, _real_total_games, start_time, _stats_lock, _file_lock, stats, h2h
+    kill_leftover_engines()
     all_openings = load_all_openings(OPENING_FOLDER) if OPENING_MODE in ["book", "all"] else OpeningIndex()
 
     # Shuffle the index once so book picks are non-repeating across the run
@@ -844,9 +889,9 @@ def main():
     pair_multiplier = 2  # COLOR_SWAP é sempre ativo: cada abertura gera 2 jogos (um por cor)
 
     # ── Cap book games to available openings ──────────────────────────────
-    # TOTAL_GAMES representa o total de posições de abertura alocadas no torneio.
+    # GAMES representa o total de posições de abertura alocadas no torneio.
     # Se SAME_OPENING_TWICE for True, o número real de jogos dobra.
-    raw_iterations = max(1, TOTAL_GAMES // max(1, len(pairs_idx)))
+    raw_iterations = max(1, GAMES // max(1, len(pairs_idx)))
 
     if OPENING_MODE == "book":
         raw_n_book, raw_n_rand = raw_iterations, 0

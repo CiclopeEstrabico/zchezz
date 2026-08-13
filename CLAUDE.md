@@ -4,7 +4,7 @@
 
 Zchezz is a chess engine written in C with NNUE evaluation, targeting both native platforms (Windows/Linux/Android) and WebAssembly for browser play. The engine communicates via the UCI protocol.
 
-**Current engine version: `engine/c/zchezz_v400/`.** Its NNUE architecture (HalfKP-4Bucket, see README.md § NNUE) is implemented and structurally validated, but the network is **not trained yet** — with random/placeholder weights the engine plays badly by construction. Do not run or interpret Phase 2–9 strength tests against v4.00 until a trained NNU4 weight file exists; until then only Phase 1 (perft, UCI, structural checks) is meaningful.
+**Current engine version: `engine/c/zchezz_v400/`.** Its NNUE architecture (HalfKP-4Bucket, see README.md § NNUE) is implemented and structurally validated. The network is **being trained** in two stages (`STAGE` at the top of `train/train_nnue.py`): a `warmup` from random weights on crude high-volume data, then a `finetune` on the strong deeply-evaluated sets. Until a finetuned NNU4 file is exported and passes Phase 1, the deployed/playable engine stays v3.14, and Phase 2–9 strength numbers for v4.00 mean nothing — an undertrained net loses by construction.
 
 For architecture, file structure, and build instructions, see `README.md` — this file is rules only.
 
@@ -107,26 +107,80 @@ These checks catch regressions in seconds. Run after every recompile.
 - Document all changes in the `README.md` file with clarity and details.
 - Document all changes in the engine with clarity and details. We want no regressions in future work.
 
-### 8. CONFIGURATION BLOCK AT THE TOP OF EVERY TOOL — MANDATORY
+**Comments and docstrings explain the PRESENT, not the past.** A reader opens a
+file to learn what it does, what to set, and how to run it — not to learn what a
+previous version got wrong. Write:
 
-**Everything reachable from the command line MUST also be settable from a
-documented configuration block at the top of the file, and the CLI default MUST
-BE that constant — not a copy of it.** A flag with no documented default in the
-config block is a defect; so is a default that is written twice and can drift.
+- **what the tool does**, in one paragraph, first;
+- **how to run it**, with a real command line;
+- **what to set**, naming the constants in the order that matters;
+- **the traps that are still live**: an invariant that will break something if
+  violated ("keep this 320, it must match `nnue.c`"), stated as a rule.
 
-**Python:**
+Do NOT write: "this used to be X", "an earlier draft had a bug", "v3.14 did it
+differently", "kept for the record", "this was measured on 47M rows", or a
+paragraph arguing with a decision that is already made. If a past mistake taught
+a rule, keep the RULE and drop the story. Comments in English (CLAUDE.md
+§ Coding Conventions); user-facing strings may be in Portuguese.
+
+### 8. CONFIGURATION BLOCK FIRST, CLI SECOND — MANDATORY
+
+**The configuration block at the top of the file IS the interface.** Running the
+tool with NO arguments at all must work and must do exactly what those constants
+say. The command line only OVERRIDES them, for scripted or one-off runs. Every
+value reachable from the command line has a documented constant with units; a
+flag with no constant is a defect, and so is a default written twice, since the
+two copies will drift.
+
+Rules, all of them enforced by review:
+
+1. **The CLI default IS the constant**, never a copy of the literal.
+2. **No knob hidden in the body of the code.** A timeout, a port, an output
+   path, a seed, a sampling fraction — if the code reads it, the top of the file
+   declares it.
+3. **`--show-config`**: every tool prints its resolved settings and exits,
+   running nothing and writing nothing. This is how you check what a bare run
+   will do before starting a job that takes hours.
+4. **One name per concept, everywhere.** The shared vocabulary lives in ONE
+   place — `utils/cliconf.py`, section "SHARED CONFIGURATION VOCABULARY" — and
+   is not copied into individual files. A `DEFAULT_` prefix marks a knob
+   specific to one tool.
+5. **Old invocations keep working.** Where a script had a positional form
+   (`test_perft.py v400`), it is translated to the equivalent flag.
+
+**Python** — declare each option once, next to its constant, and let
+`utils/cliconf.py` build the parser from that list:
+
 ```python
 # ═══════════════ CONFIGURATION ═══════════════
 GAMES       = 500      # number of games to play
 MOVETIME_MS = 100      # per-move budget, milliseconds
 CONCURRENCY = 14       # parallel games (NOT threads per game)
-OUT_PGN     = None     # path to PGN output, None = disabled
+SAVE_PGN    = False    # write a PGN of every game
 # ═════════════════════════════════════════════
 
-p.add_argument("--games",     type=int, default=GAMES)
-p.add_argument("--movetime",  type=int, default=MOVETIME_MS)
+sys.path.insert(0, os.path.join(REPO_ROOT, "utils"))
+from cliconf import override_from_cli
+
+CLI = [
+    ("GAMES",       "--games",       int,  "number of games to play"),
+    ("MOVETIME_MS", "--movetime",    int,  "per-move budget, ms"),
+    ("CONCURRENCY", "--concurrency", int,  "parallel games"),
+    ("SAVE_PGN",    "--pgn",         bool, "write a PGN of every game"),
+]
+
+if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__)
+    main()
 ```
-Never `default=500`. The literal lives in the config block, once.
+
+This gives `--games N`, `--pgn`/`--no-pgn` for every bool, repeatable flags for
+every list, `--show-config`, and a `--help` that prints the value the config
+block actually holds. Call it right after the config block and BEFORE anything
+derived from it (timestamps, output paths, `os.makedirs`, validation).
+
+A hand-written `argparse` is fine when a tool needs richer syntax — it must
+still read its defaults from the constants and still provide `--show-config`.
 
 **C:**
 ```c
@@ -139,8 +193,8 @@ Never `default=500`. The literal lives in the config block, once.
 /* ════════════════════════════════════════════ */
 ```
 
-Applies to: `tests/*.py`, `train/*.py`, `train/labeling/*.py`, and every
-`engine/c/tools/*.c`.
+Applies to: `tests/*.py`, `train/*.py`, `train/labeling/*.py`, `utils/*.py`, and
+every `engine/c/tools/*.c`.
 
 ### 9. Native and non-native paths are a BLEND, not a replacement
 
@@ -245,7 +299,7 @@ objects — this list is just the tripwire.
 - Square encoding: a8=0, h1=63 (rank 0 = rank 8, file 0 = file a)
 - Test scripts: engine path configured in run_tournament.py config block
 
-## Naming Convention — `tests/` and `train/`
+## Naming Convention — `tests/`, `train/` and `utils/`
 
 `tests/` and `train/` are **flat and version-less** — one toolset tracking the current
 engine, unlike `engine/c/zchezz_vXXX/` which is version-suffixed. **Never create a
@@ -266,8 +320,28 @@ engine, unlike `engine/c/zchezz_vXXX/` which is version-suffixed. **Never create
 | bare noun (`encoding`, `model`, `dataset`) | Library module, imported by other scripts |
 | `verb_noun` (`train_nnue`, `export_nnu4`, `check_parity`) | Executable script |
 
+**`utils/`:** helpers shared by BOTH `tests/` and `train/`, plus standalone
+maintenance scripts. `cliconf.py` (config-block + CLI plumbing, and the one copy
+of the shared configuration vocabulary — rule 8) and `kill_ghosts.py` live here.
+Anything used by only one of the two folders belongs in that folder instead.
+
 When adding a new script, name it by what it does using this table — don't invent a new
 prefix.
+
+### One tool per job — don't fork a script to change a setting
+
+A second script that differs from an existing one only by its constants is a
+maintenance trap: the machinery drifts between the copies. Add the case to the
+existing tool's config block instead. In particular:
+
+- **positions in, positions out** → `train/labeling/process_positions.py`. It
+  reads `.epd`, `.pgn`, `.bin` and `.parquet`, writes any combination of
+  `parquet`/`bin`/`epd`/`pgn`, and every filter is optional, so it is also the
+  format converter (`--filters none`). Do not write a new one-off converter.
+- **games between two engine versions** → `run_arena.py` (SPRT gate) or
+  `run_tournament.py` (cross-table / anchored Elo).
+- **training data from self-play** → `selfplay.exe` via `run_selfplay_native.py`
+  (fast path) or `run_selfplay.py` (any UCI engine).
 
 ## Per-instance objects — `TTable` and `NnueNet`
 

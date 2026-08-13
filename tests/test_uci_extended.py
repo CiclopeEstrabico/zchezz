@@ -37,19 +37,45 @@ def find_latest_engine():
         raise FileNotFoundError("No engine version found")
     return dirs[-1]  # latest by name sort
 
-# Allow version override via CLI: python test_uci_extended.py v305
-if len(sys.argv) > 1 and sys.argv[1].startswith("v"):
-    ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                              "engine", "c", f"zchezz_{sys.argv[1]}")
-else:
-    ENGINE_DIR = find_latest_engine()
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-ENGINE_PATH = os.path.join(ENGINE_DIR, "zchezz.exe")
-# Syzygy path — adjust if needed
-SYZYGY_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tablebases")
-# Book path — will be tested if exists
-BOOK_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                          "utils", "book.bin")
+# ═══════════════ CONFIGURATION ═══════════════
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
+VERSION      = ""      # engine folder suffix, e.g. "v400". "" = the highest
+                       # zchezz_v* folder present (find_latest_engine())
+ENGINE_PATH  = ""      # explicit engine binary; "" = derived from VERSION
+SYZYGY_PATH  = os.path.join(_REPO, "tablebases")          # Syzygy folder
+BOOK_PATH    = os.path.join(_REPO, "utils", "book.bin")   # opening book, tested if present
+ONLY         = []      # [] = every test group; else the group ids to run, e.g. ["T3","T7"]
+HANDSHAKE_TIMEOUT_S = 5   # seconds allowed for uciok / readyok per group
+# ═══════════════════════════════════════════
+
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_uci_extended.py` runs exactly what the block above says.
+# The legacy positional form (`... v400`) still works and means --version v400.
+# `--show-config` prints the resolved settings and exits. See utils/cliconf.py.
+# ════════════════════════════════════════════
+sys.path.insert(0, os.path.join(_REPO, "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("VERSION",     "--version", str,  "engine folder suffix (engine/c/zchezz_<V>); empty = latest"),
+    ("ENGINE_PATH", "--exe",     str,  "explicit engine binary, overrides --version"),
+    ("SYZYGY_PATH", "--syzygy",  str,  "Syzygy tablebase folder"),
+    ("BOOK_PATH",   "--book",    str,  "opening book file (tested only if it exists)"),
+    ("ONLY",        "--only",    list, "run only this test group id, e.g. T3 (repeatable)"),
+    ("HANDSHAKE_TIMEOUT_S", "--handshake-timeout", float, "seconds allowed for uciok/readyok"),
+]
+
+
+def resolve_engine_path() -> str:
+    """The engine binary, from --exe, else --version, else the latest folder."""
+    if ENGINE_PATH:
+        return ENGINE_PATH
+    engine_dir = (os.path.join(_REPO, "engine", "c", "zchezz_" + VERSION)
+                  if VERSION else find_latest_engine())
+    return os.path.join(engine_dir, "zchezz.exe")
 
 
 class UCIEngine:
@@ -1125,11 +1151,12 @@ def test_t13(eng):
 def main():
     global BOOK_PATH, SYZYGY_PATH
 
-    if not os.path.exists(ENGINE_PATH):
-        print(f"ERROR: Engine not found at {ENGINE_PATH}")
+    engine_path = resolve_engine_path()
+    if not os.path.exists(engine_path):
+        print(f"ERROR: Engine not found at {engine_path}")
         sys.exit(1)
 
-    print(f"Engine: {ENGINE_PATH}")
+    print(f"Engine: {engine_path}")
     print(f"Syzygy: {SYZYGY_PATH} ({'exists' if os.path.isdir(SYZYGY_PATH) else 'NOT FOUND'})")
     if BOOK_PATH:
         print(f"Book:   {BOOK_PATH}")
@@ -1151,16 +1178,24 @@ def main():
         ("T13", test_t13),
     ]
 
+    if ONLY:
+        wanted = {o.upper() for o in ONLY}
+        unknown = wanted - {n for n, _ in test_groups}
+        if unknown:
+            print(f"ERROR: --only names unknown test group(s): {sorted(unknown)}")
+            sys.exit(1)
+        test_groups = [(n, f) for n, f in test_groups if n in wanted]
+
     for name, test_fn in test_groups:
-        eng = UCIEngine(ENGINE_PATH)
+        eng = UCIEngine(engine_path)
         try:
             eng.start()
             time.sleep(0.3)
             # Handshake
             eng.send("uci")
-            eng.read_until(r"^uciok$", timeout=5)
+            eng.read_until(r"^uciok$", timeout=HANDSHAKE_TIMEOUT_S)
             eng.send("isready")
-            eng.read_until(r"^readyok$", timeout=5)
+            eng.read_until(r"^readyok$", timeout=HANDSHAKE_TIMEOUT_S)
             test_fn(eng)
         except Exception as e:
             print(f"  ERROR in {name}: {e}")
@@ -1181,5 +1216,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Legacy positional form: `python tests/test_uci_extended.py v400`.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.argv[1:2] = ["--version", sys.argv[1].lstrip("v") and sys.argv[1]]
+    override_from_cli(globals(), CLI, description="Extended UCI test suite",
+                      prog="test_uci_extended.py")
     main()
 

@@ -14,10 +14,29 @@ on all positions probed.
 import subprocess, sys, os, time
 
 # ═══════════════ CONFIGURATION ═══════════════
-DEFAULT_EXE = "zchezz_verify.exe"  # engine binary used when no path is given on the command line
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
+EXE       = "zchezz_verify.exe"  # verify-instrumented engine binary (-DNNUE_VERIFY_ACC)
+TIMEOUT_S = 60                   # per-case wall-clock limit
+ONLY      = []                   # [] = every case; else keep cases whose name
+                                 # contains one of these substrings
+RUN_THREADS_CASE = True          # also run the Threads=4 case (Lazy SMP check)
 # ═══════════════════════════════════════════
 
-EXE = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXE
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_nnue_accumulator.py` runs exactly what the block above
+# says. The legacy positional form (`... path\to\zchezz_verify.exe`) still
+# works and means --exe. See utils/cliconf.py.
+# ════════════════════════════════════════════
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("EXE",              "--exe",     str,  "verify-instrumented engine binary"),
+    ("TIMEOUT_S",        "--timeout", float,"per-case wall-clock limit, seconds"),
+    ("ONLY",             "--only",    list, "run only cases whose name contains this (repeatable)"),
+    ("RUN_THREADS_CASE", "--threads-case", bool, "also run the Threads=4 case"),
+]
 
 CASES = [
     ("startpos", "position startpos\ngo depth 8\n"),
@@ -54,12 +73,12 @@ def run(name, cmds):
     script = cmds
     t0 = time.time()
     try:
-        r = subprocess.run([EXE], input=script, capture_output=True, text=True, timeout=60)
+        r = subprocess.run([EXE], input=script, capture_output=True, text=True, timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired as e:
         print(f"[TIMEOUT] {name}")
         print(e.stdout or "")
         print(e.stderr or "")
-        return False, 60.0
+        return False, float(TIMEOUT_S)
     dt = time.time() - t0
     ok = (r.returncode == 0) and ("MISMATCH" not in r.stderr) and ("MISMATCH" not in r.stdout)
     status = "OK" if ok else "FAIL"
@@ -74,15 +93,22 @@ def run(name, cmds):
 
 def main():
     print(f"Engine: {EXE}\n")
+    cases = CASES
+    if ONLY:
+        cases = [c for c in CASES if any(o.lower() in c[0].lower() for o in ONLY)]
+        if not cases:
+            print(f"ERROR: --only {ONLY} matched no case")
+            sys.exit(1)
     all_ok = True
     total_time = 0.0
-    for name, cmds in CASES:
+    for name, cmds in cases:
         ok, dt = run(name, cmds)
         all_ok &= ok
         total_time += dt
-    ok, dt = run(*THREADS_CASE)
-    all_ok &= ok
-    total_time += dt
+    if RUN_THREADS_CASE and not ONLY:
+        ok, dt = run(*THREADS_CASE)
+        all_ok &= ok
+        total_time += dt
 
     print()
     print("=" * 60)
@@ -93,4 +119,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # Legacy positional form: `python tests/test_nnue_accumulator.py <exe>`.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.argv[1:2] = ["--exe", sys.argv[1]]
+    override_from_cli(globals(), CLI, description=__doc__,
+                      prog="test_nnue_accumulator.py")
     main()

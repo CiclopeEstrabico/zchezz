@@ -42,7 +42,7 @@ rede). Fases 3→4→5 são estritamente sequenciais.
 
 ---
 
-## STATUS ATUAL (atualizado 2026-08-12)
+## STATUS ATUAL (atualizado 2026-08-13)
 
 Evidência: **[M]** medido/testado nesta sessão · **[O]** relatado pelo dono
 do projeto · **[?]** não verificado — não assumir pronto nem faltando.
@@ -58,7 +58,7 @@ do projeto · **[?]** não verificado — não assumir pronto nem faltando.
 | **3** | Bootstrap Estágio 1 (alpha-beta existente, sem política/MCTS) | **PRONTO** (é o que `selfplay.c` já faz — chama `search_best()` direto) | mesma evidência do selfplay nativo acima |
 | **4** | Cabeça de política + MCTS (bootstrap Estágio 2) | **NÃO EXISTE** | Nenhum arquivo/símbolo relacionado a MCTS ou segunda cabeça de política em `train/` ou `engine/c/`; arquitetura atual da NNUE (CLAUDE.md) é só cabeça de valor **[M]** |
 | **5** | Ciclo de bootstrap contínuo (gerar→treinar→arena→promove) | **NÃO EXISTE** | Nenhum script de orquestração encontrado; as peças (`selfplay.exe`, `train_nnue.py`, `arena.exe`) existem soltas mas não há um loop automático que as encadeia **[M]** |
-| **1** | Primeiro treino real da rede v400 | **EM ANDAMENTO, primeira leva -200 ELO vs v3.14** | Feito por **outra sessão**, fora deste chat, usando o `CKPT_DIR` externo antigo (`C:/nnue_checkpoints/checkpoints_v400/`, o path que este documento já registra como corrigido para `checkpoints/v400/` — a outra sessão rodou antes dessa correção ou passou `--ckpt-dir` manualmente). Dois runs medidos em disco: `halfkp4b_v400` (6 épocas, terminou 16:11) e `strong_sf_stage2` (8 épocas, terminou 17:22, `--dataset-name` diferente — provavelmente uma segunda tentativa com outro dataset/config depois da primeira leva não ir bem) **[M]**. `engine/c/zchezz_v400/nnue_weights.bin` tem mtime 16:12 — bate com o fim do primeiro run, ou seja **o `.bin` hoje no repo provavelmente já é a rede exportada, não mais placeholder aleatório** **[M, inferido pelo timestamp — não confirmado lendo o binário]**. O resultado "-200 ELO vs v3.14" foi relatado pelo dono do projeto **[O]**, não há arquivo de resultado de torneio no repo para conferir o número exato ou a config do teste (quantos jogos, movetime, qual checkpoint exportado) — próximo passo é achar/pedir esse log antes de reagir ao número. |
+| **1** | Treino real da rede v400 | **EM ANDAMENTO — estágio `warmup`, época 4/12** | Treino de dois estágios definido em `train/train_nnue.py` (`STAGE`), ver § ATUALIZAÇÃO 2026-08-13 abaixo para a tabela de estágios, as métricas por época e a correção sobre como ler a BCE (piso 0,620, não 0,693). Checkpoints em `checkpoints/v400/` **[M]**. A leva anterior ("-200 ELO vs v3.14" **[O]**) foi feita com 6–8 épocas e LR anelado a ~0 nas primeiras — não é comparável a este run e não há log de torneio no repo para conferir a config daquele teste. |
 
 **Outras correções feitas nesta sessão, fora do escopo original deste
 documento mas relevantes para o pipeline de treino (v400 Parte 5 /
@@ -109,6 +109,75 @@ documento mas relevantes para o pipeline de treino (v400 Parte 5 /
   aponta para `README.md`. Também preenchidas lacunas que uma auditoria
   encontrou: `opening_pool.c`/`.h` e `sample.h` não apareciam em nenhum
   inventário de arquivos; agora aparecem no `README.md`.
+
+## ATUALIZAÇÃO 2026-08-13 — treino em dois estágios + ferramental
+
+### Treino da rede v400 (Fase 1, o item que bloqueia tudo)
+
+O treino passou a ter dois estágios explícitos, escolhidos por `STAGE` no
+topo de `train/train_nnue.py`:
+
+| Estágio | Dados | Linhas/época | LR | Épocas |
+|---|---|---|---|---|
+| `warmup` | 3 conjuntos humanos brutos e volumosos (extra-quiet SF 5k, lichess ×2) | 73,9 M | 1e-3 | 12 |
+| `finetune` | 14 conjuntos recentes/fortes/profundos (SF 50k–1M, endgames, self-play) | 57,2 M | 1e-5 | 200 |
+
+`check_stage_lr()` recusa iniciar quando `STAGE` e `LR` discordam — as duas
+combinações erradas falham em silêncio (warmup a 1e-5 quase não sai da
+inicialização aleatória; finetune a 1e-3 destrói a rede recebida).
+`EPOCHS` também virou dependente do estágio: o agendador é
+`CosineAnnealingLR(T_max=EPOCHS)`, então um run configurado para 200 épocas
+e interrompido na 8ª já anelou o LR a quase zero.
+
+**Como ler a perda — correção de diagnóstico [M].** O alvo é contínuo
+(0..1), não 0/1, logo o piso da BCE NÃO é 0,693: é a entropia média do
+próprio alvo. Medida nos dados de warmup (267 mil linhas amostradas dos 3
+datasets): **0,6199**. Com isso:
+
+| | BCE |
+|---|---|
+| preditor constante | ~0,693 |
+| rede na época 4 | 0,6422 |
+| piso teórico (entropia do alvo) | 0,6199 |
+
+Ou seja, a rede já capturou ~70% da redução disponível. A leitura anterior
+("val BCE 0,62 contra piso de 0,693, logo a rede mal aprendeu") estava
+errada — 0,62 *era* essencialmente o piso. Use `val_loss` menos a entropia
+do alvo, ou `val_mae` (erro direto em unidades de wdl). O docstring do
+trainer registra isso em "HOW TO READ THE LOSS".
+
+Estado em 2026-08-13 01:15: warmup na época 4/12, val BCE 0,6422, val MAE
+0,0931, ~12 min por época **[M]**. Próximos passos: terminar o warmup →
+`STAGE="finetune"` → `export_nnu4.py` → Fase 1 do CLAUDE.md (perft, UCI,
+bench) → regressão de 700 jogos contra a v3.14.
+
+### Ferramental (regra 8 do CLAUDE.md, aplicada a todos os arquivos)
+
+- `train/labeling/process_positions.py` reescrito como **o único cano de
+  posições**: entrada `.epd`/`.pgn`/`.bin`/`.parquet` (detectada pela
+  extensão), saída em qualquer combinação de `parquet`/`bin`/`epd`/`pgn`,
+  e todo filtro é opcional — com `--filters none` ele é um conversor de
+  formato puro. O antigo `LIMIT = 'all' | int` virou dois knobs
+  explícitos: `LIMIT` (0 = tudo) e `SAMPLE` (`stream` vs `reservoir`).
+  Leitor de PGN novo, entendendo os dois dialetos de comentário de
+  avaliação (`[%eval 1.23]` do lichess e `{+0.35/12}` do cutechess).
+  Roque e en-passant agora são preservados na escrita do `.bin` (eram
+  zerados). Testado: epd→bin→epd, pgn→parquet, parquet→bin, modo
+  diretório com resume, `--dry-run` **[M]**.
+- Novo `utils/cliconf.py`: bloco de configuração no topo do arquivo como
+  interface primária, CLI só como override, `--show-config` em toda
+  ferramenta, e a **única** cópia do vocabulário compartilhado de nomes
+  de configuração (antes duplicado em 6 harnesses).
+- Nomes padronizados entre arquivos: `N_WORKERS`→`WORKERS`,
+  `TOTAL_GAMES`→`GAMES`, `SAMPLE_SEED`→`SEED`,
+  `MOVE_TIMEOUT`→`MOVE_TIMEOUT_S`, `WDL_DIVISOR`→`CP_TO_WDL_T` (e este
+  saiu da CLI: 320 precisa casar com `nnue.c`, não é ajustável).
+- 21 ferramentas ganharam bloco de configuração completo + flags:
+  valores que estavam embutidos no meio do código (timeouts, portas,
+  profundidades, sementes, caminhos de saída) subiram para o topo.
+- Comentários de histórico removidos em favor de instrução direta
+  (CLAUDE.md regra 7): o que faz, como rodar, o que setar, quais
+  invariantes ainda mordem.
 
 ## CONTEXTO: O QUE EXISTE HOJE (v3.14)
 

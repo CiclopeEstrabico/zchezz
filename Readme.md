@@ -6,7 +6,7 @@ Written in C with a custom-trained NNUE evaluation, playable directly in the bro
 
 ▶ **[Play against Zchezz in your browser](https://gitzambrano.github.io/zchezz/)** *(currently serving the last trained version, v3.14 — see the v4.00 section below for what's in progress)*
 
-> **Status note:** the repo is mid-transition to **v4.00**, a new NNUE architecture (HalfKP-4Bucket). v4.00's network is **not trained yet** — the deployed/playable engine is still v3.14 (~2900 Elo, described below) until v4.00 has a trained weight file and passes the regression suite in `CLAUDE.md`. See [§ v4.00](#zchezz-v400--halfkp-4bucket-nnue-in-progress) for exactly what has and hasn't been verified so far.
+> **Status note:** the repo is mid-transition to **v4.00**, a new NNUE architecture (HalfKP-4Bucket). The architecture is implemented and structurally verified; its network is **being trained** (two stages — see [§ Training the v4.00 network](#training-the-v400-network)). The deployed/playable engine stays v3.14 (~2900 Elo, described below) until v4.00 has a finetuned weight file and passes the regression suite in `CLAUDE.md`. See [§ v4.00](#zchezz-v400--halfkp-4bucket-nnue-in-progress) for exactly what has and hasn't been verified so far.
 
 ---
 
@@ -57,6 +57,47 @@ The network was trained on filtered data for quiet positions using PyTorch.
 
 - 4 generations of iterative self-play
 - Generated endgame positions
+
+Every dataset stores the same three columns, with the same meaning everywhere:
+`result` is the real game outcome (0.0 / 0.5 / 1.0, White-relative), `cp` is the
+evaluation in centipawns (White-relative), and `wdl` is `sigmoid(cp / 320)` — a
+transform of `cp`, never an outcome. The training target is the blend
+`lam * result + (1 - lam) * wdl`, computed at training time with a per-dataset
+`lam`, never baked into a dataset.
+
+### Training the v4.00 network
+
+Training runs in two stages, selected by `STAGE` at the top of
+`train/train_nnue.py`:
+
+| Stage | Data | Rows/epoch | LR | Epochs |
+|---|---|---|---|---|
+| `warmup` | 3 crude, high-volume human sets (extra-quiet @ SF 5k nodes, lichess ×2) | 73.9 M | 1e-3 | 12 |
+| `finetune` | 14 recent/strong/deeply-evaluated sets (SF 50k–1M nodes, endgames, self-play) | 57.2 M | 1e-5 | 200 |
+
+The warmup exists only to get the weights out of random initialisation, so
+shallow evaluations are good enough there. The strength comes from the finetune,
+and the warmup data is *absent* from that mix rather than down-weighted — at
+73.9 M rows it would outweigh the strong sets by sheer volume.
+
+`STAGE` and `LR` are checked against each other at startup (`check_stage_lr()`)
+because both mismatches fail silently: a warmup at 1e-5 barely leaves random
+init, and a finetune at 1e-3 destroys the network it was handed. `EPOCHS` is
+stage-dependent for the same reason — the schedule is
+`CosineAnnealingLR(T_max=EPOCHS)`, so a run configured for 200 epochs but stopped
+at 8 has annealed its learning rate to nearly zero within the first few.
+
+**Reading the loss.** The target is continuous (0..1), not 0/1, so the BCE floor
+is *not* 0.693 — it is the mean entropy of the target distribution, measured at
+**0.620** for the warmup mix. Compare `val_loss` against that number, and read
+`val_mae` as the direct error in wdl units. Judging a run against 0.693 makes a
+nearly converged network look like a failure.
+
+```bash
+python train/train_nnue.py                 # trains the configured STAGE
+python train/train_nnue.py --show-config   # prints the stage, LR, and dataset mix
+python train/export_nnu4.py                # checkpoint -> NNU4 weight file
+```
 
 ---
 
@@ -610,9 +651,18 @@ first with `mingw32-make ENGINE=v400 selfplay` or the one-click
 ### Tests
 
 ```bash
-python tests/test_perft.py v400
-python tests/test_uci_extended.py v400
-python tests/bench_nps.py
+python tests/test_perft.py                 # 37 positions, engine from the config block
+python tests/test_uci_extended.py          # full UCI suite, 13 groups
+python tests/bench_nps.py                  # 50-position NPS + eval sanity
+```
+
+Each accepts flags that override its config block — useful while iterating:
+
+```bash
+python tests/test_perft.py --only Kiwipete --max-depth 3   # one position, shallow
+python tests/test_uci_extended.py --only T3 --only T7      # two test groups
+python tests/bench_nps.py --phase Opening --no-run-base    # opening positions, head only
+python tests/test_perft.py v400                            # legacy positional form still works
 ```
 
 See `CLAUDE.md` for the full Phase 1–9 testing workflow.
@@ -765,11 +815,41 @@ zchezz/
 └── index.html                     GitHub Pages deployment (auto-updated by build_wasm.bat)
 ```
 
-### Naming convention — `tests/` and `train/`
+### How every tool is configured
+
+Each Python tool opens with a `CONFIGURATION` block: one documented constant per
+setting, with units. **That block is the interface** — running the tool with no
+arguments does exactly what it says, and editing a constant is the normal way to
+change a run. Every constant is also a command-line flag that overrides it for
+scripted or one-off use, and the flag's default IS the constant, so the help text
+can never disagree with the file:
+
+```bash
+python tests/run_tournament.py                        # runs the config block
+python tests/run_tournament.py --games 200 --movetime 100
+python tests/run_tournament.py --show-config          # print settings, run nothing
+python tests/run_tournament.py --help                 # every flag + its real default
+```
+
+`--show-config` exists everywhere and is the cheap way to check a long job before
+starting it. Booleans always come in pairs (`--pgn` / `--no-pgn`), so a constant
+that defaults to on can still be turned off from the command line. List settings
+are repeatable flags, and repeating one replaces the configured list rather than
+appending to it.
+
+The plumbing lives in `utils/cliconf.py`, which also holds the **shared
+configuration vocabulary**: one name per concept across all tools (`GAMES`,
+`CONCURRENCY`, `MOVETIME_MS`, `MAX_PLIES`, `SEED`, `WORKERS`, `RESULTS_DIR`,
+`SAVE_PGN`/`SAVE_EPD`/`SAVE_BIN`, `DRY_RUN`, `ONLY`, …). A `DEFAULT_` prefix marks
+a knob specific to one tool. The vocabulary is defined in that one file and not
+copied into the individual scripts.
+
+### Naming convention — `tests/`, `train/` and `utils/`
 
 `tests/` and `train/` are flat and version-less — one toolset tracking the current
 engine, unlike `engine/c/zchezz_vXXX/`, which is version-suffixed and duplicated per
-release. Neither ever gets a `vNNN` subfolder.
+release. Neither ever gets a `vNNN` subfolder. `utils/` holds helpers used by both
+(`cliconf.py`) plus standalone maintenance scripts (`kill_ghosts.py`).
 
 **`tests/`:**
 
@@ -921,22 +1001,37 @@ plan that assumed a `[512, 2560]` dense layer.
 
 | File | What it does | Renamed from |
 |---|---|---|
-| `label_selfplay.py` | Filters and labels self-play EPD positions with Stockfish, writes Parquet chunks | `sf_analyze_selfplay.py` |
-| `label_quiet_d8.py` | Re-evaluates quiet positions with Stockfish at depth 6-8 | `sf_analyze_quiet_d8.py` |
-| `label_quiet_n5000.py` | RAM-safe streaming Stockfish labeling pipeline at 5000 nodes/position | `sf_analyze_quiet_n5000.py` |
-| `label_all_quiet.py` | Full quiet-position filtering + Stockfish labeling pipeline | `sf_analyze_all_quietfilter.py` |
-| `filter_wdl.py` | WDL-based dataset filtering | `wdl_filter.py` |
-| `generate_endgames.py` | Generates synthetic endgame positions and evaluates them with Stockfish | `endgame_generator.py` |
+| `process_positions.py` | **The one position pipe.** Reads `.epd`, `.pgn`, `.bin` or `.parquet`; optionally filters (quiet, endgame, score cap, dedup) and re-evaluates with Stockfish; writes any combination of `parquet`/`bin`/`epd`/`pgn`. With `--filters none` it is a plain format converter | replaces `label_selfplay.py`, `label_quiet_*.py`, `label_all_quiet.py`, `filter_wdl.py` |
+| `generate_endgames.py` | Generates synthetic endgame positions by material group and labels them with Stockfish | `endgame_generator.py` |
+| `normalize_columns.py` | Rewrites a dataset to the canonical `fen`/`cp`/`result` column shape | new |
+| `merge_datasets.py` | Joins two extractions of the SAME positions (one with `cp`, one with `result`) into one dataset, hash-joined on FEN with FEN re-verification | new |
+| `fix_column_names.py` | Renames or drops a mislabelled column after re-verifying, per file, that the column really holds what the name claims | new |
 
 `train/test/` (12 one-off v3.14 scratch scripts — `check_ranges.py`, `test_avx.c`,
 `test_infer*.py`, etc.) was **deleted**, superseded by the files above; history remains
 in git.
 
+**Format conversion is not a separate tool.** Anything that reads positions and
+writes positions goes through `process_positions.py`:
+
+```bash
+# .pgn games -> packed .bin training samples, no filtering
+python train/labeling/process_positions.py --in games.pgn --out gen7.bin --filters none
+
+# a raw self-play EPD folder -> filtered parquet dataset (the default pipeline)
+python train/labeling/process_positions.py --in data/selfplay_raw --out data/selfplay_filtered
+
+# see exactly what a bare run would do, without touching the disk
+python train/labeling/process_positions.py --show-config
+python train/labeling/process_positions.py --dry-run
+```
+
 #### `utils/`
 
 | File | What it does | Note |
 |---|---|---|
-| `kill_ghosts.py` | Force-kills stray `zchezz*` processes left over from crashed test runs | Termux docs moved to `engine/build/`; `OpeningBook.bin` moved to `openings/book.bin` |
+| `cliconf.py` | Config-block + CLI plumbing shared by every Python tool, and the single copy of the shared configuration vocabulary (one name per concept, project-wide) | new |
+| `kill_ghosts.py` | Force-kills stray engine/helper processes left over from crashed runs | Termux docs moved to `engine/build/`; `OpeningBook.bin` moved to `openings/book.bin` |
 
 #### `openings/` (gitignored — large downloaded data)
 

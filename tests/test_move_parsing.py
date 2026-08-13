@@ -2,18 +2,41 @@
 import subprocess, time, os, threading
 
 # ═══════════════ CONFIGURATION ═══════════════
-# No CLI in this script — edit these constants directly.
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
 REPO_DIR = r"c:\Zchezz"                          # working directory the engine is launched from
 ENGINE_EXE = r"engine\c\zchezz_v400\zchezz.exe"  # engine binary under test
 NNUE_WEIGHTS = r"C:\Zchezz\engine\c\zchezz_v400\nnue_weights.bin"  # NNUE weights loaded via setoption
 DISPLAY_READ_TIMEOUT_S = 2   # seconds to read the "d" board-display output
 SEARCH_TIMEOUT_S = 10        # seconds to wait for "bestmove"
+# The exact moves from the failed game this test was written for. Replace it
+# (or pass --moves) to replay any other suspect game through the same check.
+MOVES = "e2e4 c7c5 d2d4 c5d4 g1f3 g7g6 f3d4 g8f6 b1c3 b8c6 d4c6 b7c6 e4e5 f6h5 f1e2 h5g7 e1g1 g7e6 f2f4 f8g7 g2g4 g6g5 f4f5 e6f4 c3e4 d8b6 g1h1 g7e5 e4g5 f4e2 d1e2 f7f6 c2c4 c6c5 g5f3 c8b7 h1g1 e5c7 g4g5 b6c6 c1d2 e8c8 e2e7 h8f8 e7e2 f6g5 f3d4 c5d4 e2e4 c6e4"
 # ═══════════════════════════════════════════
+
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_move_parsing.py` runs exactly what the block above says;
+# the flags only override it. See utils/cliconf.py.
+# ════════════════════════════════════════════
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("REPO_DIR",     "--repo-dir", str,  "working directory the engine is launched from"),
+    ("ENGINE_EXE",   "--exe",      str,  "engine binary under test"),
+    ("NNUE_WEIGHTS", "--nnue",     str,  "NNUE weights file loaded via setoption"),
+    ("MOVES",        "--moves",    str,  "space-separated UCI move list to replay"),
+    ("DISPLAY_READ_TIMEOUT_S", "--display-timeout", float, "seconds to read the 'd' output"),
+    ("SEARCH_TIMEOUT_S",       "--search-timeout",  float, "seconds to wait for bestmove"),
+]
+
+if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="test_move_parsing.py")
 
 os.chdir(REPO_DIR)
 
-# The exact moves from the failed game
-moves = "e2e4 c7c5 d2d4 c5d4 g1f3 g7g6 f3d4 g8f6 b1c3 b8c6 d4c6 b7c6 e4e5 f6h5 f1e2 h5g7 e1g1 g7e6 f2f4 f8g7 g2g4 g6g5 f4f5 e6f4 c3e4 d8b6 g1h1 g7e5 e4g5 f4e2 d1e2 f7f6 c2c4 c6c5 g5f3 c8b7 h1g1 e5c7 g4g5 b6c6 c1d2 e8c8 e2e7 h8f8 e7e2 f6g5 f3d4 c5d4 e2e4 c6e4"
+moves = MOVES
 
 exe = ENGINE_EXE
 p = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,

@@ -28,19 +28,48 @@ def find_latest_engine():
         raise FileNotFoundError("No engine version found")
     return dirs[-1]
 
-if len(sys.argv) > 1 and sys.argv[1].startswith("v"):
-    ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              "engine", "c", f"zchezz_{sys.argv[1]}")
-else:
-    ENGINE_DIR = find_latest_engine()
-HTML_FILE = "zchezz_wasm.html"
-PORT = 8766  # different port to avoid conflicts
+# ═══════════════ CONFIGURATION ═══════════════
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
+VERSION        = ""     # engine folder suffix, e.g. "v400"; "" = latest zchezz_v*
+HTML_FILE      = "zchezz_wasm.html"   # page served from the engine folder
+PORT           = 8766   # local HTTP port (deliberately not 8000, to avoid clashes)
+HEADLESS       = False  # run Chromium headless (True for CI / unattended runs)
+VIEWPORT_W     = 1400   # browser viewport width
+VIEWPORT_H     = 950    # browser viewport height
+SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "elo_results")
+# ═══════════════════════════════════════════
+
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_browser.py` runs exactly what the block above says. The
+# legacy positional form (`... v400`) still works and means --version.
+# ════════════════════════════════════════════
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("VERSION",        "--version",    str,  "engine folder suffix; empty = latest"),
+    ("HTML_FILE",      "--html",       str,  "page served from the engine folder"),
+    ("PORT",           "--port",       int,  "local HTTP port"),
+    ("HEADLESS",       "--headless",   bool, "run Chromium headless"),
+    ("VIEWPORT_W",     "--viewport-width",  int, "browser viewport width"),
+    ("VIEWPORT_H",     "--viewport-height", int, "browser viewport height"),
+    ("SCREENSHOT_DIR", "--screenshot-dir",  str, "where screenshots are written"),
+]
+
+
+def engine_dir() -> str:
+    """The engine folder to serve — from --version, else the latest one."""
+    if VERSION:
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "engine", "c", f"zchezz_{VERSION}")
+    return find_latest_engine()
+
 
 passed = 0
 failed = 0
 errors_list = []
-SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "elo_results")
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 
 def check(name, condition, detail=""):
@@ -255,6 +284,10 @@ def test_bug4_clock_game(page):
 
 
 def main():
+    global ENGINE_DIR
+    ENGINE_DIR = engine_dir()
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
     print("=" * 60)
     print(f"Zchezz — Automated Browser Tests ({os.path.basename(ENGINE_DIR)})")
     print("=" * 60)
@@ -268,8 +301,9 @@ def main():
     print(f"\nServing {ENGINE_DIR} at {url}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(viewport={"width": 1400, "height": 950})
+        browser = p.chromium.launch(headless=HEADLESS)
+        context = browser.new_context(
+            viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
         page = context.new_page()
 
         # Capture console errors
@@ -315,4 +349,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Legacy positional form: `python tests/test_browser.py v400`.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.argv[1:2] = ["--version", sys.argv[1]]
+    override_from_cli(globals(), CLI, description=__doc__, prog="test_browser.py")
     main()

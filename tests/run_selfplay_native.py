@@ -78,33 +78,15 @@ literally BE that constant, never a second copy of the literal —
 mirrors selfplay.c's own SP_DEFAULT_* block and run_arena.py's
 DEFAULT_* block).
 
-── SHARED CONFIGURATION VOCABULARY ─────────────────────────────────────────
+── CONFIGURATION NAMES ─────────────────────────────────────────────────────
 
-Every tests/run_*.py harness uses the SAME name for the same concept, so a
-value means the same thing whichever harness you are reading (CLAUDE.md
-rule 8: the constant lives in the CONFIGURATION block once, and the CLI's
-`default=` IS that constant, never a second copy of the literal).
+Every tool uses the same constant name for the same concept, so a value
+means the same thing whichever tool you are reading. The full list lives in
+ONE place: utils/cliconf.py, section "SHARED CONFIGURATION VOCABULARY".
+A `DEFAULT_` prefix marks a knob specific to this tool alone.
 
-  GAMES           number of games to play
-  CONCURRENCY     parallel GAMES, not threads per game. 0 = autodetect cores
-                  in the harnesses that wrap a C exe (arena, selfplay_native)
-  MOVETIME_MS     per-move budget in milliseconds
-  NODES           per-move node budget; used only when MOVETIME_MS == 0
-  MAX_PLIES       half-move cap before a game is scored a draw (400 project-wide)
-  SEED            RNG seed for opening cycling / game order
-  TT_MB           per-TTable memory budget in MB
-  OPENING_FOLDER  openings/lines, walked recursively for .pgn/.epd files
-  RESULTS_DIR     tests/<tool>_results — every harness writes under tests/
-  SAVE_PGN        write standard PGN game records
-  SAVE_EPD        write positions + eval as EPD
-  SAVE_BIN        write packed training samples (train/dataset.py SAMPLE_DTYPE)
-
-SAVE_PGN / SAVE_EPD / SAVE_BIN are INDEPENDENT flags, not a choice of one
-(CLAUDE.md rule 9: the native path is a faster path for the same job, never a
-reduced one — losing PGN because a tool prefers .bin is a regression).
-
-A `DEFAULT_` prefix marks a knob specific to ONE tool (DEFAULT_TEMPERATURE,
-DEFAULT_ALPHA, ...) and is deliberately not shared.
+SAVE_PGN / SAVE_EPD / SAVE_BIN are independent switches, not a choice of
+one: any combination can be on in the same run.
 """
 
 # Windows consoles default to cp1252, which cannot encode the em-dashes and box
@@ -211,12 +193,9 @@ DEFAULT_NNUE_PATH            = "nnue_weights.bin"  # NNUE weights file (relative
 DEFAULT_SAVE_OPENING_IN_EPD  = True     # True = include forced opening plies in the EPD output (default ON,
                                          # matches tests/run_selfplay.py's SAVE_OPENING_IN_EPD=True; deliberately
                                          # the OPPOSITE default of DEFAULT_SAVE_OPENING_SAMPLES below)
-# "openings" (not "") is the RIGHT default here, matching tests/run_selfplay.py's
-# OPENING_FOLDER = r"openings" convention exactly: this script's subprocess.run()
-# below does NOT pass cwd=, so relative paths resolve against the caller's cwd
-# (normally the repo root) just like run_selfplay.py's. Leaving this "" would
-# silently make DEFAULT_OPENING_MODE="book" degrade to random every run — see
-# selfplay.c's own "no --openings given" warning this was previously hitting.
+# Relative paths resolve against the caller's cwd (normally the repo root).
+# Leave this non-empty: an empty value makes OPENING_MODE="book" fall back to
+# random openings without saying so.
 OPENING_FOLDER                = r"openings\lines"  # walked recursively for .pgn/.epd files
 DEFAULT_OPENING_MODE         = "book"   # "book" | "random" | "all"
 DEFAULT_RANDOM_PLIES         = 6        # random legal opening plies (random/all modes)
@@ -331,7 +310,18 @@ def main():
     same_group.add_argument("--no-same-opening-twice", dest="same_opening_twice",
                              action="store_false")
     ap.add_argument("--save-opening-samples", action="store_true", default=DEFAULT_SAVE_OPENING_SAMPLES)
+    ap.add_argument("--show-config", action="store_true",
+                    help="print the resolved configuration and exit "
+                         "(runs nothing, writes nothing)")
     args = ap.parse_args()
+    if getattr(args, "show_config", False):
+        print("Resolved configuration:")
+        _w = max(len(k) for k in vars(args))
+        for _k, _v in sorted(vars(args).items()):
+            if _k != "show_config":
+                print(f"  {_k.ljust(_w)} = {_v!r}")
+        sys.exit(0)
+
 
     out_path = args.out
     pgn_path = args.pgn

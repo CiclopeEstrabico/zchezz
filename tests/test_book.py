@@ -18,19 +18,40 @@ ENGINE_C_DIR = os.path.join(BASE_DIR, "engine", "c")
 _engine_dirs = sorted(glob.glob(os.path.join(ENGINE_C_DIR, "zchezz_v*")))
 LATEST_ENGINE_DIR = _engine_dirs[-1] if _engine_dirs else os.path.join(ENGINE_C_DIR, "zchezz_v305")
 
-HTML_PATH = os.path.join(LATEST_ENGINE_DIR, "zchezz_wasm.html")
-# Try to find Stockfish for evaluation
-SF_PATHS = [
-    os.path.join(BASE_DIR, "engine", "stockfish", "stockfish.exe"),
-]
-SF_PATH = None
-for p in SF_PATHS:
-    if os.path.exists(p):
-        SF_PATH = p
-        break
+# ═══════════════ CONFIGURATION ═══════════════
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
+HTML_PATH   = os.path.join(LATEST_ENGINE_DIR, "zchezz_wasm.html")  # page holding OPENING_BOOK
+ZCHEZZ_PATH = os.path.join(LATEST_ENGINE_DIR, "zchezz.exe")        # preferred evaluator
+SF_PATH     = os.path.join(BASE_DIR, "engine", "stockfish", "stockfish.exe")  # fallback evaluator
+EVAL_DEPTH  = 8          # search depth used to judge each book move
+MAX_POSITIONS = 0        # 0 = evaluate every book position; >0 = stop after N
+BAD_CP      = -100       # a move scoring below this (cp, mover POV) is BAD
+DUBIOUS_CP  = -50        # ... and below this but above BAD_CP is DUBIOUS
+EVALUATE    = True       # run the engine quality pass at all
+WRITE_CLEANED = True     # write a cleaned book when bad moves are found
+CLEANED_PATH = os.path.join(BASE_DIR, "tests", "cleaned_book.js")
+# ═══════════════════════════════════════════
 
-# Also try the Zchezz engine itself for evaluation
-ZCHEZZ_PATH = os.path.join(LATEST_ENGINE_DIR, "zchezz.exe")
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_book.py` runs exactly what the block above says; the flags
+# only override it. `--show-config` prints the resolved settings and exits.
+# ════════════════════════════════════════════
+sys.path.insert(0, os.path.join(BASE_DIR, "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("HTML_PATH",     "--html",        str,  "HTML page holding the OPENING_BOOK block"),
+    ("ZCHEZZ_PATH",   "--engine",      str,  "preferred evaluator (our engine)"),
+    ("SF_PATH",       "--stockfish",   str,  "fallback evaluator"),
+    ("EVALUATE",      "--evaluate",    bool, "run the engine move-quality pass"),
+    ("EVAL_DEPTH",    "--depth",       int,  "search depth per book move"),
+    ("MAX_POSITIONS", "--max-positions", int, "stop after N positions (0 = all)"),
+    ("BAD_CP",        "--bad-cp",      int,  "score below which a move counts as bad"),
+    ("DUBIOUS_CP",    "--dubious-cp",  int,  "score below which a move counts as dubious"),
+    ("WRITE_CLEANED", "--write-cleaned", bool, "write a cleaned book when bad moves are found"),
+    ("CLEANED_PATH",  "--cleaned-path", str, "where the cleaned book is written"),
+]
 
 
 def extract_book(html_path):
@@ -215,21 +236,27 @@ def main():
         print(f"    ✅ All positions and moves are legal!")
     
     # Engine evaluation
-    engine = ZCHEZZ_PATH if os.path.exists(ZCHEZZ_PATH) else SF_PATH
+    engine = None
+    if EVALUATE:
+        for cand in (ZCHEZZ_PATH, SF_PATH):
+            if cand and os.path.exists(cand):
+                engine = cand
+                break
     if engine:
         print(f"\n[3] Evaluating move quality with engine ({os.path.basename(engine)})...")
-        print(f"    Using depth 8 for speed...")
-        scores = evaluate_with_engine(book, engine, depth=8)
+        print(f"    Using depth {EVAL_DEPTH}...")
+        scores = evaluate_with_engine(book, engine, depth=EVAL_DEPTH,
+                                      max_positions=MAX_POSITIONS or None)
         
         # Find bad moves (losing more than 100cp = 1 pawn)
-        bad_moves = [(k, v) for k, v in scores.items() if v < -100]
-        dubious_moves = [(k, v) for k, v in scores.items() if -100 <= v < -50]
+        bad_moves = [(k, v) for k, v in scores.items() if v < BAD_CP]
+        dubious_moves = [(k, v) for k, v in scores.items() if BAD_CP <= v < DUBIOUS_CP]
         
         print(f"\n    Total evaluated: {len(scores)}")
         print(f"    Bad moves (>1 pawn loss): {len(bad_moves)}")
         print(f"    Dubious moves (0.5-1 pawn loss): {len(dubious_moves)}")
         
-        if bad_moves:
+        if bad_moves and WRITE_CLEANED:
             print(f"\n    ❌ Bad moves to remove:")
             bad_sorted = sorted(bad_moves, key=lambda x: x[1])
             for (fen, move), score in bad_sorted[:30]:
@@ -256,7 +283,7 @@ def main():
                 ms = ', '.join(f'"{m}"' for m in cleaned[fk])
                 lines.append(f'      "{fk}": [{ms}]')
             
-            out_path = r"c:\Zchezz\tests\cleaned_book.js"
+            out_path = CLEANED_PATH
             with open(out_path, 'w', encoding='utf-8') as f:
                 f.write("    const OPENING_BOOK = {\n")
                 f.write(",\n".join(lines))
@@ -274,4 +301,5 @@ def main():
 
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="test_book.py")
     main()

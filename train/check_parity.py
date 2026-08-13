@@ -77,8 +77,21 @@ HERE = Path(__file__).resolve().parent
 NNUE_C = HERE.parent / "engine" / "c" / "zchezz_v400" / "nnue.c"
 
 # ═══════════════ CONFIGURATION ═══════════════
-N_POSITIONS = 300   # random positions to test; also settable via `python check_parity.py <n>`
+N_POSITIONS = 300   # random positions compared between the C engine and PyTorch
 POSITION_SEED = 42  # RNG seed for _random_positions(), so runs are reproducible
+
+# ═══════════════ COMMAND LINE ═══════════════
+# The CONFIGURATION block is the interface: a bare `python train/check_parity.py`
+# runs exactly what it says. Every constant is also a flag that overrides it;
+# `--show-config` prints the resolved settings and exits. See utils/cliconf.py.
+# ════════════════════════════════════════════
+sys.path.insert(0, str(HERE.parent / "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("N_POSITIONS",   "--positions", int, "random positions compared C vs PyTorch"),
+    ("POSITION_SEED", "--seed",      int, "RNG seed for the random positions"),
+]
 # ══════════════════════════════════════════
 
 # Zchezz piece encoding (CLAUDE.md: "Piece encoding"): COL_W=8, COL_B=16, type 1..6.
@@ -195,8 +208,11 @@ def _python_feature_index(piece_is_white: bool, piece_type_code: int, sq_python:
     return bucket * 640 + (color_offset + rel_type) * 64 + pov_sq
 
 
-def _random_positions(n: int, seed: int = POSITION_SEED) -> list[chess.Board]:
-    rng = random.Random(seed)
+def _random_positions(n: int, seed: int | None = None) -> list[chess.Board]:
+    # seed=None reads POSITION_SEED at CALL time, not at def time: --seed
+    # rewrites that constant after this module's body has already run, and a
+    # `seed=POSITION_SEED` default argument would have frozen the old value.
+    rng = random.Random(POSITION_SEED if seed is None else seed)
     boards = []
     for _ in range(n):
         board = chess.Board()
@@ -326,5 +342,8 @@ def emit_json_fixtures(n_positions: int, out_path: Path | None = None) -> Path:
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else N_POSITIONS
-    run_compiled_parity_check(n)
+    # Legacy positional form: `python train/check_parity.py 50` == --positions 50.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.argv[1:2] = ["--positions", sys.argv[1]]
+    override_from_cli(globals(), CLI, description=__doc__, prog="check_parity.py")
+    run_compiled_parity_check(N_POSITIONS)

@@ -25,9 +25,16 @@ PCT_ERET  = 0.05   # Engine Test Suite (300 pos)
 PCT_MATE5 = 0.05   # Mates em 5 (100 pos)
 PCT_OTS   = 0.05   # One-Two-Three (150 pos)
 
-# Nome do comando Node.js (tente "node" ou o caminho completo se necessário)
 # Nome do comando Node.js (caminho completo para garantir no Windows)
 NODE_CMD = r"C:\Program Files\nodejs\node.exe"
+
+# Semente da amostragem: fixa → todos os engines recebem exactamente as mesmas
+# posições. Mudar a semente troca a amostra (útil para confirmar que um
+# resultado não depende do sorteio).
+SEED = 42
+
+# Suites a rodar: [] = todas as de SUITES; senão, os nomes desejados.
+ONLY_SUITES = []
 
 # ── SUITES DEFINIDAS ──────────────────────────────────────────
 SUITES = {
@@ -38,6 +45,36 @@ SUITES = {
     'MATE5': {'file': r'tests\mate5_test_suite.js', 'pct': PCT_MATE5},
     'OTS':   {'file': r'tests\ots_test_suite.js',   'pct': PCT_OTS},
 }
+
+# ══════════════════════════════ COMMAND LINE ══════════════════════════════
+# O bloco de configuração acima É a interface: `python tests/compare_suites.py`
+# roda exactamente o que ele diz. Cada constante também é uma flag que a
+# sobrescreve, e `--show-config` imprime a configuração e sai.
+# Ver utils/cliconf.py e CLAUDE.md regra 8.
+# ══════════════════════════════════════════════════════════════════════════
+import sys
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("ENGINE_V1",   "--engine1",     str,   "caminho do worker .js do engine 1"),
+    ("ENGINE_V2",   "--engine2",     str,   "caminho do worker .js do engine 2"),
+    ("DEPTH",       "--depth",       int,   "profundidade de busca para todos os engines"),
+    ("CONCURRENCY", "--concurrency", int,   "testes em paralelo"),
+    ("PCT",         "--pct",         float, "fracção amostrada de CADA suite (0 = manter os PCT_* por suite)"),
+    ("ONLY_SUITES", "--suite",       list,  "rodar apenas esta suite (repetível): STS, SSM, WAC, ERET, MATE5, OTS"),
+    ("SEED",        "--seed",        int,   "semente da amostragem"),
+    ("NODE_CMD",    "--node",        str,   "executável do Node.js"),
+]
+
+# --engine1/--engine2 são caminhos simples; a profundidade viaja separada em
+# --depth porque ENGINE_Vn é uma tupla (caminho, depth) no bloco acima e uma
+# tupla não se escreve numa flag. DEPTH=0 mantém a profundidade de cada tupla.
+DEPTH = 0
+
+# Fracção amostrada aplicada a TODAS as suites. 0.0 = manter os PCT_* acima.
+PCT = 0.0
 
 # ── MOTOR DE EXECUÇÃO EM JS ───────────────────────────────────
 # O script Python vai gerar um mini-harness temporário em JS para rodar o engine 
@@ -242,7 +279,7 @@ def get_sampled_indices(suite_key: str) -> list:
         _sampled_indices_cache[suite_key] = []
         return []
 
-    rng = random.Random(42)  # semente fixa → mesmos índices em toda execução
+    rng = random.Random(SEED)  # semente fixa → mesmos índices em toda execução
     n_sample = max(1, round(total * s['pct']))
     indices = sorted(rng.sample(range(total), min(n_sample, total)))
     print(f"  [Suite {suite_key}] {total} posições → {len(indices)} amostradas (seed=42, pct={s['pct']:.0%})")
@@ -307,7 +344,17 @@ def main():
         return
 
     # 2. Configurar engines
-    engines_paths = [ENGINE_V1, ENGINE_V2, ENGINE_V3, ENGINE_V4]
+    # --engine1/--engine2 chegam como STRING (só o caminho); a tupla
+    # (caminho, depth) do bloco de configuração continua a valer quando a flag
+    # não é usada. --depth, se dado, sobrepõe-se à profundidade de todas.
+    def _as_cfg(cfg):
+        if isinstance(cfg, str):
+            cfg = (cfg, DEPTH or 8) if cfg else None
+        if cfg and DEPTH:
+            cfg = (cfg[0], DEPTH)
+        return cfg
+
+    engines_paths = [_as_cfg(c) for c in (ENGINE_V1, ENGINE_V2, ENGINE_V3, ENGINE_V4)]
     targets = []
     for config in engines_paths:
         if config and isinstance(config, (list, tuple)):
@@ -381,4 +428,20 @@ def main():
     print("      Mesmas posições para todos os engines (amostragem determinística, seed=42).")
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI,
+                      description="Compara engines .js sobre as suites tácticas.",
+                      prog="compare_suites.py")
+    # --pct 0 mantém os PCT_* por suite; qualquer outro valor aplica-se a todas.
+    if PCT:
+        for _cfg in SUITES.values():
+            _cfg["pct"] = PCT
+    if ONLY_SUITES:
+        _wanted = {n.upper() for n in ONLY_SUITES}
+        _unknown = _wanted - set(SUITES)
+        if _unknown:
+            raise SystemExit(f"--suite desconhecida: {sorted(_unknown)} "
+                             f"(disponíveis: {sorted(SUITES)})")
+        for _name in list(SUITES):
+            if _name not in _wanted:
+                del SUITES[_name]
     main()

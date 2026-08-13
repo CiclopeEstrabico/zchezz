@@ -13,7 +13,25 @@ ENGINE_C_DIR = os.path.join(BASE_DIR, "engine", "c")
 _engine_dirs = sorted(glob.glob(os.path.join(ENGINE_C_DIR, "zchezz_v*")))
 LATEST_ENGINE_DIR = _engine_dirs[-1] if _engine_dirs else os.path.join(ENGINE_C_DIR, "zchezz_v305")
 
-HTML_PATH = os.path.join(LATEST_ENGINE_DIR, "zchezz_wasm.html")
+# ═══════════════ CONFIGURATION ═══════════════
+# Edit these and run with no arguments; both are also CLI flags
+# (CLAUDE.md rule 8, see the COMMAND LINE block below).
+HTML_PATH = os.path.join(LATEST_ENGINE_DIR, "zchezz_wasm.html")  # page to lint
+# ═══════════════════════════════════════════
+
+# ═══════════════ COMMAND LINE ═══════════════
+import sys
+sys.path.insert(0, os.path.join(BASE_DIR, "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("HTML_PATH", "--html", str, "HTML page to check"),
+]
+
+if __name__ == "__main__":
+    override_from_cli(globals(), CLI,
+                      description="Static checks on the generated WASM page.",
+                      prog="test_browser_html.py")
 
 with open(HTML_PATH, 'r', encoding='utf-8') as f:
     html = f.read()

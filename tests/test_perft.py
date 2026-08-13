@@ -25,11 +25,35 @@ if sys.platform == 'win32':
 ENGINE_DIR = os.path.join(os.path.dirname(__file__), "..", "engine", "c")
 
 # ═══════════════ CONFIGURATION ═══════════════
-# DEFAULT_VERSION: engine folder suffix used when no version is given on the
-# command line (`python tests/test_perft.py vXXX`). Keep it pointing at the
-# engine version currently under development.
-DEFAULT_VERSION = "v400"
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
+VERSION    = "v400"   # engine folder suffix: engine/c/zchezz_<VERSION>/zchezz.exe
+ENGINE_EXE = ""       # "" = derive from VERSION; else an explicit path to any
+                      # UCI engine that implements `perft N`
+TIMEOUT_S  = 120      # per-perft-call wall-clock limit
+MAX_DEPTH  = 0        # 0 = run every depth in PERFT_SUITE; >0 = skip depths
+                      # deeper than this (a fast smoke test)
+ONLY       = []       # [] = the whole suite; else keep only positions whose
+                      # name contains one of these substrings
+STOP_ON_FAIL = False  # abort at the first mismatch instead of running the rest
 # ═══════════════════════════════════════════
+
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_perft.py` runs exactly what the block above says.
+# The legacy positional form `python tests/test_perft.py v400` still works
+# and is equivalent to `--version v400`. See utils/cliconf.py.
+# ════════════════════════════════════════════
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("VERSION",      "--version",      str,  "engine folder suffix (engine/c/zchezz_<V>)"),
+    ("ENGINE_EXE",   "--exe",          str,  "explicit engine path, overrides --version"),
+    ("TIMEOUT_S",    "--timeout",      float,"per-perft-call timeout, seconds"),
+    ("MAX_DEPTH",    "--max-depth",    int,  "skip depths deeper than this (0 = all)"),
+    ("ONLY",         "--only",         list, "run only positions whose name contains this (repeatable)"),
+    ("STOP_ON_FAIL", "--stop-on-fail", bool, "abort at the first mismatch"),
+]
 
 # Reference positions with known perft values
 # Format: (name, fen, [(depth, expected_nodes), ...])
@@ -73,7 +97,7 @@ def run_perft(exe, fen, depth):
     cmds = f"position fen {fen}\nperft {depth}\nquit\n"
     try:
         result = subprocess.run(
-            [exe], input=cmds, capture_output=True, text=True, timeout=120
+            [exe], input=cmds, capture_output=True, text=True, timeout=TIMEOUT_S
         )
         output = result.stdout + result.stderr
         for line in output.split('\n'):
@@ -85,24 +109,34 @@ def run_perft(exe, fen, depth):
 
 
 def main():
-    version = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_VERSION
-    exe = os.path.join(ENGINE_DIR, f"zchezz_{version}", "zchezz.exe")
+    exe = ENGINE_EXE or os.path.join(ENGINE_DIR, f"zchezz_{VERSION}", "zchezz.exe")
     if not os.path.exists(exe):
         print(f"ERROR: {exe} not found")
         sys.exit(1)
 
+    suite = PERFT_SUITE
+    if ONLY:
+        suite = [p for p in PERFT_SUITE if any(o.lower() in p[0].lower() for o in ONLY)]
+        if not suite:
+            print(f"ERROR: --only {ONLY} matched no position in the suite")
+            sys.exit(1)
+
     print(f"Engine: {exe}")
-    print(f"Perft Suite: {len(PERFT_SUITE)} positions\n")
+    print(f"Perft Suite: {len(suite)} positions"
+          + (f" (filtered by --only {ONLY})" if ONLY else "")
+          + (f", depths <= {MAX_DEPTH}" if MAX_DEPTH else "") + "\n")
 
     total = 0
     passed = 0
     failed = 0
     t0 = time.time()
 
-    for name, fen, depths in PERFT_SUITE:
+    for name, fen, depths in suite:
         print(f"=== {name} ===")
         print(f"  FEN: {fen}")
         for depth, expected in depths:
+            if MAX_DEPTH and depth > MAX_DEPTH:
+                continue
             total += 1
             nodes = run_perft(exe, fen, depth)
             ok = nodes == expected
@@ -112,6 +146,9 @@ def main():
             else:
                 failed += 1
                 print(f"  FAIL perft({depth}) = {nodes:>12,}  (expected {expected:>12,})")
+                if STOP_ON_FAIL:
+                    print("\n--stop-on-fail set — aborting.")
+                    sys.exit(1)
         print()
 
     elapsed = time.time() - t0
@@ -124,4 +161,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # Legacy positional form: `python tests/test_perft.py v400`. Translated to
+    # --version so the old invocation in CLAUDE.md's Phase 1 keeps working.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.argv[1:2] = ["--version", sys.argv[1]]
+    override_from_cli(globals(), CLI, description=__doc__, prog="test_perft.py")
     main()

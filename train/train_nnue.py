@@ -1,78 +1,75 @@
 """
-train/train_nnue.py — HalfKP-4Bucket NNUE training loop (Zchezz v4.00)
+train/train_nnue.py — trains the v4.00 HalfKP-4Bucket NNUE
 
-Rewrite of the v3.14 training loop (`train/train_nnue.py`, kept untouched —
-see CLAUDE.md: released pipelines are never modified in place) for the new
-HalfKP-4Bucket dual-perspective architecture (encoding.py / model.py).
+WHAT IT DOES
+────────────
+Reads positions from one or more datasets, encodes them as HalfKP-4Bucket
+features (encoding.py), trains model.py's network with BCE against a 0..1
+target, and writes one .pt checkpoint per epoch into CKPT_DIR. Turn a
+checkpoint into the engine's weight file with train/export_nnu4.py.
 
-Ported from v3.14's train_nnue.py (see zchezz_train_recon.md for the full
-verbatim source this was derived from), with four deliberate departures
-from the old script, all requested explicitly for v4.00:
+HOW TO RUN
+──────────
+    python train/train_nnue.py                # uses the CONFIGURATION block below
+    python train/train_nnue.py --epochs 30    # every constant is also a flag
 
-  0. PER-EPOCH RESAMPLING (restored to match v3.14's default). v3.14's
-     mixtrain.py had `RESAMPLE_EACH_EPOCH = True` by default: whenever a
-     source's `train_pct < 1.0`, a *different* random subset of that
-     source's training rows was drawn every epoch, so over a long run the
-     model eventually saw the whole dataset instead of being stuck on one
-     fixed subsample forever. An earlier draft of this rewrite reseeded the
-     row-subsample RNG identically every epoch (bug, not a deliberate
-     departure), which silently pinned training to the same rows epoch
-     after epoch. This is now controlled by `--resample-each-epoch`
-     (default: on, matching v3.14) / `--no-resample-each-epoch`. The
-     train/val split itself is intentionally NOT re-seeded per epoch (that
-     stability is a genuine v400 improvement over v3.14, see point 3 below)
-     — only the *subsample of the training rows* (when train_pct < 1.0) is
-     redrawn, using seed = `args.seed + epoch`. This is applied per
-     `--source` independently, since `train_pct` lives on the SourceSpec.
+Everything adjustable lives in the CONFIGURATION block and the DATASETS
+block below. A bare run does exactly what those blocks say; the flags only
+override them.
 
-  1. REAL ARGPARSE CLI. v3.14 had zero command-line flags — every knob was
-     a top-level constant you edited in the file before running it. That
-     does not scale to "train on legacy parquet AND new .bin sources with
-     different per-source K values" — see build_arg_parser() below.
+WHAT TO SET, IN THE ORDER THAT MATTERS
+──────────────────────────────────────
+  STAGE        "warmup"   — from random weights, crude high-volume data, LR 1e-3.
+               "finetune" — from the warmup checkpoint, strong data, LR 1e-5,
+                            many epochs.
+               STAGE picks which dataset list is used.
+  LR           learning rate; must match STAGE. check_stage_lr() refuses to
+               start if it does not.
+  EPOCHS       comes from STAGE_EPOCHS. It matters more than it looks: the
+               schedule is CosineAnnealingLR(T_max=EPOCHS), so this number
+               sets how fast the LR decays to zero.
+  DATASETS     one entry per dataset: `pct` (fraction used per epoch), `mode`
+               ('lines' samples rows, 'shards' samples whole files), `lam`
+               (how much game RESULT is blended into the target).
+  BATCH_SIZE / WORKERS / DEVICE   throughput, not quality.
 
-  2. TWO DATA SOURCE KINDS, MIXED IN ONE RUN.
-       - 'parquet' : the legacy v3.14-era dataset format (FEN + wdl/cp
-         column), re-encoded through encoding.py's HalfKP path instead of
-         v3.14's 768+31 encode_chunk. This is what lets today's ~15
-         existing parquet datasets keep contributing positions while the
-         native .bin selfplay pipeline (F.2/F.3 of the implementation
-         plan) doesn't exist yet.
-       - 'bin'     : the new packed selfplay format (dataset.py),
-         read via memmap, labeled with the K-blend wl_target().
-     Every source gets its own --source spec (kind, path/glob, and either
-     target_col+train_pct for parquet or k+train_pct for bin).
+DATA SOURCES
+────────────
+  'parquet'  columns fen + cp and/or result. Most of data/ is this.
+  'bin'      the native selfplay format (engine/c/tools/sample.h, read via
+             memmap by dataset.py), labelled with wl_target(k).
+One run can mix both: each source is an entry in DATASETS / BIN_DATASETS,
+or a --source on the command line.
 
-  3. TRAIN/VAL SPLIT + VALIDATION LOSS. v3.14 had neither — MAE/loss were
-     computed on training minibatches only, with no held-out signal at
-     all. Every source is split row-index-wise (deterministic, seeded)
-     into train/val before any epoch sampling happens, and validation
-     loss is reported once per epoch, evaluated with the model in eval()
-     mode and no gradient.
+TRAIN / VALIDATION SPLIT
+────────────────────────
+Every source is split by row index (deterministic, seeded by SEED) before
+any epoch sampling, and validation loss is reported every VAL_EVERY epochs
+in eval() mode with no gradient. With RESAMPLE_EACH_EPOCH on and `pct < 1.0`,
+the TRAINING subsample is redrawn each epoch (seed = SEED + epoch); the
+train/val split itself never moves.
 
-  4. REAL MULTIPROCESSING FOR FEN ENCODING. v3.14 used
-     `ThreadPoolExecutor` for `encode_chunk`, which — because
-     `python-chess`'s `chess.Board(fen)` parsing and `piece_map()` walk
-     are pure-Python, GIL-bound work — bought essentially nothing (the
-     recon flags this explicitly: "GIL-bound, not process-based ... only
-     helps due to numpy/C release or I/O overlap, worth flagging for the
-     rewrite"). This version uses `multiprocessing.Pool`, which actually
-     parallelizes across cores for CPU-bound FEN encoding.
+HOW TO READ THE LOSS
+────────────────────
+The target is continuous (0..1), not 0/1, so the BCE floor is NOT 0.693 —
+it is the mean entropy of the target itself, typically ~0.62 for the warmup
+mix. Compare val_loss against that entropy, not against 0.693, and read
+val_mae as the direct error in wdl units.
 
-Checkpoint format: a dict saved via torch.save (NOT the old JSON-of-lists
-format — that format serializes every weight as a nested Python list,
-which is enormous and slow for a ~2.6 MB HalfKP net; export_nnu4.py in
-this v400 tree reads the torch-native format). The 'arch' sub-dict is
-exactly the shape specified for v400:
+CHECKPOINT
+──────────
+A dict saved with torch.save holding the state_dict, the optimizer, the
+epoch, the metrics and an 'arch' sub-dict:
 
     'arch': {'input': 2560, 'h1': 512, 'concat': 1024, 'h2': 32,
               'encoding': 'halfkp_4bucket'}
 
-This module does not execute a full training run when imported — the
-`if __name__ == '__main__':` guard at the bottom is required both for
-correctness (multiprocessing on Windows uses 'spawn', which re-imports
-this module in each worker process — anything at module scope that isn't
-guarded runs once per worker) and so mere `import train_nnue` (e.g. from a
-test) never kicks off real training.
+A run resumes only when --dataset-name matches the tag stored in the
+checkpoint; with a different tag the weights are transferred instead and
+the learning rate becomes TRANSFER_LR.
+
+Training runs only under `if __name__ == "__main__"` — Windows
+multiprocessing uses 'spawn' and re-imports this module in every worker.
 
 ════════════════════════════════════════════════════════════════════════
  LABEL CONVENTION (CLAUDE.md rule 10) — result / cp / wdl
@@ -132,20 +129,15 @@ import dataset
 #  never a literal (CLAUDE.md rule 8). Edit here to change the defaults
 #  used when a flag is not passed on the command line.
 # ════════════════════════════════════════════════════════════════════════
-CKPT_DIR = "checkpoints/v400"     # repo-relative checkpoint dir (checkpoints/ is the repo's
-                                   # existing gitignored checkpoints root, see CLAUDE.md folder
-                                   # structure; v400-specific subfolder so these don't collide
-                                   # with the legacy v3.14 .json checkpoints under checkpoints/old/)
+CKPT_DIR = "checkpoints/v400"     # where the per-epoch .pt checkpoints are written
 DATASET_NAME = "halfkp4b_v400"    # tag stored in the checkpoint; resume only continues if this matches
                                    # EPOCHS is stage-dependent and is defined with the
                                    # STAGE block further down — see STAGE_EPOCHS.
 BATCH_SIZE = 16384                # minibatch size (positions per optimizer step)
-MAX_POSITIONS_CHUNK = 1_100_000   # positions buffered before being handed to the DataLoader (mirrors v3.14's MAX_POSITIONS)
-LR = 1e-3                         # fresh-start learning rate, for RANDOM weights (STAGE="warmup").
-                                   # Was 1e-5 here, which is ~100x too small for a fresh start and
-                                   # does not match any run that produced a checkpoint (every one
-                                   # used ~9.3e-4). Drop this to 1e-5 for STAGE="finetune" —
-                                   # check_stage_lr() below refuses to start if the two disagree.
+MAX_POSITIONS_CHUNK = 1_100_000   # positions buffered before a chunk is handed to the DataLoader
+LR = 1e-3                         # learning rate. 1e-3 for STAGE="warmup" (random weights),
+                                   # 1e-5 for STAGE="finetune". check_stage_lr() refuses to
+                                   # start when LR and STAGE disagree.
 TRANSFER_LR = 1e-5                # learning rate when resuming onto a different --dataset-name
                                    # (weight transfer / refinement of an already-trained net)
 WEIGHT_DECAY = 1e-4                # Adam weight decay
@@ -154,16 +146,10 @@ DEVICE = "auto"                   # "auto" | "cuda" | "cpu"
 SEED = 1234                       # seed for the deterministic train/val split and shard sampling
 VAL_EVERY = 1                     # run a validation pass every N epochs
 PARQUET_CHUNK_ROWS = 200_000      # row batch size when streaming a parquet source
-RESAMPLE_EACH_EPOCH = True        # draw a fresh train_pct row subsample every epoch (matches v3.14 default)
-ENCODE_CACHE = True               # cache each parquet file's encoded HalfKP tensors to a sibling
-                                   # "*_encoded.pt" file so later runs skip re-running
-                                   # encode_positions() on the same FENs (restores v3.14's
-                                   # pt_name()/_encoded.pt caching, see iter_parquet_rows)
-HEARTBEAT_EVERY_BATCHES = 200     # print a mid-epoch loss/MAE/ETA heartbeat every N training
-                                   # batches (restores v3.14's ~20-lines-per-epoch status line;
-                                   # a fixed batch count is used instead of v3.14's
-                                   # total_chunks-derived cadence because this streaming design
-                                   # does not know an epoch's total position count up front)
+RESAMPLE_EACH_EPOCH = True        # draw a fresh row subsample every epoch (sources with pct < 1.0)
+ENCODE_CACHE = True               # cache each parquet file's encoded tensors next to it as
+                                   # "*_encoded.pt", so later runs skip re-encoding the same FENs
+HEARTBEAT_EVERY_BATCHES = 200     # print a mid-epoch loss/MAE/ETA line every N training batches
 # ════════════════════════════════════════════════════════════════════════
 
 
@@ -263,16 +249,14 @@ DATA_DIR = "data"        # root holding one folder per dataset
 #              The recent, strong, deeply-evaluated self-play sets. This is
 #              where the actual playing strength comes from.
 #
-# The crude warmup data is deliberately ABSENT from the finetune mix, not
-# merely reduced: at 73.9M rows it would drown the strong sets by volume.
+# The warmup data is absent from the finetune mix, not merely reduced: at
+# 73.9M rows it would outweigh the strong sets by sheer volume.
 STAGE = "warmup"          # "warmup" | "finetune"
 
 # Virichess data (viriformat_*, 42.5M rows) is EXCLUDED from both stages —
 # judged low quality. It is left in data/ but never trained on. Do not add it
 # back without a measured reason.
 
-# pct/mode/suffix values below come from the v3.14 TRAIN_PCT_SET*/MODE_SET*
-# block, which is the mix that produced the v3.14 network.
 #
 #    * `pct`  fraction of that dataset used per epoch. 0.0 DISABLES it
 #             entirely (it is not even opened).
@@ -482,6 +466,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "'*_encoded.pt' file, reused on later runs instead of re-running "
                          "encode_positions() on the same FENs. Use --no-encode-cache to "
                          "always re-encode (e.g. while iterating on encoding.py itself).")
+    p.add_argument("--show-config", action="store_true",
+                    help="print the resolved configuration (including the STAGE dataset "
+                         "mix) and exit without training")
     p.add_argument("--heartbeat-every-batches", type=int, default=HEARTBEAT_EVERY_BATCHES,
                     help="Print a running loss/MAE/ETA heartbeat every N training batches.")
     return p
@@ -1546,4 +1533,14 @@ def evaluate(model: NNUE, args: argparse.Namespace, pool: "mp.pool.Pool",
 if __name__ == "__main__":
     parser = build_arg_parser()
     parsed_args = parser.parse_args()
+    if parsed_args.show_config:
+        print("Resolved configuration:")
+        print(f"  STAGE        = {STAGE!r}  ({len(DATASETS)} datasets)")
+        width = max(len(k) for k in vars(parsed_args))
+        for key, val in sorted(vars(parsed_args).items()):
+            if key not in ("show_config", "sources"):
+                print(f"  {key.ljust(width)} = {val!r}")
+        for d in DATASETS:
+            print(f"  dataset: {d['name']}  pct={d['pct']}  mode={d['mode']}  lam={d['lam']}")
+        raise SystemExit(0)
     train(parsed_args)

@@ -208,12 +208,11 @@ at the repo root).
 
 | File | Description |
 |------|-------------|
-| `label_selfplay.py` | Analyze self-play games with SF (nodes 1M) |
-| `label_quiet_d8.py` | Filter quiet positions, analyze at depth 8 |
-| `label_quiet_n5000.py` | Filter quiet positions, analyze at nodes 5000 |
-| `label_all_quiet.py` | Combined quiet filter + SF analysis |
-| `generate_endgames.py` | Generate synthetic endgame positions |
-| `filter_wdl.py` | Filter and merge WDL-labeled datasets |
+| `process_positions.py` | The one position pipe: reads .epd/.pgn/.bin/.parquet, optional filters and Stockfish relabelling, writes parquet/bin/epd/pgn. `--filters none` makes it a pure format converter |
+| `generate_endgames.py` | Generate synthetic endgame positions and label them with Stockfish |
+| `normalize_columns.py` | Rewrite a dataset to the canonical fen/cp/result shape |
+| `merge_datasets.py` | Hash-join two extractions of the same positions into one dataset |
+| `fix_column_names.py` | Rename or drop a mislabelled column, re-verified per file |
 
 ---
 
@@ -221,7 +220,8 @@ at the repo root).
 
 | File | Description |
 |------|-------------|
-| `kill_ghosts.py` | Kill orphaned engine processes |
+| `cliconf.py` | Config-block + CLI plumbing for every Python tool; holds the one copy of the shared configuration vocabulary |
+| `kill_ghosts.py` | Kill orphaned engine/helper processes |
 
 `RunZchezzTermux.sh`/`.md` moved to `engine/build/build_termux.sh` / `termux.md` (shared
 build system, see `engine/build/` above). The Polyglot opening book lives at

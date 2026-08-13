@@ -30,14 +30,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONFIGURATION
 #
-#  tests/ is flat and version-less (CLAUDE.md § Naming Convention): it always
-#  tracks the CURRENT engine. So the version numbers live here, ONCE, and every
-#  dict key, lookup and printed label below is derived from them.
-#
-#  This block exists because the literals had already drifted: ENGINES held
-#  v400/v314 while the summary code still looked up "v313-TB"/"v312", so the
-#  benchmark ran all 50 positions and then died with a KeyError on the very
-#  last step. A version name written twice is a version name that will rot.
+#  Set the two engine versions here, ONCE. Every engine name, dict key and
+#  printed label below is derived from them.
 # ═══════════════════════════════════════════════════════════════════════════════
 HEAD_VERSION = "v400"    # engine under test
 BASE_VERSION = "v314"    # previous stable, the NPS baseline to compare against
@@ -46,16 +40,76 @@ NPS_FAIL_PCT = 5.0       # fail the run if head is more than this % slower than
                          # comparable: TB prunes subtrees, so fewer nodes are
                          # searched and measured NPS drops legitimately)
 
-HEAD_TB   = f"{HEAD_VERSION}-TB"
-HEAD_NOTB = f"{HEAD_VERSION}-noTB"
+TB_PATH      = os.path.join(BASE_DIR, "tablebases")   # Syzygy folder for the -TB build
+TIMEOUT_S    = 30        # per-position wall-clock limit for one engine
+DEPTH        = 0         # 0 = use each position's own depth (see POSITIONS);
+                         # >0 = force this depth on every position
+PHASES       = []        # [] = all 50 positions; else keep only positions whose
+                         # label starts with one of these prefixes, e.g.
+                         # ["Opening", "Middle"] or ["End", "Insuff"]
+RUN_BASE     = True      # also run BASE_VERSION (the NPS baseline). Turn off when
+                         # the previous version is not present in the working tree
 
-ENGINES = {
-    HEAD_TB:      (os.path.join(BASE_DIR, "engine", "c", f"zchezz_{HEAD_VERSION}", "zchezz.exe"), True),
-    HEAD_NOTB:    (os.path.join(BASE_DIR, "engine", "c", f"zchezz_{HEAD_VERSION}", "zchezz.exe"), False),
-    BASE_VERSION: (os.path.join(BASE_DIR, "engine", "c", f"zchezz_{BASE_VERSION}", "zchezz.exe"), False),
-}
+# ═══════════════════════════════ COMMAND LINE ════════════════════════════════
+# The CONFIGURATION block above is the interface: a bare `python tests/bench_nps.py`
+# runs exactly what it says. Every constant is ALSO a flag that overrides it,
+# and `--show-config` prints the resolved settings and exits without launching
+# an engine. See utils/cliconf.py and CLAUDE.md rule 8.
+# ═════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(BASE_DIR, "utils"))
+from cliconf import override_from_cli  # noqa: E402
 
-TB_PATH = os.path.join(BASE_DIR, "tablebases")
+CLI = [
+    ("HEAD_VERSION", "--head",     str,   "engine version under test (folder engine/c/zchezz_<V>)"),
+    ("BASE_VERSION", "--base",     str,   "previous stable version, the NPS baseline"),
+    ("RUN_BASE",     "--run-base", bool,  "also benchmark the baseline version"),
+    ("NPS_FAIL_PCT", "--nps-fail-pct", float, "fail if head is more than this %% slower than base"),
+    ("TB_PATH",      "--tb-path",  str,   "Syzygy tablebase folder for the -TB run"),
+    ("TIMEOUT_S",    "--timeout",  float, "per-position engine timeout, seconds"),
+    ("DEPTH",        "--depth",    int,   "force this search depth (0 = per-position depth)"),
+    ("PHASES",       "--phase",    list,  "keep only positions whose label starts with this (repeatable)"),
+]
+
+
+def head_tb() -> str:
+    return f"{HEAD_VERSION}-TB"
+
+
+def head_notb() -> str:
+    return f"{HEAD_VERSION}-noTB"
+
+
+def build_engines() -> dict:
+    """The engine table, DERIVED from HEAD_VERSION/BASE_VERSION at call time.
+
+    It is a function, not a module-level dict, because --head/--base can
+    change those constants after this module is imported — a dict built at
+    import time would silently keep the old versions (exactly the drift the
+    CONFIGURATION comment above describes).
+    """
+    exe = lambda v: os.path.join(BASE_DIR, "engine", "c", f"zchezz_{v}", "zchezz.exe")
+    engines = {
+        head_tb():   (exe(HEAD_VERSION), True),
+        head_notb(): (exe(HEAD_VERSION), False),
+    }
+    if RUN_BASE:
+        engines[BASE_VERSION] = (exe(BASE_VERSION), False)
+    return engines
+
+
+def select_positions() -> list:
+    """POSITIONS filtered by --phase (a label-prefix match, [] = all)."""
+    if not PHASES:
+        return list(POSITIONS)
+    return [p for p in POSITIONS if any(p[0].startswith(pref) for pref in PHASES)]
+
+
+def is_opening_or_middle(label: str) -> bool:
+    """Opening/middlegame positions are the only ones whose NPS is comparable
+    across builds — an endgame with tablebases searches fewer nodes by design.
+    Derived from the LABEL, not from a hardcoded index range, so --phase and
+    any future edit to POSITIONS cannot silently shift the split."""
+    return label.startswith(("Opening", "Middle"))
 
 # 50 positions across all game phases
 POSITIONS = [
@@ -177,88 +231,105 @@ def check_eval(score_str, expected):
     return "?"
 
 def main():
+    engines   = build_engines()
+    positions = select_positions()
+    tb_name, notb_name = head_tb(), head_notb()
+
     print(f"\n{'='*80}")
-    print(f"  PHASE 2.5: 50-Position NPS + Eval Benchmark")
-    print(f"  Engines: v400-TB, v400-noTB, v314")
-    print(f"  Positions: {len(POSITIONS)}")
+    print(f"  PHASE 2.5: NPS + Eval Benchmark")
+    print(f"  Engines: {', '.join(engines)}")
+    print(f"  Positions: {len(positions)}"
+          + (f"  (filtered by --phase {PHASES})" if PHASES else ""))
+    if DEPTH:
+        print(f"  Depth: {DEPTH} (forced on every position)")
     print(f"{'='*80}\n")
 
-    results = {}
-    nps_totals = {name: [] for name in ENGINES}
-    fails = []
-    
-    for i, (label, fen, depth, expected) in enumerate(POSITIONS):
-        print(f"  [{i+1:2d}/{len(POSITIONS)}] {label}")
+    if not positions:
+        print(f"  No position matches --phase {PHASES}. Nothing to do.")
+        return 1
+
+    missing = [f"{n} ({p})" for n, (p, _) in engines.items() if not os.path.isfile(p)]
+    if missing:
+        print("  Engine binary not found:\n    " + "\n    ".join(missing))
+        print("  Build it, or drop it from the run (--no-run-base / --head).")
+        return 1
+
+    nps_totals = {name: [] for name in engines}
+    om_flags   = []      # per position: is it opening/middlegame?
+    fails      = []
+
+    for i, (label, fen, depth, expected) in enumerate(positions):
+        print(f"  [{i+1:2d}/{len(positions)}] {label}")
+        om_flags.append(is_opening_or_middle(label))
         row = {}
-        for ename, (epath, use_tb) in ENGINES.items():
+        for ename, (epath, use_tb) in engines.items():
             nps, score, nodes, tbhits = run_engine(epath, fen, depth, use_tb)
             row[ename] = (nps, score, nodes, tbhits)
             nps_totals[ename].append(nps)  # always append to keep index alignment
-            
+
             # Check eval sanity for the head engine (TB build)
-            if ename == HEAD_TB and expected:
-                eval_check = check_eval(score, expected)
-                if "❌" in eval_check:
+            if ename == tb_name and expected:
+                if "❌" in check_eval(score, expected):
                     fails.append(f"{label}: expected {expected}, got {score}")
-        
-        # Print comparison
-        tb_nps, tb_score, tb_nodes, tb_tbhits = row.get(HEAD_TB, (0,"?",0,0))
-        notb_nps, notb_score, notb_nodes, _ = row.get(HEAD_NOTB, (0,"?",0,0))
-        v314_nps, v314_score, v314_nodes, _ = row.get(BASE_VERSION, (0,"?",0,0))
-        
-        eval_ok = check_eval(tb_score, expected) if expected else "—"
-        nps_vs_314 = f"{(tb_nps/v314_nps - 1)*100:+.1f}%" if v314_nps > 0 else "N/A"
-        
+
+        tb_nps, tb_score, tb_nodes, tb_tbhits = row.get(tb_name, (0, "?", 0, 0))
+        notb_nps, notb_score, notb_nodes, _   = row.get(notb_name, (0, "?", 0, 0))
+        base_nps, base_score, base_nodes, _   = row.get(BASE_VERSION, (0, "?", 0, 0))
+
+        eval_ok    = check_eval(tb_score, expected) if expected else "—"
+        nps_vs_base = f"{(tb_nps/base_nps - 1)*100:+.1f}%" if base_nps > 0 else "N/A"
+
         print(f"         TB: {tb_nps:>10,} nps  score={tb_score:>8s}  nodes={tb_nodes:>10,}  tbhits={tb_tbhits:>6,}  eval={eval_ok}")
         print(f"       noTB: {notb_nps:>10,} nps  score={notb_score:>8s}  nodes={notb_nodes:>10,}")
-        print(f"       v314: {v314_nps:>10,} nps  score={v314_score:>8s}  nodes={v314_nodes:>10,}  Δvs314={nps_vs_314}")
+        if BASE_VERSION in engines:
+            print(f"  {BASE_VERSION:>9s}: {base_nps:>10,} nps  score={base_score:>8s}  nodes={base_nodes:>10,}  Δ={nps_vs_base}")
         print()
-    
-    # Summary by phase (NPS is only meaningful where node counts are comparable)
+
+    # Summary by phase. The split comes from each position's LABEL (see
+    # is_opening_or_middle) instead of a hardcoded "first 25", so it stays
+    # correct under --phase and under any edit to POSITIONS.
     print(f"\n{'='*80}")
     print(f"  SUMMARY")
     print(f"{'='*80}")
-    
-    # Separate NPS by phase (first 25 = opening+middle, rest = endgames)
-    phase_ranges = [
-        ("Opening+Middle (1-25)", 0, 25),
-        ("Endgames (26-50)", 25, 50),
-        ("All positions", 0, 50),
-    ]
-    for phase_label, start, end in phase_ranges:
-        print(f"\n  --- {phase_label} ---")
-        for ename in ENGINES:
-            vals = [nps_totals[ename][i] for i in range(start, min(end, len(nps_totals[ename]))) if i < len(nps_totals[ename]) and nps_totals[ename][i] > 0]
-            if vals:
-                avg = sum(vals) / len(vals)
-                print(f"    {ename:12s}: avg NPS = {avg:>12,.0f} ({len(vals)} pos)")
-    
-    # NPS comparison — only Opening+Middle is meaningful (identical node counts)
-    om_tb = [nps_totals[HEAD_TB][i] for i in range(min(25, len(nps_totals[HEAD_TB]))) if nps_totals[HEAD_TB][i] > 0]
-    om_base = [nps_totals[BASE_VERSION][i] for i in range(min(25, len(nps_totals[BASE_VERSION]))) if nps_totals[BASE_VERSION][i] > 0]
-    om_notb = [nps_totals[HEAD_NOTB][i] for i in range(min(25, len(nps_totals[HEAD_NOTB]))) if nps_totals[HEAD_NOTB][i] > 0]
 
-    if om_base:
-        tb_avg = sum(om_tb) / len(om_tb)
-        base_avg = sum(om_base) / len(om_base)
-        notb_avg = sum(om_notb) / len(om_notb)
-        tb_delta = (tb_avg / base_avg - 1) * 100
-        notb_delta = (notb_avg / base_avg - 1) * 100
+    om_idx  = [i for i, om in enumerate(om_flags) if om]
+    end_idx = [i for i, om in enumerate(om_flags) if not om]
+    for phase_label, idxs in (("Opening+Middle", om_idx),
+                              ("Endgames", end_idx),
+                              ("All positions", list(range(len(positions))))):
+        if not idxs:
+            continue
+        print(f"\n  --- {phase_label} ({len(idxs)} pos) ---")
+        for ename in engines:
+            vals = [nps_totals[ename][i] for i in idxs if nps_totals[ename][i] > 0]
+            if vals:
+                print(f"    {ename:12s}: avg NPS = {sum(vals)/len(vals):>12,.0f} ({len(vals)} pos)")
+
+    # NPS pass/fail — only Opening+Middle is meaningful (comparable node counts)
+    avg = lambda name: (lambda v: sum(v)/len(v) if v else 0)(
+        [nps_totals[name][i] for i in om_idx if nps_totals[name][i] > 0])
+    base_avg = avg(BASE_VERSION) if BASE_VERSION in engines else 0
+    if base_avg:
+        tb_delta   = (avg(tb_name)   / base_avg - 1) * 100
+        notb_delta = (avg(notb_name) / base_avg - 1) * 100
         ok = lambda d: '✅ PASS' if d >= -NPS_FAIL_PCT else f'❌ FAIL >{NPS_FAIL_PCT:g}%'
         print(f"\n  NPS vs {BASE_VERSION} (Opening+Middle only — fair comparison):")
-        print(f"    {HEAD_TB:<11s} vs {BASE_VERSION}: {tb_delta:+.1f}% {ok(tb_delta)}")
-        print(f"    {HEAD_NOTB:<11s} vs {BASE_VERSION}: {notb_delta:+.1f}% {ok(notb_delta)}")
+        print(f"    {tb_name:<11s} vs {BASE_VERSION}: {tb_delta:+.1f}% {ok(tb_delta)}")
+        print(f"    {notb_name:<11s} vs {BASE_VERSION}: {notb_delta:+.1f}% {ok(notb_delta)}")
         print(f"  (Endgame NPS is not comparable: TB prunes subtrees → fewer nodes → lower measured NPS)")
-    
+    elif not om_idx:
+        print(f"\n  (no opening/middlegame position in this run — NPS comparison skipped)")
+
     if fails:
         print(f"\n  ❌ EVAL SANITY FAILURES ({len(fails)}):")
         for f in fails:
             print(f"    - {f}")
     else:
         print(f"\n  ✅ ALL EVAL SANITY CHECKS PASSED")
-    
+
     print(f"\n{'='*80}\n")
     return 1 if fails else 0
 
 if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description=__doc__, prog="bench_nps.py")
     sys.exit(main())

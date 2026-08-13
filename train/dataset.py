@@ -148,7 +148,7 @@ assert SAMPLE_DTYPE.itemsize == EXPECTED_ITEMSIZE, (
     "writer struct to match, or fix this dtype, before trusting any .bin file."
 )
 
-CP_TO_PROB_TEMPERATURE = 320.0   # matches APPENDIX D.2 / legacy to_wdl()
+CP_TO_PROB_TEMPERATURE = 320.0   # cp -> probability scale; must match nnue.c's output scale
 
 
 def wl_target(eval_cp: np.ndarray, game_result: np.ndarray, k: float) -> np.ndarray:

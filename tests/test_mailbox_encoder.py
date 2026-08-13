@@ -49,7 +49,27 @@ SELFPLAY_MOVETIME_MS = 40       # per-move budget, milliseconds
 SELFPLAY_NNUE = os.path.join(os.path.dirname(__file__), "random_nnu4.bin")
 SELFPLAY_EXE = os.path.join(os.path.dirname(__file__), "..", "engine", "build", "selfplay.exe")
 BATCH_SIZE = 50_000              # rows encoded per encode_mailbox_batch() call
+BIN_PATH_DEFAULT = ""            # "" keeps BIN_PATH = None (generate a fixture);
+                                 # a path here is the same as passing --bin
 # ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════ COMMAND LINE ═══════════════════════════════
+# `python tests/test_mailbox_encoder.py` runs exactly what the block above
+# says. The legacy positional form (`... path\to\fixture.bin`) still works and
+# means --bin. `--show-config` prints the resolved settings and exits.
+# ════════════════════════════════════════════════════════════════════════════
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("BIN_PATH_DEFAULT",     "--bin",       str, "existing .bin fixture; empty = generate one"),
+    ("SELFPLAY_GAMES",       "--games",     int, "games generated when no fixture is given"),
+    ("SELFPLAY_THREADS",     "--threads",   int, "worker threads for the generator run"),
+    ("SELFPLAY_MOVETIME_MS", "--movetime",  int, "per-move budget for the generator, ms"),
+    ("SELFPLAY_NNUE",        "--nnue",      str, "NNUE weights used by the generator"),
+    ("SELFPLAY_EXE",         "--selfplay-exe", str, "selfplay.exe used to generate the fixture"),
+    ("BATCH_SIZE",           "--batch-size", int, "rows per encode_mailbox_batch() call"),
+]
 
 
 def _generate_fixture() -> str:
@@ -83,8 +103,7 @@ def _fen_reference_indices(fen: str) -> tuple[set[int], set[int]]:
 
 
 def main() -> int:
-    cli_path = sys.argv[1] if len(sys.argv) > 1 else None
-    bin_path = cli_path or BIN_PATH or _generate_fixture()
+    bin_path = BIN_PATH_DEFAULT or BIN_PATH or _generate_fixture()
     size = os.path.getsize(bin_path)
     assert size % dataset.SAMPLE_DTYPE.itemsize == 0, (
         f"{bin_path}: size {size} is not a multiple of record size "
@@ -182,4 +201,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Legacy positional form: `python tests/test_mailbox_encoder.py <fixture.bin>`.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        sys.argv[1:2] = ["--bin", sys.argv[1]]
+    override_from_cli(globals(), CLI, description=__doc__,
+                      prog="test_mailbox_encoder.py")
     raise SystemExit(main())

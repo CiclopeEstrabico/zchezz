@@ -1,13 +1,41 @@
 import subprocess, time, re, sys, os
 
 # ═══════════════ CONFIGURATION ═══════════════
-# No CLI in this script — edit these constants directly.
+# Edit these and run with no arguments; every one is also a CLI flag that
+# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
 REPO_DIR = r"c:\Zchezz"                          # working directory the engine is launched from
 ENGINE_EXE = r"engine\c\zchezz_v400\zchezz.exe"  # engine binary under test (relative to REPO_DIR)
 NNUE_WEIGHTS = r"C:\Zchezz\engine\c\zchezz_v400\nnue_weights.bin"  # NNUE weights loaded via setoption
 SYZYGY_PATH = r"C:\Zchezz\tablebases"   # Syzygy tablebase directory loaded via setoption
 READYOK_TIMEOUT_S = 5   # seconds to wait for "readyok"/"uciok" before giving up
+MOVETIME_MS = 500       # per-search budget for the main search / TB tests
+MOVES_MOVETIME_MS = 100 # per-search budget while replaying the move sequence
+AUTONNUE_MOVETIME_MS = 200  # per-search budget for the auto-NNUE-load test
+BESTMOVE_TIMEOUT_S = 10 # seconds to wait for a bestmove
 # ═══════════════════════════════════════════
+
+# ═══════════════ COMMAND LINE ═══════════════
+# `python tests/test_uci.py` runs exactly what the block above says; the flags
+# only override it. `--show-config` prints the resolved values and exits
+# without starting the engine. See utils/cliconf.py.
+# ════════════════════════════════════════════
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"))
+from cliconf import override_from_cli  # noqa: E402
+
+CLI = [
+    ("REPO_DIR",          "--repo-dir", str,  "working directory the engine is launched from"),
+    ("ENGINE_EXE",        "--exe",      str,  "engine binary under test (relative to --repo-dir)"),
+    ("NNUE_WEIGHTS",      "--nnue",     str,  "NNUE weights file loaded via setoption"),
+    ("SYZYGY_PATH",       "--syzygy",   str,  "Syzygy tablebase directory loaded via setoption"),
+    ("READYOK_TIMEOUT_S", "--timeout",  float,"seconds to wait for readyok/uciok"),
+    ("MOVETIME_MS",       "--movetime", int,  "per-search budget for the main search / TB tests, ms"),
+    ("MOVES_MOVETIME_MS", "--moves-movetime", int, "per-search budget while replaying moves, ms"),
+    ("AUTONNUE_MOVETIME_MS", "--autonnue-movetime", int, "per-search budget for the auto-NNUE test, ms"),
+    ("BESTMOVE_TIMEOUT_S","--bestmove-timeout", float, "seconds to wait for a bestmove"),
+]
+
+if __name__ == "__main__":
+    override_from_cli(globals(), CLI, description="UCI smoke test", prog="test_uci.py")
 
 os.chdir(REPO_DIR)
 
@@ -64,10 +92,10 @@ check("readyok received", any("readyok" in l for l in lines))
 print()
 
 # Test 3: Startpos search - verify NNUE eval
-print("--- TEST 3: Search startpos movetime 500 ---")
+print(f"--- TEST 3: Search startpos movetime {MOVETIME_MS} ---")
 send("position startpos")
-send("go movetime 500")
-lines = read_until("bestmove", timeout=10)
+send(f"go movetime {MOVETIME_MS}")
+lines = read_until("bestmove", timeout=BESTMOVE_TIMEOUT_S)
 scores = [l for l in lines if "score cp" in l]
 bestmove_lines = [l for l in lines if "bestmove" in l]
 
@@ -97,8 +125,8 @@ for i in range(20):
     if moves:
         pos += " moves " + " ".join(moves)
     send(pos)
-    send("go movetime 100")
-    lines = read_until("bestmove", timeout=10)
+    send(f"go movetime {MOVES_MOVETIME_MS}")
+    lines = read_until("bestmove", timeout=BESTMOVE_TIMEOUT_S)
     bm_line = [l for l in lines if "bestmove" in l]
     if bm_line:
         mv = bm_line[0].split()[1]
@@ -127,8 +155,8 @@ print()
 # Test 5: TB endgame (KRK)
 print("--- TEST 5: Tablebase probe (KRK) ---")
 send("position fen 8/8/8/4k3/8/8/8/R3K3 w - - 0 1")
-send("go movetime 500")
-lines = read_until("bestmove", timeout=10)
+send(f"go movetime {MOVETIME_MS}")
+lines = read_until("bestmove", timeout=BESTMOVE_TIMEOUT_S)
 tb_lines = [l for l in lines if "tbhits" in l]
 tbhits = 0
 if tb_lines:
@@ -170,8 +198,8 @@ read2("uciok")
 send2("isready")  # This should trigger auto_load_nnue
 read2("readyok", timeout=10)
 send2("position startpos")
-send2("go movetime 200")
-lines = read2("bestmove", timeout=10)
+send2(f"go movetime {AUTONNUE_MOVETIME_MS}")
+lines = read2("bestmove", timeout=BESTMOVE_TIMEOUT_S)
 scores = [l for l in lines if "score cp" in l]
 auto_nnue_ok = False
 if scores:
