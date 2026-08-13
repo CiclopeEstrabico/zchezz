@@ -19,15 +19,11 @@ override them.
 
 WHAT TO SET, IN THE ORDER THAT MATTERS
 ──────────────────────────────────────
-  STAGE        "warmup"   — from random weights, crude high-volume data, LR 1e-3.
-               "finetune" — from the warmup checkpoint, strong data, LR 1e-5,
-                            many epochs.
-               STAGE picks which dataset list is used.
-  LR           learning rate; must match STAGE. check_stage_lr() refuses to
-               start if it does not.
-  EPOCHS       comes from STAGE_EPOCHS. It matters more than it looks: the
-               schedule is CosineAnnealingLR(T_max=EPOCHS), so this number
-               sets how fast the LR decays to zero.
+  LR           learning rate. ~1e-3 from random weights; ~1e-5 to refine an
+               already-trained network.
+  EPOCHS       matters more than it looks: the schedule is
+               CosineAnnealingLR(T_max=EPOCHS), so this number also sets how
+               fast the LR decays to eta_min.
   DATASETS     one entry per dataset: `pct` (fraction used per epoch), `mode`
                ('lines' samples rows, 'shards' samples whole files), `lam`
                (how much game RESULT is blended into the target).
@@ -131,13 +127,13 @@ import dataset
 # ════════════════════════════════════════════════════════════════════════
 CKPT_DIR = "checkpoints/v400"     # where the per-epoch .pt checkpoints are written
 DATASET_NAME = "halfkp4b_v400"    # tag stored in the checkpoint; resume only continues if this matches
-                                   # EPOCHS is stage-dependent and is defined with the
-                                   # STAGE block further down — see STAGE_EPOCHS.
+EPOCHS = 200                      # number of training epochs. This also sets the LR
+                                   # schedule: CosineAnnealingLR(T_max=EPOCHS), so a small
+                                   # EPOCHS anneals the learning rate to eta_min quickly.
 BATCH_SIZE = 16384                # minibatch size (positions per optimizer step)
 MAX_POSITIONS_CHUNK = 1_100_000   # positions buffered before a chunk is handed to the DataLoader
-LR = 1e-3                         # learning rate. 1e-3 for STAGE="warmup" (random weights),
-                                   # 1e-5 for STAGE="finetune". check_stage_lr() refuses to
-                                   # start when LR and STAGE disagree.
+LR = 1e-3                         # fresh-start learning rate. ~1e-3 suits random weights;
+                                   # ~1e-5 suits refining an already-trained net.
 TRANSFER_LR = 1e-5                # learning rate when resuming onto a different --dataset-name
                                    # (weight transfer / refinement of an already-trained net)
 WEIGHT_DECAY = 1e-4                # Adam weight decay
@@ -161,26 +157,9 @@ HEARTBEAT_EVERY_BATCHES = 200     # print a mid-epoch loss/MAE/ETA line every N 
 class SourceSpec:
     kind: Literal["parquet", "bin"]
     path: str                      # parquet: dir/glob of *.parquet ; bin: glob of *.bin
-    target_col: str = "wdl"        # parquet only: 'wdl' or 'cp'
+    target_col: str = "cp"         # parquet only: legacy hint, see the DATASETS block
     k: float = 1.0                 # bin only: wl_target() blend weight
     lam: float = 0.0               # parquet: lambda in target = lam*result + (1-lam)*sigmoid(cp/320)
-    wdl_is: Literal["wdl", "result", "unknown"] = "wdl"
-    # What a column NAMED `wdl` actually CONTAINS, when the dataset has
-    # no `cp` to cross-check it against. Values use the project vocabulary
-    # (CLAUDE.md rule 10) and nothing else — cp / wdl / result / target:
-    #   'wdl'     it really is a wdl, i.e. sigmoid(cp/320). Use it as the
-    #             (1-lam) term. This is the normal case and the default:
-    #             a column is what its name says unless measured otherwise.
-    #   'result'  it is the game outcome wearing the name `wdl`. Use it as
-    #             the lam term instead. Measured example:
-    #             extra_quiet_raw_wdl has exactly THREE distinct values
-    #             {0.0, 0.5, 1.0} over 47.5M rows — that is a result, not
-    #             an evaluation, and feeding it in as the eval term trains
-    #             the net to imitate a coin flip instead of a position
-    #             score.
-    #   'unknown' ambiguous; the dataset is used as an eval term but a
-    #             warning is printed so the choice is visible.
-    # Ignored when `cp` is present: cp always wins and wdl is recomputed.
     train_pct: float = 1.0         # fraction of this source's positions used per epoch
     val_frac: float = 0.02         # fraction of this source held out for validation
     name: str = ""                 # label for logging; defaults to basename(path)
@@ -232,124 +211,47 @@ class SourceSpec:
 # ════════════════════════════════════════════════════════════════════════
 DATA_DIR = "data"        # root holding one folder per dataset
 
-# ── STAGE: which mix to train on ────────────────────────────────────────
-#
-# Training is TWO stages, because getting out of random initialisation and
-# polishing a working network are different jobs needing different learning
-# rates and different data. STAGE selects the mix; set LR to match (the
-# recommended value is named in each block below and enforced by
-# check_stage_lr() so the two cannot silently disagree).
-#
-#   'warmup'   from RANDOM weights, LR = 1e-3. Crude, huge, human data.
-#              Shallow evaluations are fine here — the network starts worse
-#              than any of them. Runs for a handful of epochs; its only job
-#              is to stop the weights being noise.
-#
-#   'finetune' from the warmup checkpoint, LR = 1e-5, MANY epochs (~200).
-#              The recent, strong, deeply-evaluated self-play sets. This is
-#              where the actual playing strength comes from.
-#
-# The warmup data is absent from the finetune mix, not merely reduced: at
-# 73.9M rows it would outweigh the strong sets by sheer volume.
-STAGE = "warmup"          # "warmup" | "finetune"
-
-# Virichess data (viriformat_*, 42.5M rows) is EXCLUDED from both stages —
-# judged low quality. It is left in data/ but never trained on. Do not add it
-# back without a measured reason.
-
-#
 #    * `pct`  fraction of that dataset used per epoch. 0.0 DISABLES it
-#             entirely (it is not even opened).
+#             entirely (it is not even opened), which is how you take a
+#             dataset out of the mix without deleting the line.
 #    * `mode` 'lines' (sample rows, reads every file) or 'shards' (sample
 #             whole FILES, skips the rest unopened — far cheaper on a
 #             1000-file dataset, slightly coarser).
-#    * `col`  is a LEGACY hint, kept only for logging and for the case of a
-#      dataset with neither `cp` nor `result`. Since
-#      train/labeling/normalize_columns.py made `cp` the single stored
-#      primitive (CLAUDE.md rule 10 — `wdl` is sigmoid(cp/320), so storing
-#      both lets them rot apart), every entry below is 'cp'. blend_target()
-#      keys off the columns ACTUALLY present, not off this field.
+#    * `col`  legacy hint, used only for logging and for the case of a dataset
+#             with neither `cp` nor `result`. `cp` is the single stored
+#             primitive (CLAUDE.md rule 10), so every entry is 'cp'.
+#             blend_target() keys off the columns ACTUALLY present.
 #    * `lam`  target = lam*result + (1-lam)*sigmoid(cp/320). INERT unless the
 #             dataset has BOTH columns — see data/Data.md for which do.
-
-# Stage 1: crude + huge + human. 73.9M rows available.
-DATASETS_WARMUP = [
-    # name                                                pct   mode      col    lam
-    {"name": "extraquiet_cp_sf5k_res_filter",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 40.1M, human games / SF 5k nodes
-    {"name": "lichess_cp_sf_filter",                  "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 15.2M, lichess / SF
-    {"name": "lichess_cp_sfdb_filter",                     "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00,
-     "suffix": "_quiet.parquet"},                                                                                     # 18.6M, lichess / SF evals shipped with the DB
+#
+# Viriformat (viriformat_*, 42.5M rows) is deliberately absent: data judged
+# low quality. Add it back only with a measured reason.
+DATASETS = [
+    # name                                                            pct   mode      col    lam
+    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
+    {"name": "lichess_cp_sfdb_filter",                            "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
+    {"name": "selfplay_cp_sf50k_res_filter_data20260410",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 16.1M  selfplay / SF 50k
+    {"name": "lichess_cp_sf_filter",                              "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
+    {"name": "selfplay_cp_zchezz_res_filter_data20260401",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  9.1M  selfplay / Zchezz itself
+    {"name": "selfplay_cp_zchezz_res_filter_data20260404",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  8.8M  selfplay / Zchezz itself
+    {"name": "selfplay_cp_sf50k_res_filter_data20260404",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  7.5M  selfplay / SF 50k
+    {"name": "selfplay_cp_sf100k_res_endgames_filter_data20260414","pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},  #  5.7M  selfplay endgames / SF 100k
+    {"name": "extraquiet_cp_sfd14_endgames_filter",               "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  2.8M  human endgames / SF depth 14
+    {"name": "selfplay-lichess_cp_sf500k_res_filter_endgames",    "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #  2.7M  selfplay endgames / SF 500k
+    {"name": "extraquiet_cp_sf60k_filter",                        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  1.5M  humans / SF 60k
+    {"name": "synthetic_endgame_cp_sf_filter_data20260414",       "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  1.2M  generated endgames / SF
+    {"name": "selfplay_cp_zchezz_res_filter_data20260410",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  850k  selfplay / Zchezz itself
+    {"name": "synthetic_endgame_cp_sf_filter_data20260413",       "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #  521k  generated endgames / SF
+    {"name": "extraquiet_cp_sfd12_endgames_filter",               "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  262k  human endgames / SF depth 12
+    {"name": "lichess_cp_sf400k_filter",                          "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  150k  lichess / SF 400k
+    {"name": "miscelaneous_cp_sf1M_res_filter",                   "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #   34k  mixed / SF 1M
 ]
-
-# Stage 2: recent, strong, deeply evaluated. 52.8M rows available.
-DATASETS_FINETUNE = [
-    # name                                                          pct   mode      col    lam
-    {"name": "selfplay_cp_sf50k_res_filter_data20260410",       "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 16.1M  SF 50k
-    {"name": "selfplay_cp_sf50k_res_filter_data20260404",       "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  7.5M  SF 50k
-    {"name": "selfplay_cp_sf100k_res_endgames_filter_data20260414", "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},  # 5.7M  SF 100k, endgames
-    {"name": "selfplay-lichess_cp_sf500k_res_filter_endgames",  "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #  2.7M  SF 500k, endgames
-    # Evaluated by Zchezz ITSELF: at lam=0 these teach the network its own
-    # current opinion and add nothing. Their `result` is the only independent
-    # signal in them — this is where raising lam actually buys something.
-    {"name": "selfplay_cp_zchezz_res_filter_data20260401",          "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  9.1M
-    {"name": "selfplay_cp_zchezz_res_filter_data20260404",          "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  8.8M
-    {"name": "selfplay_cp_zchezz_res_filter_data20260410",          "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  850k
-    # Deep human/endgame evaluation — small but the highest-quality cp here.
-    {"name": "extraquiet_cp_sf60k_filter",                      "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  1.5M  SF 60k
-    {"name": "extraquiet_cp_sfd14_endgames_filter",             "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  2.8M  SF depth 14
-    {"name": "extraquiet_cp_sfd12_endgames_filter",             "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  262k  SF depth 12
-    {"name": "lichess_cp_sf400k_filter",                        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  150k  SF 400k
-    {"name": "miscelaneous_cp_sf1M_res_filter",                 "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #   34k  SF 1M
-    # Generated positions, no game played -> no `result` exists, lam forced to 0.
-    {"name": "synthetic_endgame_cp_sf_filter_data20260414",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  1.2M
-    {"name": "synthetic_endgame_cp_sf_filter_data20260413",         "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #  521k
-]
-
-_STAGES = {"warmup": DATASETS_WARMUP, "finetune": DATASETS_FINETUNE}
-if STAGE not in _STAGES:
-    raise SystemExit(f"STAGE must be one of {sorted(_STAGES)}, got {STAGE!r}")
-DATASETS = _STAGES[STAGE]
-
-# Learning rate that each stage expects. Checked against LR at startup rather
-# than silently applied, because LR is also a CLI flag: a warmup run at the
-# finetune LR barely moves off random init, and a finetune run at the warmup
-# LR destroys the network it was handed. Both failures look like a normal run.
-STAGE_LR = {"warmup": 1e-3, "finetune": 1e-5}
-
-# Epochs per stage. This matters more than it looks: the LR schedule is
-# CosineAnnealingLR(T_max=epochs), so `epochs` sets how fast the LR decays to
-# eta_min. Every v4.00 checkpoint so far was produced by a 6- or 8-epoch run,
-# which annealed the LR to ~0 almost immediately and left the network at val
-# BCE 0.62 — barely below the 0.693 a constant 0.5 predictor scores. Short
-# runs are the single biggest reason the net is weak.
-STAGE_EPOCHS = {"warmup": 12, "finetune": 200}
-EPOCHS = STAGE_EPOCHS[STAGE]      # number of training epochs (CLI: --epochs)
 
 # Packed .bin selfplay sources (Appendix F.2/F.3). Same rules; `k` is the
 # wl_target blend (1.0 = pure game result, see dataset.py).
 BIN_DATASETS = [
     # {"path": "C:/nnue_checkpoints/selfplay/gen1/*.bin", "pct": 1.00, "k": 1.0, "name": "gen1"},
 ]
-
-
-def check_stage_lr(lr: float) -> None:
-    """Refuse to start when LR contradicts STAGE.
-
-    Both failure modes are silent — the run trains, the loss curve looks
-    plausible, and only a game-playing test months later shows the damage:
-      * warmup at 1e-5   -> barely leaves random init (this is exactly how the
-                            v4.00 net ended up at val BCE 0.62 against a
-                            0.693 constant-predictor floor).
-      * finetune at 1e-3 -> wrecks the network it was handed.
-    Override deliberately with --lr if you really mean it; this only blocks
-    the DEFAULT path."""
-    want = STAGE_LR[STAGE]
-    if abs(lr - want) > want * 0.5:
-        raise SystemExit(
-            f"STAGE={STAGE!r} expects LR ~ {want:g}, but LR={lr:g}.\n"
-            f"  Set LR = {want:g} in the CONFIGURATION block (or pass --lr {want:g}).\n"
-            f"  warmup = fresh/random weights, needs a large LR;\n"
-            f"  finetune = polishing a trained net, needs a small one.")
 
 
 def sources_from_config() -> list[SourceSpec]:
@@ -370,7 +272,6 @@ def sources_from_config() -> list[SourceSpec]:
         out.append(SourceSpec(kind="parquet", path=path, target_col=d.get("col", "wdl"),
                               train_pct=float(d["pct"]), pct_mode=d.get("mode", "lines"),
                               lam=float(d.get("lam", 0.0)),
-                              wdl_is=d.get("wdl_is", "wdl"),
                               suffix=d.get("suffix", ".parquet"), name=d["name"]))
     for d in BIN_DATASETS:
         if d.get("pct", 0.0) <= 0.0:
@@ -467,7 +368,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "encode_positions() on the same FENs. Use --no-encode-cache to "
                          "always re-encode (e.g. while iterating on encoding.py itself).")
     p.add_argument("--show-config", action="store_true",
-                    help="print the resolved configuration (including the STAGE dataset "
+                    help="print the resolved configuration (including the DATASETS "
                          "mix) and exit without training")
     p.add_argument("--heartbeat-every-batches", type=int, default=HEARTBEAT_EVERY_BATCHES,
                     help="Print a running loss/MAE/ETA heartbeat every N training batches.")
@@ -638,42 +539,13 @@ def blend_target(df, source: SourceSpec) -> np.ndarray:
                               f"(max diff {np.abs(stored[bad] - cp_prob[bad]).max():.3f}). "
                               f"Using the cp-derived value; check how this dataset was written.")
 
-    # No cp, but a stored wdl. What that column MEANS is a per-dataset
-    # fact that cannot be inferred safely here, so it is declared in the
-    # DATASETS block via `wdl_is` (see SourceSpec).
-    if cp_prob is None and "wdl" in df.columns:
-        lone = pd.to_numeric(df["wdl"], errors="coerce").to_numpy(dtype=np.float64)
-        if source.wdl_is == "result":
-            # The column is an outcome, not an evaluation: it belongs on
-            # the lam side. Using it as the eval term would be exactly
-            # backwards and would silently invert the meaning of lam for
-            # this dataset.
-            if res_prob is None:
-                res_prob = lone
-            has_res = True
-        else:
-            if source.wdl_is == "unknown":
-                key = (source.name, "wdl_unknown")
-                if key not in _BLEND_STATS["warned"]:
-                    _BLEND_STATS["warned"].add(key)
-                    print(f"  [blend] {source.name}: lone 'wdl' column with wdl_is='unknown' — "
-                          f"treating it as an EVAL term. If it is really a game outcome, set "
-                          f"wdl_is='result' in the DATASETS block (see data/Data.md).")
-            cp_prob = lone
-            has_cp = True
-
     # Fall back column-by-column so a dataset with a few missing cells still
     # contributes those rows through whichever term it does have.
     if cp_prob is None and res_prob is None:
-        # Neither column: the only thing left is a legacy `wdl` column,
-        # which is sigmoid(cp) in every dataset checked. Use it as the cp
-        # term (never as the result term) and say so once.
-        key = (source.name, "legacy_wdl")
-        if key not in _BLEND_STATS["warned"]:
-            _BLEND_STATS["warned"].add(key)
-            print(f"  [blend] {source.name}: no 'cp'/'result' columns; falling back to "
-                  f"the legacy 'wdl' column, treated as the EVAL term (lambda forced to 0).")
-        return to_wdl(df[source.target_col].values, source.target_col).astype(np.float64)
+        raise SystemExit(
+            f"{source.name}: no 'cp' and no 'result' column — there is no target to "
+            f"train on. Columns present: {list(df.columns)}. Every dataset must carry "
+            f"`cp`, `result`, or both (CLAUDE.md rule 10).")
 
     if res_prob is None:
         _BLEND_STATS["cp_only"] += n
@@ -1330,8 +1202,6 @@ def train(args: argparse.Namespace) -> None:
     # run (CLAUDE.md rule 8); --source exists only to override it for
     # scripted sweeps.
     if not args.sources:
-        check_stage_lr(args.lr)
-        print(f"STAGE = {STAGE!r}  ({len(DATASETS)} datasets, LR = {args.lr:g})")
         args.sources = sources_from_config()
         if not args.sources:
             raise SystemExit(
@@ -1535,7 +1405,6 @@ if __name__ == "__main__":
     parsed_args = parser.parse_args()
     if parsed_args.show_config:
         print("Resolved configuration:")
-        print(f"  STAGE        = {STAGE!r}  ({len(DATASETS)} datasets)")
         width = max(len(k) for k in vars(parsed_args))
         for key, val in sorted(vars(parsed_args).items()):
             if key not in ("show_config", "sources"):

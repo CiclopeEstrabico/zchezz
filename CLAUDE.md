@@ -4,7 +4,7 @@
 
 Zchezz is a chess engine written in C with NNUE evaluation, targeting both native platforms (Windows/Linux/Android) and WebAssembly for browser play. The engine communicates via the UCI protocol.
 
-**Current engine version: `engine/c/zchezz_v400/`.** Its NNUE architecture (HalfKP-4Bucket, see README.md § NNUE) is implemented and structurally validated. The network is **being trained** in two stages (`STAGE` at the top of `train/train_nnue.py`): a `warmup` from random weights on crude high-volume data, then a `finetune` on the strong deeply-evaluated sets. Until a finetuned NNU4 file is exported and passes Phase 1, the deployed/playable engine stays v3.14, and Phase 2–9 strength numbers for v4.00 mean nothing — an undertrained net loses by construction.
+**Current engine version: `engine/c/zchezz_v400/`.** NNUE architecture HalfKP-4Bucket (README.md § NNUE), trained by `train/train_nnue.py` and exported to NNU4 by `train/export_nnu4.py`. A strength number for a network that has not cleared Phase 1 means nothing — an undertrained net loses by construction, so never quote Elo for one.
 
 For architecture, file structure, and build instructions, see `README.md` — this file is rules only.
 
@@ -216,54 +216,47 @@ keep that harness's capabilities, and the Python harness stays.
 - Before replacing any harness, inventory what the old one did and state, item by item,
   whether the new one covers it, deliberately does not (with the reason), or still needs it.
 
-### 10. TRAINING-DATA NAMING CONVENTION — `result`, `cp`, `wdl`
+### 10. TRAINING-DATA NAMING CONVENTION — `cp`, `result`, `wdl`, `target`
 
-Every training dataset (parquet columns, and the `.bin` record in
-`engine/c/tools/sample.h`) uses exactly these three names, with exactly
-these meanings. Do not invent a fourth.
+The vocabulary is closed. Do not invent a fifth name.
 
-| Name | Meaning | Range |
-|---|---|---|
-| `result` | the REAL game outcome, WHITE-relative | **0.0 / 0.5 / 1.0** (0 = Black won, 0.5 = draw, 1 = White won) |
-| `cp` | evaluation in centipawns, WHITE-relative | int |
-| `wdl` | `sigmoid(cp / 320)` — a pure function of `cp` | 0..1, WHITE-relative |
+| Name | Meaning | Range | Stored? |
+|---|---|---|---|
+| `cp` | evaluation in centipawns, WHITE-relative | int | **yes — the primitive** |
+| `result` | the REAL game outcome, WHITE-relative | 0.0 / 0.5 / 1.0 (0 = Black won) | **yes, when a game was played** |
+| `wdl` | `sigmoid(cp / 320)` — a pure function of `cp` | 0..1, WHITE-relative | **never** |
+| `target` | `lambda * result + (1 - lambda) * wdl` | 0..1, WHITE-relative | **never** |
 
-All three are WHITE-RELATIVE and `result`/`wdl` share the SAME 0..1 scale — this matters
-because the training target is a CONVEX combination (below): a `result` on a different scale
-(e.g. -1..1) would push the target outside the sigmoid's range at lambda=1 and break the BCE
-loss (the trainer detects and converts a -1..1 column rather than training on it), and because
-one STM flip (`x -> 1-x`) applied downstream must be correct for all three at once.
+**`cp` and `result` are the only stored columns.** `wdl` is derived at training
+time. Storing it beside `cp` lets the two rot apart, so a dataset carrying a
+`wdl` column is a defect — fix it with `train/labeling/normalize_columns.py`.
 
-`result` is written as a NUMBER in new datasets; the legacy PGN strings (`'1-0'` etc.) are
-still accepted when reading. The `.bin` record (`sample.h`) keeps its own
-internally-consistent convention: `eval_cp` and `game_result` (`+1/0/-1`) are both
-STM-relative there, and `dataset.py` converts `game_result` to the 0..1 probability at read
-time.
+**`wdl` IS NOT AN OUTCOME.** The temperature 320 is the same constant as
+`nnue.c`'s `_nnL3B * 320.0f` output scale and `train/train_nnue.py`'s
+`CP_TO_WDL_T`; changing one without the others silently rescales everything.
 
-**`wdl` IS NOT AN OUTCOME.** It is a transform of the evaluation, stored for convenience. The
-temperature 320 is the same constant as `nnue.c`'s `_nnL3B * 320.0f` output scale and
-`train/train_nnue.py`'s `CP_TO_WDL_T`; changing one without the others silently rescales
-everything.
+Both stored columns are WHITE-RELATIVE, and `result` shares `wdl`'s 0..1 scale.
+This matters because `target` is a CONVEX combination: a `result` on a -1..1
+scale would leave the sigmoid's range at lambda=1 and break the BCE loss, and
+one STM flip (`x -> 1-x`) applied downstream must be correct for both at once.
 
-**The training target is a blend, computed AT TRAINING TIME, never baked into a dataset:**
+`result` is a NUMBER; PGN strings (`'1-0'`) are accepted when reading but never
+written. The `.bin` record (`engine/c/tools/sample.h`) keeps its own convention:
+`eval_cp` and `game_result` (`+1/0/-1`) are both STM-relative there, and
+`dataset.py` converts to the 0..1 probability at read time.
 
-```
-target = lambda * result_prob + (1 - lambda) * wdl
-```
+**`target` is computed AT TRAINING TIME, never baked into a dataset.** `lambda`
+is set PER DATASET in the `DATASETS` block at the top of `train/train_nnue.py`:
+lambda=0 trusts the labelling engine's evaluation, lambda=1 trusts only the real
+game outcome. Baking it in freezes lambda at generation time — and lambda is
+exactly the knob you anneal across bootstrap generations.
 
-`lambda` is set PER DATASET in the `DATASETS` block at the top of `train/train_nnue.py`.
-lambda=0 trusts the labelling engine's evaluation; lambda=1 trusts only the real game outcome.
+**`lambda` is INERT unless a dataset has BOTH `cp` and `result`.** With one term
+the blend collapses to that term whatever lambda says. A dataset with neither is
+an error, not a fallback: there is nothing to train on.
 
-**Why the blend must not live in the dataset:** baking it in freezes lambda at generation
-time, and lambda is exactly the knob you anneal across bootstrap generations. It also went
-wrong in practice — a labeling script blended the stored `wdl` with `cp`, i.e. `f(cp)` with
-`f(cp)`, so lambda silently did nothing; and another synthesised `result` from `cp`, turning
-"ground truth" into the labelling engine's own opinion.
-
-**Because `wdl` is derivable from `cp`, they can rot apart.** The trainer therefore
-recomputes `wdl` from `cp` whenever `cp` is present, uses a stored `wdl` only when `cp` is
-absent, and reports any dataset where the two disagree. Missing columns are not fatal:
-whichever term exists is used alone, and the fallback is counted and printed.
+**Never synthesise a `result` from `cp`.** That turns ground truth into the
+labelling engine's own opinion. If no game was played, the column is absent.
 
 ## CRITICAL INVARIANTS — landmines, not documentation
 

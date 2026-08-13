@@ -4,9 +4,7 @@
 
 Written in C with a custom-trained NNUE evaluation, playable directly in the browser via WebAssembly. Compiles to a single self-contained HTML file that works fully offline — no server, no install, no dependencies. Just double-click and play.
 
-▶ **[Play against Zchezz in your browser](https://gitzambrano.github.io/zchezz/)** *(currently serving the last trained version, v3.14 — see the v4.00 section below for what's in progress)*
-
-> **Status note:** the repo is mid-transition to **v4.00**, a new NNUE architecture (HalfKP-4Bucket). The architecture is implemented and structurally verified; its network is **being trained** (two stages — see [§ Training the v4.00 network](#training-the-v400-network)). The deployed/playable engine stays v3.14 (~2900 Elo, described below) until v4.00 has a finetuned weight file and passes the regression suite in `CLAUDE.md`. See [§ v4.00](#zchezz-v400--halfkp-4bucket-nnue-in-progress) for exactly what has and hasn't been verified so far.
+▶ **[Play against Zchezz in your browser](https://gitzambrano.github.io/zchezz/)**
 
 ---
 
@@ -14,19 +12,19 @@ Written in C with a custom-trained NNUE evaluation, playable directly in the bro
 
 | | |
 |---|---|
-| **Strength** | ~2900 @ 200ms/move (measured against Stockfish 2800 anchor) |
+| **Version** | v4.00 — `engine/c/zchezz_v400/` |
 | **Search** | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP |
-| **Evaluation** | Custom NNUE — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
+| **Evaluation** | Custom NNUE, HalfKP-4Bucket — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
 | **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
 | **Opening book** | Polyglot .bin format, with built-in ECO opening name recognition |
 | **Analysis** | Multi-PV (up to 5 lines), eval bar, blunder detection, eval graph |
 | **Platforms** | Windows, Linux, Android (Termux), WebAssembly (any modern browser) |
-| **Offline** | Single HTML bundle (~1.1 MB) — works from `file://`, no server needed |
+| **Offline** | Single HTML bundle — works from `file://`, no server needed |
 | **UCI** | Full UCI protocol compliance (15 commands, 12 configurable options) |
 
 ### Features
 
-- 🧠 **NNUE evaluation** — 799-feature HalfKP input, dual-perspective accumulators, incremental updates, Quantization-Aware Training
+- 🧠 **NNUE evaluation** — HalfKP-4Bucket, 2560 features per perspective, dual-perspective accumulators, incremental updates, Quantization-Aware Training
 - ⚡ **Lazy SMP** — shared transposition table, staggered helper depths, lock-free design
 - 🔄 **Staged move generation** — TT move → captures → quiets → losing captures, avoiding full move list allocation
 - 🎯 **Full search suite** — null move pruning, LMR, futility, razoring, ProbCut, singular extensions, IIR, SEE pruning
@@ -58,44 +56,34 @@ The network was trained on filtered data for quiet positions using PyTorch.
 - 4 generations of iterative self-play
 - Generated endgame positions
 
-Every dataset stores the same three columns, with the same meaning everywhere:
-`result` is the real game outcome (0.0 / 0.5 / 1.0, White-relative), `cp` is the
-evaluation in centipawns (White-relative), and `wdl` is `sigmoid(cp / 320)` — a
-transform of `cp`, never an outcome. The training target is the blend
-`lam * result + (1 - lam) * wdl`, computed at training time with a per-dataset
-`lam`, never baked into a dataset.
+Datasets store two columns: `cp`, the evaluation in centipawns, and `result`,
+the real game outcome (0.0 / 0.5 / 1.0). Both are White-relative. `wdl` is
+`sigmoid(cp / 320)` — a transform of `cp`, never an outcome, and never stored,
+because a stored copy can rot apart from the `cp` it came from. The training
+target is the blend `lam * result + (1 - lam) * wdl`, computed at training time
+with a per-dataset `lam`. See `data/Data.md` for the full corpus map.
 
-### Training the v4.00 network
+### Training the network
 
-Training runs in two stages, selected by `STAGE` at the top of
-`train/train_nnue.py`:
+Everything is set in the `CONFIGURATION` and `DATASETS` blocks at the top of
+`train/train_nnue.py`. A bare run does exactly what those blocks say; the CLI
+flags only override them.
 
-| Stage | Data | Rows/epoch | LR | Epochs |
-|---|---|---|---|---|
-| `warmup` | 3 crude, high-volume human sets (extra-quiet @ SF 5k nodes, lichess ×2) | 73.9 M | 1e-3 | 12 |
-| `finetune` | 14 recent/strong/deeply-evaluated sets (SF 50k–1M nodes, endgames, self-play) | 57.2 M | 1e-5 | 200 |
-
-The warmup exists only to get the weights out of random initialisation, so
-shallow evaluations are good enough there. The strength comes from the finetune,
-and the warmup data is *absent* from that mix rather than down-weighted — at
-73.9 M rows it would outweigh the strong sets by sheer volume.
-
-`STAGE` and `LR` are checked against each other at startup (`check_stage_lr()`)
-because both mismatches fail silently: a warmup at 1e-5 barely leaves random
-init, and a finetune at 1e-3 destroys the network it was handed. `EPOCHS` is
-stage-dependent for the same reason — the schedule is
-`CosineAnnealingLR(T_max=EPOCHS)`, so a run configured for 200 epochs but stopped
-at 8 has annealed its learning rate to nearly zero within the first few.
+| Setting | Meaning |
+|---|---|
+| `LR` | learning rate. ~1e-3 from random weights; ~1e-5 to refine a trained net |
+| `EPOCHS` | also sets the schedule: `CosineAnnealingLR(T_max=EPOCHS)`, so a small value anneals the LR to `eta_min` quickly |
+| `DATASETS` | one entry per dataset: `pct` (fraction used per epoch, 0.0 disables), `mode` (`lines` samples rows, `shards` samples whole files), `lam` (how much game result is blended into the target) |
 
 **Reading the loss.** The target is continuous (0..1), not 0/1, so the BCE floor
 is *not* 0.693 — it is the mean entropy of the target distribution, measured at
-**0.620** for the warmup mix. Compare `val_loss` against that number, and read
-`val_mae` as the direct error in wdl units. Judging a run against 0.693 makes a
-nearly converged network look like a failure.
+**0.620**. Compare `val_loss` against that number, and read `val_mae` as the
+direct error in wdl units. Judging a run against 0.693 makes a nearly converged
+network look like a failure.
 
 ```bash
-python train/train_nnue.py                 # trains the configured STAGE
-python train/train_nnue.py --show-config   # prints the stage, LR, and dataset mix
+python train/train_nnue.py                 # trains what the config block says
+python train/train_nnue.py --show-config   # prints the resolved settings, runs nothing
 python train/export_nnu4.py                # checkpoint -> NNU4 weight file
 ```
 
@@ -103,27 +91,24 @@ python train/export_nnu4.py                # checkpoint -> NNU4 weight file
 
 ## NNUE
 
-### v4.00 (current) — HalfKP-4Bucket
+### Architecture — HalfKP-4Bucket
 
-This is the architecture actually implemented in `engine/c/zchezz_v400/nnue.c` today. Its
-network is **not trained yet** (see the status banner at the top of this file) — the
-description below is what the code does, not a strength claim.
+Implemented in `engine/c/zchezz_v400/nnue.c`.
 
 ```
 Features : HalfKP-4Bucket, 2560 per perspective (no hand-built extra features —
-           everything v3.14's 31 extras encoded now emerges from local features for free)
+           they emerge from local features for free)
 L1       : 2560 → 512   int16 weights, 100% incrementally updated accumulator
 Activate : SCReLU   c = clamp(x, 0, QA);  out = (c*c) >> 8
 Concat   : [L1(stm) 512 | L1(opp) 512] = 1024 uint8 — order is ALWAYS [stm, opp];
            swapping it makes the engine evaluate winning positions as lost
 L2       : 1024 → 32    int8 weights (maddubs kernel), ClippedReLU [0, QB]
 L3       : 32 → 1       int8 → float32, output centipawns relative to STM, clamp ±2000
-Weights  : NNU4 format, ~2.6 MB (was NNU3, ~427 KB, see v3.14 below)
+Weights  : NNU4 format, 2,656,464 bytes
 ```
 
-`QA = 255`, `QB = 64` — the same L1/L2 scale constants `nnue.c` has used since NNU3.
-`sizeof(NnueAccum)` is ~257 KB (was ~68 KB) — per-thread, not per-move, and still cheap
-relative to search tree size. Inference is int16/int8 quantized with AVX2 SIMD on native
+`QA = 255`, `QB = 64` are the L1/L2 scale constants. `sizeof(NnueAccum)` is ~257 KB —
+per-thread, not per-move, and cheap relative to search tree size. Inference is int16/int8 quantized with AVX2 SIMD on native
 and WASM SIMD in the browser. Both perspectives share the same L1 weight matrix.
 
 The accumulator is maintained as a stack of `NN_ACC_STACK` (128) frames. Each frame stores
@@ -171,15 +156,6 @@ The dirty flag and the king bucket live on a **per-frame stack**, not flat field
 
 If a node never calls eval (e.g. a tablebase cutoff), the flag is simply discarded on pop.
 
-**Two corrections found during implementation, relative to the original plan
-(`docs/v400_implementation_plan.md`):**
-
-1. The plan computed `king_bucket` on the raw mailbox square for White. Since Zchezz's
-   layout has `0 = a8`, that would flip the rank for only one side and break the symmetry
-   between perspectives — both perspectives now compute the bucket in their own POV
-   coordinates (as shown above).
-2. The plan's `nnue_push_na` didn't subtract the captured piece when the capturing piece
-   was the **king** — the captured piece would stay in the accumulator forever. Fixed.
 
 #### NNU4 weight file format
 
@@ -197,37 +173,9 @@ L3B               float32 unquantized
 ```
 
 Total file size: 2,656,464 bytes. The loader validates `dims[]` against the compiled
-architecture and refuses mismatched files with an explicit message — loading a
-wrong-dimension network used to be silent corruption. `OUT_SCALE = 320 / QB²`; the `320`
+architecture and refuses mismatched files with an explicit message. `OUT_SCALE = 320 / QB²`; the `320`
 is the same cp↔WDL temperature used by `to_wdl()` in training — changing one without the
 other silently rescales the whole eval.
-
-### v3.14 (legacy, frozen) — Half-Mirror + hand-built features
-
-v3.14 is the version currently deployed and playable in the browser (see the banner at the
-top of this file). Per the project's own versioning rule its code is frozen and never
-modified in place, so the description below is historical/reference material, not the
-current architecture — see § v4.00 above for that.
-
-The network is a fully-connected feed-forward network (NNUE — Efficiently Updatable Neural Network) with a 799-feature input, two hidden layers, and a scalar WDL output. Starting from version NNU3, all layers use integer fixed-point arithmetic at inference time.
-
-```
-Input: 799 features  (float32 during training, cast to int at inference)
-  ├── 768  Half-Mirror (HM) bitboard encoding
-  │         12 piece types × 64 squares, side-to-move perspective
-  └──  31  Endgame features (appended, computed per position)
-            stm piece counts   ×6   (normalized)
-            opp piece counts   ×6   (normalized)
-            total material     ×1   (normalized by 78)
-            constant bias      ×1
-            stm passed pawns   ×8   (per file, binary)
-            opp passed pawns   ×8   (per file, binary)
-            king–king distance ×1   (Chebyshev, normalized by 7)
-
-L1: int16[799 → 256]  bias int32[256]  + ClippedReLU(0, 255)  ← incremental accumulator (dual POV)
-L2: int8[256 → 64]    bias int32[64]   + ClippedReLU(0, 64)
-L3: float32[64 → 1]   bias float32[1]  + Sigmoid → ×320 cp, clamped ±2000
-```
 
 ### Input encoding
 
@@ -256,7 +204,7 @@ OUT_SCALE = 320 / (QB × QB) = 320 / 4096 ≈ 0.078
 
 **L2 (int8 weights).** Each L2 weight is multiplied by QB and rounded to `int8_t`. The L2 bias is pre-scaled by `QA × QB = 16320` and stored as `int32_t`. The L2 dot product accumulates `uint8_t` activations × `int8_t` weights into `int32_t`, then right-shifts by SHIFT (8) to bring the scale back to QB before ClippedReLU. The output is clamped to `[0, QB] = [0, 64]`.
 
-**L3 (float32).** L3 weights are quantized to `int8_t` (scale QB) in the NNU3 file but the final dot product `L3W · relu2` uses the integer weights scaled back to float for the final scalar. The bias is kept as `float32` — this 64→1 dot product is not a bottleneck and avoiding one more integer scale conversion keeps the output path simple and exact.
+**L3 (float32).** L3 weights are quantized to `int8_t` (scale QB) in the NNU4 file but the final dot product `L3W · relu2` uses the integer weights scaled back to float for the final scalar. The bias is kept as `float32` — this 64→1 dot product is not a bottleneck and avoiding one more integer scale conversion keeps the output path simple and exact.
 
 **Scale chain summary:**
 
@@ -347,16 +295,16 @@ Since the network starts from float32 weights trained by `mixtrain2`, a warm-up 
 
 **Sparsity skip.** The L2 forward pass short-circuits any input where `relu1[i] == 0`, exploiting the natural post-ReLU sparsity of the first hidden layer.
 
-**In-memory WASM loader.** Weights are loaded directly from an `ArrayBuffer` into the WASM heap via `nnue_load_from_mem`, avoiding any filesystem dependency in the browser. The L2 transpose is applied during loading, so the runtime weight layout is always optimal regardless of how the NNU3 file was produced.
+**In-memory WASM loader.** Weights are loaded directly from an `ArrayBuffer` into the WASM heap via `nnue_load_from_mem`, avoiding any filesystem dependency in the browser. The L2 transpose is applied during loading, so the runtime weight layout is always optimal regardless of how the NNU4 file was produced.
 
 ---
 
-### Weight file format — NNU3
+### Weight file format — NNU4
 
 ```
 Offset  Size    Content
 ──────────────────────────────────────────────────────────────────────────────────
-0        4 B    Magic: "NNU3"
+0        4 B    Magic: "NNU4"
 4        4 B    Epoch (uint32, little-endian)
 8       20 B    5 × uint32 dims: [L1_IN, L1_OUT, L2_IN, L2_OUT, L3_IN]
                               = [799,    256,     256,    64,     64  ]
@@ -486,7 +434,7 @@ SEE uses the magic bitboard attack tables directly. The attacker board is rebuil
 
 ### Staged move generation
 
-From v3.10, the engine uses **staged move generation** in the alpha-beta search. Instead of generating all moves upfront and sorting them, moves are generated in phases:
+The engine uses **staged move generation** in the alpha-beta search. Instead of generating all moves upfront and sorting them, moves are generated in phases:
 
 | Stage | What's generated | Why |
 | ----- | ---------------- | --- |
@@ -763,8 +711,8 @@ v3.00+ supports **Syzygy endgame tablebases** (3-4-5 piece) via the [Fathom](htt
 
 - **WDL probing** during search — returns exact Win/Draw/Loss scores for positions with ≤5 pieces
 - **DTZ probing** at the root — selects the fastest winning move
-- **Draw cutoff** (v3.13+) — Stockfish-style WDL draw handling: draws return 0cp immediately (no further search), while wins/losses are stored in the TT at depth+6; blessed/cursed (50-move-rule-affected) results use the current depth instead
-- **Insufficient material** (v3.13+) — KvK, KBvK, KNvK detected as dead draws via a fast bitboard check (a handful of OR operations + popcount), returned immediately with zero NNUE evaluation overhead
+- **Draw cutoff** — Stockfish-style WDL draw handling: draws return 0cp immediately (no further search), while wins/losses are stored in the TT at depth+6; blessed/cursed (50-move-rule-affected) results use the current depth instead
+- **Insufficient material** — KvK, KBvK, KNvK detected as dead draws via a fast bitboard check (a handful of OR operations + popcount), returned immediately with zero NNUE evaluation overhead
 - **Square/bitboard mapping** — Zchezz's a8=0 maps to Fathom's a1=0 via `sq ^ 56`; bitboards are vertically flipped with `__builtin_bswap64()`
 - **Key guards** — `rule50 == 0` is checked before every probe, and a cardinality filter restricts deep-node-only probing once piece count equals the configured limit
 - **Thread-safe** — WDL probes can be called from search threads
@@ -912,7 +860,7 @@ sets, against the *current* engine) use the fast in-process `net:` player kind. 
 always generates data from the current engine — there is no cross-version self-play
 requirement. So when a new engine version is cut, these tool sources are **not** copied
 into it — they keep compiling as-is against whichever folder `ENGINE=` points at. This
-directory previously had its own `README.md` explaining the same rationale; it has been
+directory has no separate README; the rationale lives here. It has been
 merged here and the file deleted.
 
 | File | What it does | Renamed from |
@@ -931,11 +879,9 @@ Holds its own `Makefile`, `compile_zchezz.bat`, `build_wasm.bat`, `bundle.py`, a
 
 #### `engine/c/zchezz_v400/` — current engine (core only)
 
-Now holds **only** engine core sources plus the browser UI source — build files, tool
-sources, and piece SVGs moved to the shared directories above. This folder previously had
-its own `README.md`; that content has been merged into this file (§ NNUE → v4.00 above)
-and into `docs/v400_implementation_plan.md`'s STATUS ATUAL section, and the file was
-deleted — one README for the whole project, not one per version folder.
+Engine core sources plus the browser UI source. Build files, tool sources, and piece
+SVGs live in the shared directories above. There is one README for the whole project,
+not one per version folder.
 
 | File | What it does |
 |---|---|
@@ -986,7 +932,7 @@ deleted — one README for the whole project, not one per version folder.
 | `encoding.py` | Single source of truth (Python side) for HalfKP-4Bucket feature encoding | new |
 | `model.py` | HalfKP-4Bucket model definition, SCReLU/ClippedReLU, QAT fake-quantization | new |
 | `dataset.py` | Packed `.bin` self-play dataset reader (numpy structured dtype, memmap, multi-shard) | new |
-| `train_nnue.py` | Training script (QAT, NNU4), rewrite of the v3.14 loop for HalfKP-4Bucket | `mixtrain.py` |
+| `train_nnue.py` | Training script (QAT, NNU4) for HalfKP-4Bucket | `mixtrain.py` |
 | `export_nnu4.py` | Converts a training checkpoint into the NNU4 binary weight format | `convert_nnue.py` |
 | `check_parity.py` | Cross-checks the Python feature encoder against the compiled `nnue.c` (17,720 cases) | new |
 
@@ -1006,10 +952,6 @@ plan that assumed a `[512, 2560]` dense layer.
 | `normalize_columns.py` | Rewrites a dataset to the canonical `fen`/`cp`/`result` column shape | new |
 | `merge_datasets.py` | Joins two extractions of the SAME positions (one with `cp`, one with `result`) into one dataset, hash-joined on FEN with FEN re-verification | new |
 | `fix_column_names.py` | Renames or drops a mislabelled column after re-verifying, per file, that the column really holds what the name claims | new |
-
-`train/test/` (12 one-off v3.14 scratch scripts — `check_ranges.py`, `test_avx.c`,
-`test_infer*.py`, etc.) was **deleted**, superseded by the files above; history remains
-in git.
 
 **Format conversion is not a separate tool.** Anything that reads positions and
 writes positions goes through `process_positions.py`:
@@ -1069,139 +1011,3 @@ removed; its contents live at `tests/suites/` now.
 - PyTorch, python-chess, pandas, pyarrow, numpy
 
 ---
-
-## Changelog
-
-### v3.14
-- **SMP crash fix — TT move validation** — lockless transposition table race conditions could produce corrupt move entries (empty from-square, invalid castle field). These caused `P2BI[0]=-1` → `b->bb[-1]` out-of-bounds access → segfault. Fixed with bounds-checking guards in Stage 1 (search.c) and systemic guards in board_make/uf_bb_clr/uf_bb_set (board.c)
-- **NNUE thread safety** — fixed `acc_dirty` flag checking global state instead of per-thread accumulator, causing all NNUE evaluations to return 0 in helper threads
-- **Helper thread stability** — set `PTHREAD_CANCEL_ASYNCHRONOUS` with timed-join + cancel fallback; 8 MB stacks for all threads to prevent stack overflow in deep searches
-- **Castle field validation** — added `m->castle <= 4` bounds check in `board_make` to prevent `CASTLE_SQ` array out-of-bounds from corrupt TT entries
-- **Bitboard index guards** — `uf_bb_clr` and `uf_bb_set` now reject invalid bitboard indices (`bi < 0` or `bi >= 12`), catching any remaining corrupt moves before they touch bitboards
-- **Verified:** 200/200 stability searches (4T, 0 crashes), 600 games v3.14 vs v3.13 at 100ms (+5.8 ±21.4 ELO, no regression), 300 games at 200ms (-2.3 ±27.2 ELO, no regression), 4T vs 1T +100 ELO
-
-### v3.13
-- **TB draw cutoff** — Stockfish-style WDL draw handling in search. TB draws (WDL=2) now return 0cp immediately instead of continuing search where NNUE would override the correct TB result. Wins/losses stored in TT at depth+6 (Stockfish convention)
-- **Insufficient material detection** — fast bitboard check for KvK, KBvK, KNvK dead draws (6 OR operations + popcount, ~zero overhead). Previously evaluated KvK at +2cp, KBvK at +124cp — now all correctly 0cp
-
-### v3.12
-- **Performance fix** — v3.11's per-Board undo stack (36 KB `UndoFrame undo[512]` embedded in Board struct) caused L1 cache thrashing, producing a ~15 ELO regression vs v3.10
-- **Pointer-based undo** — undo stack moved out of Board struct into external allocations; Board holds only a pointer (16 bytes). Main thread uses a static global; SMP helpers heap-allocate per-thread stacks
-- **Zero overhead** — single pointer dereference per make/unmake, no TLS function calls (MinGW `__emutls` avoided), NPS identical to v3.10
-- **Verified:** 37/37 perft, 70/70 UCI tests, +0.7 ±23.2 ELO vs v3.10 (500 games), MT stability confirmed (50 games 1T vs 4T)
-
-### v3.11
-- **Lazy SMP crash fix** — moved undo stack and repetition history from global arrays into per-Board structs, eliminating thread contention that caused crashes with Threads ≥ 4
-- **TB hits reporting** — fixed `tbhits=0` in UCI info output by syncing `s_tb_hits` from per-thread search state before the info callback
-- **⚠️ Regression** — embedding 36 KB undo stack in Board struct caused cache thrashing (~15 ELO loss vs v3.10); fixed in v3.12
-
-### v3.10
-- **Staged move generation** — TT move → captures → quiets → losing captures (+21 ELO vs v3.09)
-- **WASM crash fix** — sanitize SearchParams function pointers in WASM sret wrapper
-- **Perft command** — inline recursive perft with divide output (depth 1-7)
-- **Portable C** — moved nested functions to file scope for Clang/Emscripten compatibility
-
-### v3.09
-- Syzygy tablebase support (3-4-5 piece WDL + DTZ)
-- Lazy SMP multithreading
-- Polyglot opening book
-- Full UCI protocol compliance
-- NNUE quantization-aware training (NNU3 format)
-
-## Zchezz v4.00 — HalfKP-4Bucket NNUE (in progress)
-
-**Status: architecture implemented and structurally validated. Network NOT trained.**
-The engine in `engine/c/zchezz_v400/` compiles, plays, and passes perft, but there is no
-trained NNU4 weight file yet — until the first training run completes, evaluation is
-either absent or effectively random. **No strength claim (Elo, win rate, "should be
-stronger than v3.14") can be made about v4.00 right now.** Any game played against it
-today reflects random-weight play by construction, not architecture quality. The
-`+150 to +250 ELO` estimate that appears in `docs/v400_implementation_plan.md` is a
-**design hypothesis**, not a measurement — treat it as such until a trained net clears
-the Phase 1–9 regression suite in `CLAUDE.md`.
-
-### Why change the architecture
-
-v3.14 evaluated with 768 half-mirror piece-square features plus 31 hand-built endgame
-features (piece counts, per-file passed pawns, king-king distance). Two structural
-ceilings:
-
-- **No king dependence.** `feature = (color × 6 + type) × 64 + square` — the network
-  could not tell "rook on e4 with king on g1" from "rook on e4 with king on a8." This was
-  the main strength bottleneck.
-- **The 31 extras weren't accumulable.** They depend on many pieces at once, so they
-  changed on every move and no incremental cache helped — every node paid an O(31×256)
-  SIMD pass just to merge them into the accumulator before activation.
-
-### The v4.00 architecture
-
-The king now selects one of 4 feature buckets per perspective, and the 31 hand-built
-extras disappear — everything they encoded emerges from local features for free. The
-accumulator is fully incremental; the only non-incremental work is rebuilding a
-perspective when a king move crosses a bucket boundary, which is rare and handled by a
-lazy per-frame refresh. See § NNUE → v4.00 (current) — HalfKP-4Bucket above for the full
-layer-by-layer spec, the coordinate invariant, and the lazy-bucket-refresh mechanics.
-
-### What has actually been verified so far
-
-| Check | Result |
-|---|---|
-| Perft (37 positions) | 37/37 pass |
-| Python ↔ C feature-index parity | 17,720 cases across 300 legal positions, 0 mismatches |
-| Incremental accumulator vs from-scratch rebuild | ~2M+ nodes, 9/9 position families, 0 mismatches, including castling both sides, king bucket crossings, en passant, king captures, promotion, and `Threads=4` under Lazy SMP |
-| `TTable` refactor (per-instance TT) | Exact node-count parity vs pre-refactor baseline with eval=0 (deterministic search) |
-| `NnueNet` refactor (per-instance weights) | Same node-identical parity approach |
-| Native selfplay throughput | 0.14 → 0.54 games/sec (~3.9×) after fixing MultiPV to share its time budget instead of giving every PV line a full budget |
-| Checkpoint → NNU4 → C loader round-trip | Dims and OUT_SCALE load correctly (tested with random weights, since no trained checkpoint exists yet) |
-| Full pipeline round-trip | Native selfplay → `.bin` → `train_nnue.py` → `export_nnu4.py` → engine loads the resulting NNU4 file and plays, exercised end-to-end with random/placeholder weights |
-
-None of the above is a strength measurement — they are structural/correctness proofs
-that the plumbing is sound. `tests/make_random_nnu4.py` generates a valid random-weight
-NNU4 file specifically so all of this could be verified before any training data existed.
-
-### New supporting infrastructure
-
-- **`TTable` / `NnueNet` as per-instance objects** (`search.h` / `nnue.h`), each with
-  `create`/`destroy` plus a process-wide default for normal UCI usage. This unlocks
-  running multiple independent searches/networks in one process — required by:
-  - **`engine/c/tools/selfplay.c`** — native selfplay generator, N games in parallel (one
-    thread per game, not one thread per color — chess is strictly alternating, so a
-    color-per-thread split would leave one thread idle half the time). Shares one TT
-    between the two colors of a game (same engine, same weights, no leak) and physically
-    clears it between games with `tt_clear()` rather than bumping the generation, because
-    repetition-draw scores are history-dependent and a stale draw entry from a previous
-    game would otherwise be misread as real.
-  - **`engine/c/tools/arena.c`** — A/B strength gate, isolates a TT per player since
-    the two sides are adversaries. Both tool sources are SHARED across engine versions
-    (built via `engine/build/Makefile`, not duplicated per `vXXX` folder) — see
-    § `engine/c/tools/` above for why these sources track the current engine API only.
-- **Native selfplay replaces `tests/run_selfplay.py`'s PGN + Stockfish-reanalysis
-  pipeline** for dataset generation: direct `search_best` calls instead of UCI
-  round-trips, temperature-sampled move selection (AlphaZero-style schedule), and a
-  packed binary sample format (`train/dataset.py`) instead of parquet.
-- **Training target is a blend**, not pure game result: `wl_target = K * result + (1-K) *
-  sigmoid(eval_cp/320)`, with `K` per data source, starting at `K=1.0` (pure game result)
-  for early bootstrap generations since the network's own eval isn't trustworthy yet.
-
-### What's left before v4.00 can be evaluated for strength
-
-1. **Train the network.** v3.14's NNU3 weights are architecturally incompatible — this is
-   training from scratch.
-2. **Native A/B arena + SPSA tuner** (`engine/c/tools/arena.c`) — the gate for the
-   bootstrap loop; needs to be as fast as generation since it runs once per generation.
-3. **Policy head + MCTS/PUCT** as a data generator (later phase).
-4. **Continuous loop:** generate → train → arena judges via SPRT → promote or discard.
-5. **WASM bundle size.** Weights grew from ~427 KB to ~2.6 MB, which would take
-   `zchezz_bundle.html` from ~1.1 MB to ~4.4 MB base64-inlined — heavy for a mobile-first
-   UI. Likely mitigation: gzip the weights in the bundle and inflate via
-   `DecompressionStream('gzip')` in JS. Only testable once a trained network exists.
-6. **The full regression suite in `CLAUDE.md`** (Phases 1–9, 700+ games vs the previous
-   stable version) only makes sense once a trained network exists — until then, no Elo
-   claim about v4.00 is valid.
-
-## Next steps
-
-- Train and validate the v4.00 NNUE network (see above)
-- Native A/B arena + bootstrap loop
-- Ponder support
-
