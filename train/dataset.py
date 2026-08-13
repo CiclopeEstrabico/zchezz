@@ -126,6 +126,110 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# ── Provenance header — SEE MODULE DOCSTRING: THIS MIRRORS sample.h's
+# SampleFileHeader BYTE-FOR-BYTE ──────────────────────────────────────────
+#
+# A .bin file written by the current tools/selfplay.c / tools/arena.c
+# starts with this fixed-size header before any SAMPLE_DTYPE record: which
+# engine build and which NNUE weight file produced every eval_cp that
+# follows (see sample.h's "PROVENANCE HEADER" section for the full
+# rationale — file-level, not per-row, because arena.c's --bin gate
+# already enforces one evaluator per file).
+#
+# Format is detected by MAGIC, never guessed from file size: a file whose
+# first 8 bytes equal SAMPLE_FILE_MAGIC is format v2 (has this header);
+# anything else — including every .bin written before this header existed
+# — is format v1 (legacy, headerless), and reads back with provenance
+# "unknown" rather than being misinterpreted as v2 fields.
+SAMPLE_FILE_MAGIC = b"ZCHZSMP2"
+
+HEADER_DTYPE = np.dtype([
+    ("magic", "S8"),
+    ("header_size", "<u4"),        # bytes to skip before the first record —
+                                    # ALWAYS trust this over EXPECTED header
+                                    # size, so the header can grow later
+                                    # (sample.h's `reserved` field) without
+                                    # breaking this reader.
+    ("engine_version", "<u4"),     # major*100+minor, e.g. 400 = "4.00"
+    ("weight_fingerprint", "<u8"), # FNV-1a 64 over the raw NNUE weight bytes
+    ("weight_path", "S128"),       # informational only, NUL-padded/truncated
+    ("reserved", "u1", (32,)),
+], align=False)
+
+EXPECTED_HEADER_SIZE = 184
+assert HEADER_DTYPE.itemsize == EXPECTED_HEADER_SIZE, (
+    f"HEADER_DTYPE.itemsize={HEADER_DTYPE.itemsize} != {EXPECTED_HEADER_SIZE}; "
+    "this drifted from sample.h's SampleFileHeader — update both in lockstep."
+)
+
+
+@dataclass
+class Provenance:
+    """Where a .bin shard's eval_cp column came from.
+
+    `format_version` is 1 for legacy headerless files (every field below
+    reads "unknown"/None) or 2 for files carrying a SampleFileHeader.
+    """
+    format_version: int
+    engine_version: str            # e.g. "4.00", or "unknown"
+    weight_fingerprint: int | None  # FNV-1a 64, or None if unknown
+    weight_path: str               # "" if unknown
+
+    @property
+    def known(self) -> bool:
+        return self.format_version >= 2
+
+
+UNKNOWN_PROVENANCE = Provenance(
+    format_version=1, engine_version="unknown", weight_fingerprint=None, weight_path="",
+)
+
+
+def read_bin_header(path: str) -> tuple[int, Provenance]:
+    """Detects and reads a .bin file's provenance header, if any.
+
+    Returns (record_start_offset, Provenance) — `record_start_offset` is
+    how many bytes to skip before the first SAMPLE_DTYPE record starts
+    (0 for legacy files, `header.header_size` for v2 files — NOT a
+    hardcoded constant, so a future header grown via sample.h's
+    `reserved` bytes is still skipped correctly by an older copy of this
+    function, as long as it still trusts the field instead of the
+    dtype's own itemsize).
+
+    Detection is by MAGIC only, never by file size or guessing: a file
+    too short to even hold a header, or one that starts with something
+    other than SAMPLE_FILE_MAGIC, is treated as legacy (offset 0,
+    unknown provenance) — exactly the "existing headerless .bin files
+    must still load" backward-compatibility requirement.
+    """
+    size = os.path.getsize(path)
+    if size < HEADER_DTYPE.itemsize:
+        return 0, UNKNOWN_PROVENANCE
+
+    with open(path, "rb") as f:
+        raw = f.read(HEADER_DTYPE.itemsize)
+    if raw[:8] != SAMPLE_FILE_MAGIC:
+        return 0, UNKNOWN_PROVENANCE
+
+    hdr = np.frombuffer(raw, dtype=HEADER_DTYPE, count=1)[0]
+    header_size = int(hdr["header_size"])
+    if header_size < HEADER_DTYPE.itemsize:
+        # A corrupt/impossible header_size — safer to treat as unreadable
+        # provenance than to risk skipping too few bytes and misreading
+        # the first record's leading bytes as header fields.
+        return 0, UNKNOWN_PROVENANCE
+
+    engine_version_num = int(hdr["engine_version"])
+    engine_version = f"{engine_version_num // 100}.{engine_version_num % 100:02d}"
+    weight_path = bytes(hdr["weight_path"]).split(b"\x00", 1)[0].decode("utf-8", "replace")
+
+    return header_size, Provenance(
+        format_version=2,
+        engine_version=engine_version,
+        weight_fingerprint=int(hdr["weight_fingerprint"]),
+        weight_path=weight_path,
+    )
+
 # ── Record dtype — SEE MODULE DOCSTRING: THIS IS A CROSS-LANGUAGE CONTRACT ──
 SAMPLE_DTYPE = np.dtype([
     ("board", "u1", (64,)),   # mailbox pieces, Zchezz encoding, zsq 0=a8..63=h1
@@ -183,6 +287,7 @@ class _ShardInfo:
     path: str
     n_rows: int
     cum_start: int   # global index of this shard's first row
+    provenance: Provenance
 
 
 class MultiShardSelfplay:
@@ -204,19 +309,22 @@ class MultiShardSelfplay:
         self._shards: list[_ShardInfo] = []
         cum = 0
         for path in shard_paths:
-            size = os.path.getsize(path)
+            header_offset, provenance = read_bin_header(path)
+            size = os.path.getsize(path) - header_offset
             if size % SAMPLE_DTYPE.itemsize != 0:
                 raise ValueError(
-                    f"{path}: size {size} is not a multiple of the record size "
-                    f"{SAMPLE_DTYPE.itemsize} — file is truncated, corrupt, or "
-                    f"was written with a different SAMPLE_DTYPE than this module's."
+                    f"{path}: record region size {size} (file size minus "
+                    f"{header_offset}-byte header) is not a multiple of the "
+                    f"record size {SAMPLE_DTYPE.itemsize} — file is truncated, "
+                    f"corrupt, or was written with a different SAMPLE_DTYPE "
+                    f"than this module's."
                 )
             n_rows = size // SAMPLE_DTYPE.itemsize
             if n_rows == 0:
                 continue
-            mm = np.memmap(path, dtype=SAMPLE_DTYPE, mode="r", shape=(n_rows,))
+            mm = np.memmap(path, dtype=SAMPLE_DTYPE, mode="r", shape=(n_rows,), offset=header_offset)
             self._mmaps.append(mm)
-            self._shards.append(_ShardInfo(path=path, n_rows=n_rows, cum_start=cum))
+            self._shards.append(_ShardInfo(path=path, n_rows=n_rows, cum_start=cum, provenance=provenance))
             cum += n_rows
 
         self._total = cum
@@ -266,6 +374,13 @@ class MultiShardSelfplay:
 
     def shard_summary(self) -> list[tuple[str, int]]:
         return [(s.path, s.n_rows) for s in self._shards]
+
+    def provenance_summary(self) -> list[tuple[str, Provenance]]:
+        """Per-shard (path, Provenance) — use to audit/filter a mixed-
+        generation corpus, e.g. flag any shard whose weight_fingerprint
+        doesn't match the network currently being trained, or whose
+        provenance is "unknown" (format v1, pre-header)."""
+        return [(s.path, s.provenance) for s in self._shards]
 
 
 def records_to_fens_and_targets(records: np.ndarray, k: float) -> tuple[list[str], np.ndarray]:

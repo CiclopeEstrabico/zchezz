@@ -298,9 +298,12 @@ static void cmd_setoption(const char *line) {
                 g_tb_probe_depth = 1;
                 g_tb_probe_limit = loaded < 7 ? loaded : 6;
             }
-            fprintf(stderr, "info string Syzygy %d-piece tables loaded (probe_depth=%d)\n",
-                    loaded, g_tb_probe_depth);
-            fflush(stderr);
+            /* UCI "info string" belongs on stdout — that is the only stream a
+             * GUI (or a test harness) reads.  On stderr this confirmation is
+             * invisible to every consumer that matters. */
+            printf("info string Syzygy %d-piece tables loaded (probe_depth=%d)\n",
+                   loaded, g_tb_probe_depth);
+            fflush(stdout);
         } else {
             /* Empty path = disable TB entirely */
             g_tb_probe_depth = 99;
@@ -328,9 +331,12 @@ static void cmd_setoption(const char *line) {
         strncpy(g_opt_book_file, value, sizeof(g_opt_book_file)-1);
         if (value[0]) {
             int loaded = book_open(value);
-            if (g_debug)
-                fprintf(stderr, "info string BookFile set to %s (%d entries loaded)\n",
-                        value, loaded);
+            if (g_debug) {
+                /* stdout, for the same reason as the Syzygy message above. */
+                printf("info string BookFile set to %s (%d entries loaded)\n",
+                       value, loaded);
+                fflush(stdout);
+            }
         }
     }
     else if (strcasecmp(name, "Threads") == 0) {

@@ -126,7 +126,72 @@ void tt_new_generation(TTable *tt) {
 /* ── LMR table ───────────────────────────────────────────────── */
 #define LMR_D 64
 #define LMR_M 128
-static uint8_t lmr_tab[LMR_D * LMR_M];
+static uint8_t lmr_tab[LMR_D * LMR_M];   /* built once from the DEFAULT lmr_divisor at
+                                           * search_init() time; kept for reference/UCI-only
+                                           * builds — the hot path below now reads
+                                           * g_tune.lmr_divisor live instead of this table,
+                                           * so a per-thread tuner can change it without a
+                                           * rebuild (see "Tunable search constants" in
+                                           * search.h). Left populated so nothing else that
+                                           * might reference it in the future silently reads
+                                           * zeros. */
+
+/* ── Tunable search constants — defaults ─────────────────────────
+ * Same numbers that used to be bare literals in alpha_beta()/the ID
+ * loop below.  Kept as named macros (not just numbers in the struct
+ * initializer) so a diff against the pre-tuner history line-matches
+ * the original literals. See search.h's SearchTunables comment for
+ * the full contract. */
+#define TUNE_RAZOR_MARGIN_DEFAULT             200
+#define TUNE_RFP_MULT_DEFAULT                  90
+#define TUNE_RFP_IMPROVING_BONUS_DEFAULT       50
+#define TUNE_NMP_BASE_DEFAULT                   3
+#define TUNE_NMP_DEPTH_DIV_DEFAULT              3
+#define TUNE_NMP_MAX_R_DEFAULT                  6
+#define TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT 200
+#define TUNE_PROBCUT_MARGIN_DEFAULT           200
+#define TUNE_LMR_DIVISOR_DEFAULT              1.5
+#define TUNE_FUT_MULT_DEFAULT                 150
+#define TUNE_FUT_IMPROVING_ADJ_DEFAULT          50
+#define TUNE_ASP_DELTA_INIT_DEFAULT            20
+#define TUNE_ASP_DELTA_MAX_DEFAULT            500
+
+_Thread_local SearchTunables g_tune = {
+    .razor_margin              = TUNE_RAZOR_MARGIN_DEFAULT,
+    .rfp_mult                  = TUNE_RFP_MULT_DEFAULT,
+    .rfp_improving_bonus       = TUNE_RFP_IMPROVING_BONUS_DEFAULT,
+    .nmp_base                  = TUNE_NMP_BASE_DEFAULT,
+    .nmp_depth_div              = TUNE_NMP_DEPTH_DIV_DEFAULT,
+    .nmp_max_r                 = TUNE_NMP_MAX_R_DEFAULT,
+    .nmp_eval_bonus_threshold  = TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT,
+    .probcut_margin            = TUNE_PROBCUT_MARGIN_DEFAULT,
+    .lmr_divisor               = TUNE_LMR_DIVISOR_DEFAULT,
+    .fut_mult                  = TUNE_FUT_MULT_DEFAULT,
+    .fut_improving_adj         = TUNE_FUT_IMPROVING_ADJ_DEFAULT,
+    .asp_delta_init            = TUNE_ASP_DELTA_INIT_DEFAULT,
+    .asp_delta_max             = TUNE_ASP_DELTA_MAX_DEFAULT,
+};
+
+void search_tunables_apply(const SearchTunables *t) { g_tune = *t; }
+
+SearchTunables search_tunables_defaults(void) {
+    SearchTunables d = {
+        .razor_margin              = TUNE_RAZOR_MARGIN_DEFAULT,
+        .rfp_mult                  = TUNE_RFP_MULT_DEFAULT,
+        .rfp_improving_bonus       = TUNE_RFP_IMPROVING_BONUS_DEFAULT,
+        .nmp_base                  = TUNE_NMP_BASE_DEFAULT,
+        .nmp_depth_div              = TUNE_NMP_DEPTH_DIV_DEFAULT,
+        .nmp_max_r                 = TUNE_NMP_MAX_R_DEFAULT,
+        .nmp_eval_bonus_threshold  = TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT,
+        .probcut_margin            = TUNE_PROBCUT_MARGIN_DEFAULT,
+        .lmr_divisor               = TUNE_LMR_DIVISOR_DEFAULT,
+        .fut_mult                  = TUNE_FUT_MULT_DEFAULT,
+        .fut_improving_adj         = TUNE_FUT_IMPROVING_ADJ_DEFAULT,
+        .asp_delta_init            = TUNE_ASP_DELTA_INIT_DEFAULT,
+        .asp_delta_max             = TUNE_ASP_DELTA_MAX_DEFAULT,
+    };
+    return d;
+}
 
 /* ── MVV-LVA table ───────────────────────────────────────────── */
 /* victim 1-5, attacker 1-6  → index = victim*7+attacker */
@@ -145,6 +210,11 @@ struct SearchState {
     long   node_limit;
     long   deadline_ms;
     int    time_up;
+    /* While set, time_up() reports "keep going" no matter what the stop flag
+     * or the clock say.  search_best() raises it for the FIRST depth of the
+     * FIRST PV line of a search that starts at depth 1, so that search always
+     * has a real move to return.  See search_best() for the full rationale. */
+    int    stop_guard;
     volatile int *stop_flag;
     long   tb_hits;
     Move killers[MAX_PLY][2];
@@ -182,6 +252,13 @@ static long now_ms(void) {
  *      the syscall cost of clock_gettime — ~1μs on Linux/Windows)
  * Once time_up is set, it stays set for the remainder of the search. */
 static int time_up(SearchState *ss) {
+    /* Depth-1 guarantee: a "stop"/"quit" that arrives before the search
+     * thread has run a single node must not make the search return an
+     * empty result (which surfaces as "bestmove 0000").  While the guard
+     * is up neither the stop flag nor the deadline can end the search;
+     * search_best() lowers it the moment the first depth completes, so
+     * the stop is honored immediately after. */
+    if (ss->stop_guard) return 0;
     if (ss->stop_flag && *ss->stop_flag) { ss->time_up = 1; return 1; }
     if ((ss->nodes_total & 8191) == 0 && ss->deadline_ms > 0)
         ss->time_up = (now_ms() >= ss->deadline_ms);
@@ -534,7 +611,12 @@ static void sort_moves(SearchState *ss, Move *moves, int n, const Board *bd, int
  * and displace more valuable deeper entries). */
 static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
     if (ply >= MAX_PLY-1) return eval_stm(b);
-    if (ss->nodes >= ss->node_limit || time_up(ss)) return eval_stm(b);
+    /* node_limit is a budget for the WHOLE search, so it must be checked
+     * against nodes_total: ss->nodes is reset at every iterative-deepening
+     * depth (see search_best()), and checking that instead grants a fresh
+     * budget per depth -- i.e. no overall stop condition at all when no
+     * time limit is set.  UCI "go nodes N" means N total nodes. */
+    if (ss->nodes_total >= ss->node_limit || time_up(ss)) return eval_stm(b);
     ss->nodes++; ss->nodes_total++;
     TTable *tt = ss->tt;   /* per-search TT, cached locally (never changes mid-search) */
 
@@ -694,7 +776,9 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
 static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                       Move *pv, int *pv_len, int ply, int in_check_hint) {
     if (ply >= MAX_PLY-1) { *pv_len=0; return eval_stm(b); }
-    if (ss->nodes >= ss->node_limit || time_up(ss)) {
+    /* Whole-search budget -- see qsearch()'s note on why this is
+     * nodes_total and not the per-depth ss->nodes. */
+    if (ss->nodes_total >= ss->node_limit || time_up(ss)) {
         *pv_len=0;
         return depth<=0 ? eval_stm(b) : qsearch(ss,b,alpha,beta,ply);
     }
@@ -887,7 +971,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      * At depth 1, if eval is far below alpha (by 200cp), verify with
      * a qsearch.  If qsearch confirms, this node is hopeless — prune.
      * Only at depth 1 because deeper nodes have more tactical potential. */
-    if (!in_check && !is_pv && depth==1 && static_eval+200 < alpha) {
+    if (!in_check && !is_pv && depth==1 && static_eval+g_tune.razor_margin < alpha) {
         int qs = qsearch(ss, b, alpha-1, alpha, ply);
         if (qs < alpha) return qs;
     }
@@ -899,7 +983,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      * Extended to depth 9 (Stockfish uses up to depth 9 too).
      * Guard: skip near mate scores to avoid pruning forced mates. */
     if (!in_check && !is_pv && depth>=2 && depth<=9 && beta<18000 && static_eval<18000) {
-        int rfp_margin = depth*90 - (improving ? 50 : 0);
+        int rfp_margin = depth*g_tune.rfp_mult - (improving ? g_tune.rfp_improving_bonus : 0);
         if (static_eval - rfp_margin >= beta) return static_eval;
     }
 
@@ -917,9 +1001,9 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
     if (!in_check && !is_pv && depth>=3 && ply>0 && not_endgame && static_eval>=beta) {
         /* NMP reduction: base 3 + depth/3, capped at 6.
          * Add +1 if static_eval is much above beta (eval margin bonus). */
-        int R = 3 + depth / 3;
-        if (R > 6) R = 6;
-        if (static_eval - beta > 200) R += 1;
+        int R = g_tune.nmp_base + depth / g_tune.nmp_depth_div;
+        if (R > g_tune.nmp_max_r) R = g_tune.nmp_max_r;
+        if (static_eval - beta > g_tune.nmp_eval_bonus_threshold) R += 1;
         /* Make null move */
         uint64_t save_hash = b->hash;
         int8_t   save_ep   = b->ep;
@@ -954,7 +1038,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      *   • enabled in endgames too (null move is disabled there,
      *     so ProbCut is the only forward-pruning in endgames) */
     if (!in_check && !is_pv && depth >= 5 && beta < 18000 && ply > 0) {
-        int pc_beta  = beta + 200;
+        int pc_beta  = beta + g_tune.probcut_margin;
         int pc_depth = depth - 4;   /* shallow probe: depth-4, min 1 */
         if (pc_depth < 1) pc_depth = 1;
 
@@ -1049,10 +1133,17 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
     int cmh1 = ply >= 2 ? ss->prev_to_sq[ply-2] : -1;
     const Move *pv_ptr = (pv_move.from||pv_move.to) ? &pv_move : NULL;
 
-    /* LMP limits */
+    /* LMP limits — not tunable (see ga_tune.c's header comment "PARAMETERS
+     * NOT TUNED, AND WHY": an 8-entry hand-shaped table doesn't reduce to
+     * one or two scalars the way the futility margin does). */
     static const int lmp_limit[8] = {0,10,18,26,36,48,62,78};
-    int fut_adj = improving ? 0 : 50;
-    static const int fut_base[9] = {0,150,300,450,600,750,900,1050,1200};
+    int fut_adj = improving ? 0 : g_tune.fut_improving_adj;
+    /* fut_base(d) = g_tune.fut_mult * d — the original hardcoded table
+     * {0,150,300,450,600,750,900,1050,1200} IS exactly 150*d for d=0..8,
+     * so this is not an approximation, just the same table parameterized
+     * by its one degree of freedom. */
+    int fut_base[9];
+    for (int fbi = 0; fbi < 9; fbi++) fut_base[fbi] = g_tune.fut_mult * fbi;
 
     int best = -99999, flag = TT_UPPER;
     Move best_move = {0};
@@ -1369,7 +1460,22 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                     if (legal_count>=3 && depth>=3 && !in_check && !gives_check && is_quiet && !is_killer) {
                         int ld = depth<LMR_D?depth:LMR_D-1;
                         int lm = legal_count<LMR_M?legal_count:LMR_M-1;
-                        reduce = lmr_tab[ld*LMR_M+lm];
+                        /* Computed live from g_tune.lmr_divisor rather than a
+                         * precomputed lmr_tab[] lookup — see search.h's
+                         * SearchTunables comment: lmr_tab is built once by
+                         * search_init() on the main thread only, so a
+                         * per-thread tuner could never see its own divisor
+                         * reflected in it. Same formula/clamps that used to
+                         * build the table (search_init() below), just
+                         * evaluated per-node so it tracks THIS thread's
+                         * g_tune. */
+                        {
+                            double lv = log((double)(ld>0?ld:1)) * log((double)(lm>0?lm:1)) / g_tune.lmr_divisor;
+                            int lr = (int)lv;
+                            if (lr < 1) lr = 1;
+                            if (lr > ld-1) lr = ld-1;
+                            reduce = (uint8_t)lr;
+                        }
                         if (is_pv) reduce = reduce>0?reduce-1:0;
                         if (!improving) reduce += 1;
                         {
@@ -1618,6 +1724,14 @@ void search_history_clear(SearchState *s) {
     memset(s->cont_hist,    0, sizeof(s->cont_hist));
 }
 
+/* See search.h for why this exists alongside search_reset(). */
+void search_clear_ordering(SearchState *ss) {
+    memset(ss->killers,      0, sizeof(ss->killers));
+    memset(ss->mv_history,   0, sizeof(ss->mv_history));
+    memset(ss->counter_move, 0, sizeof(ss->counter_move));
+    memset(ss->cont_hist,    0, sizeof(ss->cont_hist));
+}
+
 void search_reset(SearchState *ss) {
     memset(ss->killers,      0, sizeof(ss->killers));
     memset(ss->sing_from,   -1, sizeof(ss->sing_from));
@@ -1700,6 +1814,7 @@ SearchResult search_best(Board *b, const SearchParams *p) {
 
     ss->deadline_ms = p->time_limit_ms > 0 ? now_ms() + p->time_limit_ms : 0;
     ss->time_up     = 0;
+    ss->stop_guard  = 0;   /* per-thread state is reused across searches */
     ss->stop_flag   = p->stop;  /* may be NULL */
     ss->nodes       = 0;
     ss->nodes_total = 0;
@@ -1863,24 +1978,41 @@ SearchResult search_best(Board *b, const SearchParams *p) {
             Move iter_pv[MAX_PLY]; int iter_len = 0;
             int score;
 
+            /* Raise the depth-1 guarantee for the first depth of the first
+             * PV line (see SearchState.stop_guard).  Conditions:
+             *   sd == 1   — only the search that starts from scratch owes a
+             *               move.  Lazy SMP helpers are staggered to start at
+             *               depth 2/3/5/7 and their results are discarded, so
+             *               guarding them would just make "quit" wait on a
+             *               deep search for nothing.
+             *   mpv == 0  — later MultiPV lines are extra, not the bestmove.
+             * A depth-1 search is a handful of nodes, so the cost of ignoring
+             * a stop for its duration is negligible. */
+            ss->stop_guard = (sd == 1 && depth == sd && mpv == 0);
+
             if (depth <= 2 || !prev_score_valid) {
                 score = alpha_beta(ss, b, depth, -99999, 99999, iter_pv, &iter_len, 0, -1);
             } else {
                 /* Aspiration windows */
-                int delta = 20, alpha2 = prev_score-delta, beta2 = prev_score+delta;
+                int delta = g_tune.asp_delta_init, alpha2 = prev_score-delta, beta2 = prev_score+delta;
                 int tries = 0; int exact = 0;
                 while (tries < 6) {
                     tries++;
                     iter_len = 0;
                     score = alpha_beta(ss, b, depth, alpha2, beta2, iter_pv, &iter_len, 0, -1);
                     if (ss->time_up) break;
-                    if      (score <= alpha2) { alpha2 -= delta; if(alpha2<-18000)alpha2=-18000; delta*=2; if(delta>500)delta=500; exact=0; }
-                    else if (score >= beta2)  { beta2  += delta; if(beta2>18000)beta2=18000;   delta*=2; if(delta>500)delta=500; exact=0; }
+                    if      (score <= alpha2) { alpha2 -= delta; if(alpha2<-18000)alpha2=-18000; delta*=2; if(delta>g_tune.asp_delta_max)delta=g_tune.asp_delta_max; exact=0; }
+                    else if (score >= beta2)  { beta2  += delta; if(beta2>18000)beta2=18000;   delta*=2; if(delta>g_tune.asp_delta_max)delta=g_tune.asp_delta_max; exact=0; }
                     else { exact=1; break; }
                     if (alpha2<=-18000 && beta2>=18000) break;
                 }
                 if (!exact && iter_len > 0) {}   /* use whatever we have */
             }
+
+            /* First depth is in the bag — lower the guard so a pending stop
+             * takes effect from the next depth on (the check just below,
+             * and time_up() inside the next depth's alpha_beta). */
+            ss->stop_guard = 0;
 
             if (ss->time_up && !iter_len) break;
             if (iter_len > 0) {

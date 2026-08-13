@@ -58,7 +58,7 @@ else
     PYTHON = python3
 endif
 
-.PHONY: native clean wasm bundle selfplay arena
+.PHONY: native clean wasm bundle selfplay arena ga_tune
 
 native: $(TARGET)
 
@@ -86,6 +86,18 @@ ARENA_SRCS = $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR
 arena: $(ARENA_SRCS)
 	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o arena.exe $(ARENA_SRCS) $(LDFLAGS)
 
+# Native genetic-algorithm tuner for search.c's pruning/reduction constants
+# (implementation plan Appendix F.4's "SPSA tuner", built as a GA instead —
+# see ../c/tools/ga_tune.c's header comment). Links arena.c compiled with
+# -DARENA_NO_MAIN (reused as a library ONLY for board_init/search_init,
+# OpeningPool/load_openings, and elo_diff_ci() — see that header for what
+# is and is not reused from arena.c) plus board.c/search.c/nnue.c, same
+# -DNO_TABLEBASES/-DNO_BOOK rationale as `arena`/`selfplay` above. Output:
+# ga_tune.exe, built in THIS directory — shared tool binary, not per-version.
+GA_TUNE_SRCS = $(TOOLDIR)/ga_tune.c $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
+ga_tune: $(GA_TUNE_SRCS)
+	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -DARENA_NO_MAIN -o ga_tune.exe $(GA_TUNE_SRCS) $(LDFLAGS)
+
 wasm: $(WASM_SRCS)
 	$(EMCC) $(EMFLAGS) $(WARNS) -I$(EDIR) -o $(EDIR)/zchezz_wasm.js $(WASM_SRCS)
 
@@ -93,4 +105,4 @@ bundle: wasm
 	$(PYTHON) bundle.py $(EDIR)/zchezz_wasm.html $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/nnue_weights.bin
 
 clean:
-	rm -f $(TARGET) arena.exe selfplay.exe *.o $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/zchezz_bundle.html
+	rm -f $(TARGET) arena.exe selfplay.exe ga_tune.exe *.o $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/zchezz_bundle.html

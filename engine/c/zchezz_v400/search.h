@@ -116,6 +116,57 @@ typedef struct {
     int  mpv_share_budget;
 } SearchParams;
 
+/* ── Tunable search constants (v4.00 GA tuner, tools/ga_tune.c) ──
+ * The pruning/reduction margins alpha_beta() uses were originally bare
+ * literals scattered through the function body. This struct pulls the
+ * ones worth tuning out into one place, read from g_tune at each
+ * decision point, so a search can be re-parameterised WITHOUT
+ * recompiling — the whole point being that tools/ga_tune.c can run one
+ * individual's parameter vector per thread.
+ *
+ * g_tune is _Thread_local with a static default initializer (see
+ * search.c), so every thread that never touches it (main.c's UCI
+ * thread, every selfplay.c/arena.c worker) transparently gets the
+ * SAME behavior as before this struct existed — nothing has to call
+ * search_tunables_apply() for existing tools to keep working.
+ *
+ * A tuner that DOES want a different vector per player must call
+ * search_tunables_apply() on its worker thread immediately before each
+ * search_best() call for that player (see ga_tune.c's play_one_game()
+ * equivalent) — g_tune is read on every node of the NEXT search only,
+ * there is no per-node player tag. */
+typedef struct {
+    int    razor_margin;        /* depth-1 razoring: prune if eval+margin < alpha (cp) */
+    int    rfp_mult;             /* reverse futility: margin = depth*rfp_mult - (improving?bonus:0) (cp/ply) */
+    int    rfp_improving_bonus;  /* RFP margin reduction when static eval is improving (cp) */
+    int    nmp_base;             /* null-move reduction R = nmp_base + depth/nmp_depth_div */
+    int    nmp_depth_div;        /* see above; must be >= 1 */
+    int    nmp_max_r;            /* cap on null-move reduction R */
+    int    nmp_eval_bonus_threshold; /* extra +1 to R when static_eval-beta exceeds this (cp) */
+    int    probcut_margin;       /* ProbCut: shallow-search beta = beta + margin (cp) */
+    double lmr_divisor;          /* LMR: R = ln(depth)*ln(move_count) / lmr_divisor (lower = more aggressive) */
+    int    fut_mult;             /* futility margin(depth) = fut_mult * depth (cp/ply), depth capped at 8 */
+    int    fut_improving_adj;    /* extra futility margin allowed when NOT improving (cp) */
+    int    asp_delta_init;       /* aspiration window: initial half-width around previous score (cp) */
+    int    asp_delta_max;        /* aspiration window: half-width cap after widening (cp) */
+} SearchTunables;
+
+/* Per-thread active tunable set. Declared here, DEFINED with the
+ * project's current hand-tuned defaults in search.c so a thread that
+ * never calls search_tunables_apply() behaves exactly as before this
+ * struct existed. */
+extern _Thread_local SearchTunables g_tune;
+
+/* Copy *t into this thread's g_tune. Cheap (13 scalars) — safe to call
+ * before every search_best() if a caller needs per-call tunables (see
+ * ga_tune.c). */
+void search_tunables_apply(const SearchTunables *t);
+
+/* The struct's compiled-in defaults, as a plain function (not just the
+ * g_tune initializer) so a caller can build a "baseline" vector without
+ * hardcoding the numbers a second time. */
+SearchTunables search_tunables_defaults(void);
+
 /* Syzygy tablebase probing configuration (set from UCI options) */
 extern int g_tb_probe_depth;   /* minimum depth for WDL probing */
 extern int g_tb_probe_limit;   /* maximum pieces for probing */
@@ -125,6 +176,17 @@ void search_init(void);
 
 /* Reset per-search state (killers, history, counters) */
 void search_reset(SearchState *ss);
+
+/* Hard-zero every learned ordering table (killers, history, counter-moves,
+ * continuation history).  search_reset() only AGES history (>>= 2) so that
+ * ordering knowledge carries across the moves of one game, which is what you
+ * want inside a game and NOT what you want across independent games: a
+ * self-play worker that keeps its tables would make game N's data depend on
+ * which games happened to run before it on that worker, and since games are
+ * handed out dynamically that differs run to run.  Call this between games
+ * (next to tt_clear()) to make each game self-contained.
+ * Zquoridor's equivalent (resetOrderingState()) zeroes the same tables. */
+void search_clear_ordering(SearchState *ss);
 
 /* Zera tabelas de história completamente (chamar em ucinewgame) */
 void search_history_clear(SearchState *s);

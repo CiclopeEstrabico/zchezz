@@ -227,7 +227,26 @@
  *   (--temperature, default 1.0) for the first --temp-plies plies
  *   (default 24), then T = T1 (--temp-final, default 0.05 — a tiny but
  *   nonzero temperature, effectively-but-not-exactly argmax) for the
- *   rest of the game.  Every worker owns its own RNG (xorshift64*),
+ *   rest of the game.
+ *
+ *   ARGMAX FAST PATH (--temp-argmax-eps, default 0.0): a ply whose
+ *   effective T is <= that epsilon is decided by argmax no matter what
+ *   the softmax computes, so it searches with multi_pv = 1 and skips
+ *   the sampling entirely.  Two consequences worth knowing:
+ *
+ *     --temperature 0 --temp-final 0   is the deterministic generator,
+ *     at the deterministic generator's price.  Not "argmax but still
+ *     paying for 4 root lines" — one line, one search.
+ *
+ *     A nonzero --temp-final keeps paying MultiPV for every ply after
+ *     --temp-plies, which is most of a game.  If you want a diverse
+ *     opening and a fast, deterministic remainder, set --temp-final 0
+ *     (or raise --temp-argmax-eps just above it).
+ *
+ *   This matters more than it looks under --nodes/--depth: the shared
+ *   MultiPV budget (below) divides TIME only, so with a node or depth
+ *   limit each extra PV line is a whole extra search, not a slice of
+ *   one.  Every worker owns its own RNG (xorshift64*),
  *   reseeded PER GAME from a deterministic function of (--seed,
  *   game_index) — NOT of (--seed, thread_index) — because dynamic work
  *   stealing means which thread plays game #42 is nondeterministic
@@ -434,6 +453,11 @@ static void rng_seed_for_game(Rng *r, uint64_t global_seed, uint64_t game_idx) {
 #define SP_DEFAULT_TEMP_SCALE        100.0         /* centipawns per softmax unit before applying T */
 #define SP_DEFAULT_TEMP_PLIES          24          /* search plies using T0 before switching to --temp-final */
 #define SP_DEFAULT_TEMP_FINAL        0.05          /* softmax T1 after --temp-plies (near-argmax, not exactly) */
+#define SP_DEFAULT_TEMP_ARGMAX_EPS    0.0          /* T <= this is EXACT argmax -> that ply searches multipv=1 (no MultiPV
+                                                     * cost at all).  0.0 = only a literal T of 0 takes the fast path, so
+                                                     * the shipped schedule above is bit-for-bit unchanged.  Raise it to
+                                                     * just over --temp-final (e.g. 0.06) to make every post-opening ply
+                                                     * take the fast path.  See header "ARGMAX FAST PATH". */
 #define SP_DEFAULT_MAX_PLIES          400          /* game-length safety cap (opening + search plies) -> counted as draw */
 #define SP_DEFAULT_SEED                 1          /* RNG base seed, per-game deterministic */
 #define SP_DEFAULT_SEPARATE_TT          0          /* 0 = shared TT between colors within a game (default) */
@@ -477,6 +501,7 @@ typedef struct {
     double   temp_scale;      /* cp scale divisor before softmax/T   */
     int      temp_plies;      /* plies using T0 before switching to T1 */
     double   temp_final;      /* T1 */
+    double   temp_argmax_eps; /* T <= this => exact argmax => multipv forced to 1 for that ply */
     int      max_plies;       /* hard game-length cap -> draw */
     uint64_t seed;
     int      separate_tt;     /* 0 = shared TT between colors (default) */
@@ -506,6 +531,7 @@ static void config_defaults(Config *c) {
     c->temp_scale           = SP_DEFAULT_TEMP_SCALE;
     c->temp_plies           = SP_DEFAULT_TEMP_PLIES;
     c->temp_final           = SP_DEFAULT_TEMP_FINAL;
+    c->temp_argmax_eps      = SP_DEFAULT_TEMP_ARGMAX_EPS;
     c->max_plies            = SP_DEFAULT_MAX_PLIES;
     c->seed                 = SP_DEFAULT_SEED;
     c->separate_tt          = SP_DEFAULT_SEPARATE_TT;
@@ -536,6 +562,9 @@ static void print_usage(const char *argv0) {
         "  --temp-scale CP      centipawns per softmax unit before applying T (default " SP_XSTR(SP_DEFAULT_TEMP_SCALE) ")\n"
         "  --temp-plies N       plies using T0 before switching to --temp-final (default " SP_XSTR(SP_DEFAULT_TEMP_PLIES) ")\n"
         "  --temp-final T1      softmax temperature after --temp-plies (default " SP_XSTR(SP_DEFAULT_TEMP_FINAL) ", ~argmax)\n"
+        "  --temp-argmax-eps E  T <= E means exact argmax: that ply searches multipv=1 and skips\n"
+        "                       the softmax entirely (default " SP_XSTR(SP_DEFAULT_TEMP_ARGMAX_EPS) ").  --temperature 0 --temp-final 0\n"
+        "                       therefore costs exactly what the pre-temperature generator cost.\n"
         "  --max-plies N        game-length safety cap, treated as draw (default " SP_XSTR(SP_DEFAULT_MAX_PLIES) ")\n"
         "  --seed N             RNG base seed, per-game deterministic (default " SP_XSTR(SP_DEFAULT_SEED) ")\n"
         "  --separate-tt        give each color its own TTable (default: shared within a game)\n"
@@ -579,6 +608,7 @@ static int parse_args(int argc, char **argv, Config *cfg) {
         else if (!strcmp(a, "--temp-scale"))  { NEED_ARG(); cfg->temp_scale = NEXT_DOUBLE(); }
         else if (!strcmp(a, "--temp-plies"))  { NEED_ARG(); cfg->temp_plies = NEXT_INT(); }
         else if (!strcmp(a, "--temp-final"))  { NEED_ARG(); cfg->temp_final = NEXT_DOUBLE(); }
+        else if (!strcmp(a, "--temp-argmax-eps")) { NEED_ARG(); cfg->temp_argmax_eps = NEXT_DOUBLE(); }
         else if (!strcmp(a, "--max-plies"))   { NEED_ARG(); cfg->max_plies = NEXT_INT(); }
         else if (!strcmp(a, "--seed"))        { NEED_ARG(); cfg->seed = (uint64_t)strtoull(NEXT_STR(), NULL, 10); }
         else if (!strcmp(a, "--separate-tt")) { cfg->separate_tt = 1; }
@@ -613,7 +643,11 @@ static int parse_args(int argc, char **argv, Config *cfg) {
     }
     if (!cfg->out_path[0]) { fprintf(stderr, "error: --out is required\n"); print_usage(argv[0]); return -1; }
     if (cfg->games <= 0)   { fprintf(stderr, "error: --games must be > 0\n"); return -1; }
-    if (cfg->threads <= 0) cfg->threads = 1;
+    /* 0 means autodetect, exactly as SP_DEFAULT_THREADS documents and as
+     * tests/run_selfplay_native.py's CONCURRENCY=0 relies on when it
+     * passes "--threads 0" through.  Clamping to 1 here would silently
+     * run the whole generator single-threaded. */
+    if (cfg->threads <= 0) cfg->threads = detect_cpus();
     if (cfg->multipv < 1)  cfg->multipv = 1;
     if (cfg->multipv > MAX_MULTI_PV) cfg->multipv = MAX_MULTI_PV;
     if (cfg->max_plies < 1) cfg->max_plies = 1;
@@ -985,6 +1019,14 @@ static size_t play_one_game(WorkerCtx *w, uint64_t game_idx, GameOutcome *outcom
         tt_clear(w->tt_shared);
     }
 
+    /* Same reasoning as the TT clear above, applied to the ordering tables.
+     * search_reset() (run per search) only AGES history, so without this a
+     * worker carries killers/history from whatever games it happened to play
+     * earlier.  Work is handed out dynamically, so that set differs between
+     * runs and the generated data is not reproducible even at a fixed --seed.
+     * Clearing here makes a game a pure function of (seed, game_idx). */
+    search_clear_ordering(w->ss);
+
     size_t n = 0;
     GameOutcome result = RES_DRAW;
     int ply;
@@ -1004,6 +1046,20 @@ static size_t play_one_game(WorkerCtx *w, uint64_t game_idx, GameOutcome *outcom
         } else {
             double T = ((ply - oc.n_forced) < cfg->temp_plies) ? cfg->temperature : cfg->temp_final;
 
+            /* ARGMAX FAST PATH: at T <= temp_argmax_eps the softmax below
+             * collapses to "pick the best root move", so the extra MultiPV
+             * lines are computed and then thrown away.  Ask for ONE line
+             * instead.  This is what makes --temperature 0 cost exactly
+             * what the pre-temperature generator cost, and it is not a
+             * micro-optimisation: mpv_share_budget only divides
+             * time_limit_ms (see search.c), so under --nodes or --depth
+             * every extra PV line is a whole extra search.
+             * Labels do not change: with n_pvs==1 select_by_temperature()
+             * already returns 0, and eval_cp is still the score of the
+             * search that chose the move — searched at the FULL budget
+             * now rather than a 1/multipv slice of it. */
+            int want_multipv = (T <= cfg->temp_argmax_eps) ? 1 : cfg->multipv;
+
             SearchParams sp;
             memset(&sp, 0, sizeof(sp));
             sp.start_depth   = 0;
@@ -1020,7 +1076,7 @@ static size_t play_one_game(WorkerCtx *w, uint64_t game_idx, GameOutcome *outcom
                 sp.time_limit_ms = cfg->movetime_ms;
                 sp.node_limit    = cfg->nodes;
             }
-            sp.multi_pv      = cfg->multipv;
+            sp.multi_pv      = want_multipv;
             sp.threads       = 1;             /* CRITICAL: no nested Lazy SMP — this worker
                                                 * thread IS the search thread; spawning helper
                                                 * threads from inside search_best() itself is
@@ -1047,7 +1103,7 @@ static size_t play_one_game(WorkerCtx *w, uint64_t game_idx, GameOutcome *outcom
             } else {
                 int num_cand = res.num_pvs;
                 if (num_cand < 1) num_cand = 1;
-                if (num_cand > cfg->multipv) num_cand = cfg->multipv;
+                if (num_cand > want_multipv) num_cand = want_multipv;
 
                 int stm_scores[MAX_MULTI_PV];
                 for (int i = 0; i < num_cand; i++)
@@ -1273,7 +1329,11 @@ int main(int argc, char **argv) {
     g_tt = tt_create(TT_BUCKETS * 512);
     search_init();
 
-    g_out = fopen(cfg.out_path, "ab");
+    /* sample_open_bin_append() writes/verifies the SampleFileHeader
+     * (sample.h) that records which engine build and which NNUE weight
+     * file produced every eval_cp in this file — see that function's
+     * header comment for the same-provenance-or-refuse append policy. */
+    g_out = sample_open_bin_append(cfg.out_path, SAMPLE_ENGINE_VERSION, cfg.nnue_path);
     if (!g_out) {
         fprintf(stderr, "[selfplay] failed to open output file '%s'\n", cfg.out_path);
         return 1;
@@ -1326,10 +1386,11 @@ int main(int argc, char **argv) {
     size_t tt_entries = tt_entries_for_mb(cfg.tt_mb);
     fprintf(stderr,
         "[selfplay] games=%d threads=%d movetime=%dms nodes=%ld multipv=%d "
-        "temp=%.3g->%.3g@%dplies scale=%.0fcp max_plies=%d seed=%llu "
+        "temp=%.3g->%.3g@%dplies scale=%.0fcp argmax_eps=%.3g max_plies=%d seed=%llu "
         "tt=%s(%zu entries/table, ~%.1fMB) nnue=%s out=%s pgn=%s epd=%s\n",
         cfg.games, cfg.threads, cfg.movetime_ms, cfg.nodes, cfg.multipv,
-        cfg.temperature, cfg.temp_final, cfg.temp_plies, cfg.temp_scale, cfg.max_plies,
+        cfg.temperature, cfg.temp_final, cfg.temp_plies, cfg.temp_scale,
+        cfg.temp_argmax_eps, cfg.max_plies,
         (unsigned long long)cfg.seed,
         cfg.separate_tt ? "separate" : "shared", tt_entries,
         (tt_entries * 26.0) / (1024.0 * 1024.0),

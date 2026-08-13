@@ -91,6 +91,7 @@ int syzygy_probe_wdl(const Board *b, int *wdl) {
     /* Turn: true = white */
     int is_white = (b->turn == COL_W);
 
+    { static long _dbgn=0; if ((++_dbgn % 200000)==0) { fprintf(stderr,"[dbg] probes=%ld\n", _dbgn); fflush(stderr);} }
     unsigned result = tb_probe_wdl(
         white, black, kings, queens, rooks, bishops, knights, pawns,
         (unsigned)b->hm,  /* rule50: Fathom rejects non-zero (only probe after cap/pawn) */

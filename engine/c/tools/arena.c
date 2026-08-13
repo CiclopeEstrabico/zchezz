@@ -1893,7 +1893,16 @@ void arena_run(const Config *cfg, const OpeningPool *openings, ArenaReport *out)
                 exit(1);
             }
         }
-        g_bin_out = fopen(cfg->bin_path, "ab");
+        /* sample_open_bin_append() (sample.h) writes/verifies the file's
+         * SampleFileHeader — engine build + NNUE weight-file fingerprint
+         * for every eval_cp that follows. Every player here is already
+         * net: on the SAME weight path (checked just above), so
+         * cfg->players[0].path is the one true source for this run. This
+         * is the provenance layer the --bin same-net gate's comment
+         * above points at: it is what would eventually let that gate
+         * relax from "same weight PATH string" to "same weight CONTENT"
+         * — not done in this change, the gate stays exactly as strict. */
+        g_bin_out = sample_open_bin_append(cfg->bin_path, SAMPLE_ENGINE_VERSION, cfg->players[0].path);
         if (!g_bin_out) {
             /* Hard failure, unlike --pgn's warn-and-continue: the caller
              * asked for training data, and finishing the match while
@@ -2111,7 +2120,10 @@ static int parse_args(int argc, char **argv, Config *cfg) {
     }
     if (cfg->n_players < 2) { fprintf(stderr, "error: need at least 2 --player entries\n"); print_usage(argv[0]); return -1; }
     if (cfg->games <= 0) { fprintf(stderr, "error: --games must be > 0\n"); return -1; }
-    if (cfg->threads <= 0) cfg->threads = 1;
+    /* 0 means autodetect, matching ARENA_DEFAULT_THREADS's comment and
+     * selfplay.c's identical rule — see that file for why clamping to 1
+     * here is a silent single-threaded run rather than a safe default. */
+    if (cfg->threads <= 0) cfg->threads = detect_cpus();
     if (cfg->max_plies < 1) cfg->max_plies = 1;
     if (cfg->sprt && cfg->n_players != 2) {
         fprintf(stderr, "error: --sprt requires exactly 2 --player entries\n");

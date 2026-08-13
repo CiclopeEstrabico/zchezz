@@ -185,6 +185,11 @@ DEFAULT_TEMPERATURE          = 1.0      # softmax T0 for the first --temp-plies 
 DEFAULT_TEMP_SCALE           = 100.0    # centipawns per softmax unit before applying T
 DEFAULT_TEMP_PLIES           = 24       # search plies using T0 before switching to --temp-final
 DEFAULT_TEMP_FINAL           = 0.05     # softmax T1 after --temp-plies (near-argmax, not exactly)
+DEFAULT_TEMP_ARGMAX_EPS      = 0.0      # T <= this is EXACT argmax: that ply searches multipv=1 and skips the
+                                        # softmax. 0.0 = only a literal T of 0 takes the fast path. Set
+                                        # TEMPERATURE=0 and TEMP_FINAL=0 for the deterministic generator at
+                                        # deterministic cost; raise just above TEMP_FINAL (e.g. 0.06) to get a
+                                        # diverse opening and a fast argmax remainder.
 MAX_PLIES                    = 400      # game-length safety cap -> counted as a draw
 SEED                         = 1        # RNG base seed, per-game deterministic
 DEFAULT_SEPARATE_TT          = False    # False = shared TT between colors within a game (default)
@@ -215,6 +220,7 @@ DEFAULT_SAVE_OPENING_SAMPLES = False    # False = exclude forced opening-phase p
 FORWARD_VALUE_FLAGS = {
     "--games", "--threads", "--movetime", "--nodes", "--depth", "--multipv",
     "--temperature", "--temp-scale", "--temp-plies", "--temp-final",
+    "--temp-argmax-eps",
     "--max-plies", "--seed", "--tt-mb", "--nnue", "--pgn", "--epd", "--openings",
     "--opening-mode", "--random-plies", "--book-portion",
 }
@@ -286,6 +292,7 @@ def main():
     ap.add_argument("--temp-scale", type=float, default=DEFAULT_TEMP_SCALE)
     ap.add_argument("--temp-plies", type=int, default=DEFAULT_TEMP_PLIES)
     ap.add_argument("--temp-final", type=float, default=DEFAULT_TEMP_FINAL)
+    ap.add_argument("--temp-argmax-eps", type=float, default=DEFAULT_TEMP_ARGMAX_EPS)
     ap.add_argument("--max-plies", type=int, default=MAX_PLIES)
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--separate-tt", action="store_true", default=DEFAULT_SEPARATE_TT,
@@ -359,6 +366,7 @@ def main():
         "--nodes": args.nodes, "--depth": args.depth, "--multipv": args.multipv,
         "--temperature": args.temperature, "--temp-scale": args.temp_scale,
         "--temp-plies": args.temp_plies, "--temp-final": args.temp_final,
+        "--temp-argmax-eps": args.temp_argmax_eps,
         "--max-plies": args.max_plies, "--seed": args.seed, "--tt-mb": args.tt_mb,
         "--nnue": args.nnue, "--pgn": pgn_path, "--epd": epd_path, "--openings": args.openings,
         # selfplay.exe still spells this mode "all"; translate at the boundary
