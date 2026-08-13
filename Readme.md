@@ -10,17 +10,17 @@ Written in C with a custom-trained NNUE evaluation, playable directly in the bro
 
 ### Highlights
 
-| | |
-|---|---|
-| **Version** | v4.00 — `engine/c/zchezz_v400/` |
-| **Search** | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP |
-| **Evaluation** | Custom NNUE, HalfKP-4Bucket — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
-| **Endgames** | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing) |
-| **Opening book** | Polyglot .bin format, with built-in ECO opening name recognition |
-| **Analysis** | Multi-PV (up to 5 lines), eval bar, blunder detection, eval graph |
-| **Platforms** | Windows, Linux, Android (Termux), WebAssembly (any modern browser) |
-| **Offline** | Single HTML bundle — works from `file://`, no server needed |
-| **UCI** | Full UCI protocol compliance (15 commands, 12 configurable options) |
+|                        |                                                                            |
+| ---------------------- | -------------------------------------------------------------------------- |
+| **Version**      | v4.00 —`engine/c/zchezz_v400/`                                          |
+| **Search**       | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP  |
+| **Evaluation**   | Custom NNUE, HalfKP-4Bucket — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
+| **Endgames**     | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing)                   |
+| **Opening book** | Polyglot .bin format, with built-in ECO opening name recognition           |
+| **Analysis**     | Multi-PV (up to 5 lines), eval bar, blunder detection, eval graph          |
+| **Platforms**    | Windows, Linux, Android (Termux), WebAssembly (any modern browser)         |
+| **Offline**      | Single HTML bundle — works from`file://`, no server needed              |
+| **UCI**          | Full UCI protocol compliance (15 commands, 12 configurable options)        |
 
 ### Features
 
@@ -44,15 +44,10 @@ Written in C with a custom-trained NNUE evaluation, playable directly in the bro
 
 The network is trained in PyTorch on quiet-position data: human games (lichess and
 assorted collections) evaluated by Stockfish, several generations of iterative
-self-play, and generated endgame positions. **173.5 M positions** across 19
-datasets — see `data/Data.md` for the full map.
+self-play, and generated endgame positions. **173.5 M positions.**
 
 Datasets store two columns: `cp`, the evaluation in centipawns, and `result`, the
-real game outcome (0.0 / 0.5 / 1.0). Both are White-relative. `wdl` is
-`sigmoid(cp / 320)` — a transform of `cp`, never an outcome, and never stored,
-since a stored copy can rot apart from the `cp` it came from. The training target
-is the blend `lam * result + (1 - lam) * wdl`, computed at training time with a
-per-dataset `lam`.
+real game outcome (0.0 / 0.5 / 1.0). Both are White-relative. `wdl` is`sigmoid(cp / 320)` — a transform of `cp`, never an outcome, and never stored, since a stored copy can rot apart from the `cp` it came from. The training target is the blend `lam * result + (1 - lam) * wdl`, computed at training time with a per-dataset `lam`.
 
 ### Training the network
 
@@ -60,11 +55,11 @@ Everything is set in the `CONFIGURATION` and `DATASETS` blocks at the top of
 `train/train_nnue.py`. A bare run does exactly what those blocks say; CLI flags
 only override them.
 
-| Setting | Meaning |
-|---|---|
-| `LR` | learning rate. ~1e-3 from random weights; ~1e-5 to refine a trained net |
-| `EPOCHS` | also sets the schedule: `CosineAnnealingLR(T_max=EPOCHS)`, so a small value anneals the LR quickly |
-| `DATASETS` | per dataset: `pct` (fraction used per epoch, 0.0 disables), `mode` (`lines` samples rows, `shards` samples whole files), `lam` (how much game result is blended into the target) |
+| Setting      | Meaning                                                                                                                                                                                   |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LR`       | learning rate. ~1e-3 from random weights; ~1e-5 to refine a trained net                                                                                                                   |
+| `EPOCHS`   | also sets the schedule:`CosineAnnealingLR(T_max=EPOCHS)`, so a small value anneals the LR quickly                                                                                       |
+| `DATASETS` | per dataset:`pct` (fraction used per epoch, 0.0 disables), `mode` (`lines` samples rows, `shards` samples whole files), `lam` (how much game result is blended into the target) |
 
 The target is continuous (0..1), not 0/1, so the BCE floor is **not** 0.693 — it
 is the entropy of the target distribution, measured at **0.620**. Compare
@@ -144,7 +139,6 @@ The dirty flag and the king bucket live on a **per-frame stack**, not flat field
   of a stale accumulator and is equally invalid, so it inherits the flag.
 
 If a node never calls eval (e.g. a tablebase cutoff), the flag is simply discarded on pop.
-
 
 #### NNU4 weight file format
 
@@ -316,18 +310,18 @@ The TT is a **Structure-of-Arrays** layout with separate flat arrays for hash, s
 
 ### Pruning and reductions
 
-| Technique                            | Condition                                                                                                                                             |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Technique                            | Condition                                                                                                                                            |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Null Move Pruning**          | Non-PV, not in check, has major pieces,`static_eval >= beta`. R = 3 + depth/3, capped at 6. +1 if eval margin > 200.                               |
 | **Reverse Futility Pruning**   | Non-PV, non-check, depth 2–9. Margin =`depth × 90`, reduced by 50 cp if improving.                                                               |
-| **Futility Pruning**           | Non-PV, quiet, not giving check, depth 1–4. Margin = 150–600 cp per depth level.                                                                    |
-| **Razoring**                   | Non-PV, non-check, depth 1. Drops into qsearch with a tight window.                                                                                   |
-| **ProbCut**                    | Non-PV, non-check, depth ≥ 5, beta < 18000. Shallow search (depth − 4) with β + 200 to prune captures.                                             |
-| **Late Move Reductions (LMR)** | Applied from the 4th legal quiet move at depth ≥ 3. Reduction =`log(depth) × log(moveIdx) / 1.5`, minimum 1. PV nodes reduce by one less.         |
-| **Late Move Pruning (LMP)**    | Non-check, depth ≤ 7. Quiet moves beyond a depth-scaled limit are skipped outright.                                                                  |
-| **Singular Extensions**        | Depth ≥ 7, TT hit at depth − 4. If a re-search with `score − depth×2` as beta fails low, the TT move is singular and gets a +1 depth extension. |
-| **Check Extension**            | Checks at depth 1 extend by 1 ply to avoid the horizon effect.                                                                                        |
-| **IIR**                        | At depth ≥ 4 with no TT move and not in check, depth is reduced by 1 before move generation.                                                         |
+| **Futility Pruning**           | Non-PV, quiet, not giving check, depth 1–4. Margin = 150–600 cp per depth level.                                                                   |
+| **Razoring**                   | Non-PV, non-check, depth 1. Drops into qsearch with a tight window.                                                                                  |
+| **ProbCut**                    | Non-PV, non-check, depth ≥ 5, beta < 18000. Shallow search (depth − 4) with β + 200 to prune captures.                                            |
+| **Late Move Reductions (LMR)** | Applied from the 4th legal quiet move at depth ≥ 3. Reduction =`log(depth) × log(moveIdx) / 1.5`, minimum 1. PV nodes reduce by one less.        |
+| **Late Move Pruning (LMP)**    | Non-check, depth ≤ 7. Quiet moves beyond a depth-scaled limit are skipped outright.                                                                 |
+| **Singular Extensions**        | Depth ≥ 7, TT hit at depth − 4. If a re-search with`score − depth×2` as beta fails low, the TT move is singular and gets a +1 depth extension. |
+| **Check Extension**            | Checks at depth 1 extend by 1 ply to avoid the horizon effect.                                                                                       |
+| **IIR**                        | At depth ≥ 4 with no TT move and not in check, depth is reduced by 1 before move generation.                                                        |
 
 ### Symmetric Multiprocessing (SMP)
 
@@ -359,12 +353,12 @@ SEE uses the magic bitboard attack tables directly. The attacker board is rebuil
 
 The engine uses **staged move generation** in the alpha-beta search. Instead of generating all moves upfront and sorting them, moves are generated in phases:
 
-| Stage | What's generated | Why |
-| ----- | ---------------- | --- |
-| **TT move** | Hash move only (no generation needed) | Best move from a previous search — often causes a cutoff immediately |
-| **Captures** | `board_gen_captures()` — captures + promotions only | MVV-LVA sorted, SEE-pruned; most cutoffs happen here |
-| **Quiets** | `board_gen_quiets()` — non-captures only | Scored by killer/counter/history; LMR/LMP applied |
-| **Losing captures** | Deferred bad captures (SEE < 0) | Rarely searched — only if all quiets fail to produce a cutoff |
+| Stage                     | What's generated                                       | Why                                                                   |
+| ------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------- |
+| **TT move**         | Hash move only (no generation needed)                  | Best move from a previous search — often causes a cutoff immediately |
+| **Captures**        | `board_gen_captures()` — captures + promotions only | MVV-LVA sorted, SEE-pruned; most cutoffs happen here                  |
+| **Quiets**          | `board_gen_quiets()` — non-captures only            | Scored by killer/counter/history; LMR/LMP applied                     |
+| **Losing captures** | Deferred bad captures (SEE < 0)                        | Rarely searched — only if all quiets fail to produce a cutoff        |
 
 This avoids generating quiet moves at all in positions where a capture or the TT move produces a beta cutoff, saving significant move generation overhead. Measured improvement: **+21 ELO** vs v3.09.
 
@@ -612,19 +606,19 @@ The bundled engine exposes `window.zchezzSearch(params, cb)` for programmatic us
 
 The lower-level `SearchResult` struct is 1920 bytes, mapped in JS via `DataView`:
 
-| Offset | Field | Type |
-|---|---|---|
-| 0 | `best` | `Move` (20 bytes) |
-| 20 | `score` | `int32` |
-| 24 | `depth` | `int32` |
-| 28 | *(padding)* | 4 bytes |
-| 32 | `nodes` | `int64` |
-| 40 | `tb_hits` | `int64` |
-| 48 | `pv` | 256-byte string |
-| 304 | `num_pvs` | `int32` |
-| 308 | `scores[]` | 6 × `int32` (24 bytes) |
-| 332 | `pvs[]` | 6 × 256 bytes (1536 bytes) |
-| 1868 | `bests[]` | 6 × `Move` |
+| Offset | Field         | Type                        |
+| ------ | ------------- | --------------------------- |
+| 0      | `best`      | `Move` (20 bytes)         |
+| 20     | `score`     | `int32`                   |
+| 24     | `depth`     | `int32`                   |
+| 28     | *(padding)* | 4 bytes                     |
+| 32     | `nodes`     | `int64`                   |
+| 40     | `tb_hits`   | `int64`                   |
+| 48     | `pv`        | 256-byte string             |
+| 304    | `num_pvs`   | `int32`                   |
+| 308    | `scores[]`  | 6 ×`int32` (24 bytes)    |
+| 332    | `pvs[]`     | 6 × 256 bytes (1536 bytes) |
+| 1868   | `bests[]`   | 6 ×`Move`                |
 
 ---
 
@@ -686,28 +680,17 @@ zchezz/
 └── index.html                     GitHub Pages deployment (auto-updated by build_wasm.bat)
 ```
 
-# .pgn games -> packed .bin training samples, no filtering
-python train/labeling/process_positions.py --in games.pgn --out gen7.bin --filters none
-
-# a raw self-play EPD folder -> filtered parquet dataset (the default pipeline)
-python train/labeling/process_positions.py --in data/selfplay_raw --out data/selfplay_filtered
-
-# see exactly what a bare run would do, without touching the disk
-python train/labeling/process_positions.py --show-config
-python train/labeling/process_positions.py --dry-run
-```
-
 #### `utils/`
 
 | File | What it does | Note |
-|---|---|---|
+| --- | --- | --- |
 | `cliconf.py` | Config-block + CLI plumbing shared by every Python tool, and the single copy of the shared configuration vocabulary (one name per concept, project-wide) | new |
 | `kill_ghosts.py` | Force-kills stray engine/helper processes left over from crashed runs | Termux docs moved to `engine/build/`; `OpeningBook.bin` moved to `openings/book.bin` |
 
 #### `openings/` (gitignored — large downloaded data)
 
 | Path | What it does | Renamed from |
-|---|---|---|
+| --- | --- | --- |
 | `lines/*.pgn` | Flat PGN opening-move-sequence files used to vary game starts | — |
 | `positions/*.epd` | Opening position EPDs (+ `.idx` byte-offset indexes) | `openings_positions/` |
 | `book.bin` | Polyglot opening book | `utils/OpeningBook.bin` |
