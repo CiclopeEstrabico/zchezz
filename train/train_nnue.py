@@ -25,7 +25,7 @@ WHAT TO SET, IN THE ORDER THAT MATTERS
                CosineAnnealingLR(T_max=EPOCHS), so this number also sets how
                fast the LR decays to eta_min.
   DATASETS     one entry per dataset: `pct` (fraction used per epoch), `mode`
-               ('lines' samples rows, 'shards' samples whole files), `lam`
+               ('sample-rows' or 'sample-files'), `lam`
                (how much game RESULT is blended into the target).
   BATCH_SIZE / WORKERS / DEVICE   throughput, not quality.
 
@@ -153,6 +153,12 @@ HEARTBEAT_EVERY_BATCHES = 200     # print a mid-epoch loss/MAE/ETA line every N 
 #  Data source specification + CLI parsing
 # ════════════════════════════════════════════════════════════════════════
 
+# Previous value names for `mode`, accepted so an existing config keeps working.
+# 'lines'/'shards' described the IMPLEMENTATION (read line by line vs skip whole
+# shards); the current names say what `pct` actually selects.
+_PCT_MODE_ALIASES = {"lines": "sample-rows", "shards": "sample-files"}
+
+
 @dataclass
 class SourceSpec:
     kind: Literal["parquet", "bin"]
@@ -163,20 +169,34 @@ class SourceSpec:
     train_pct: float = 1.0         # fraction of this source's positions used per epoch
     val_frac: float = 0.02         # fraction of this source held out for validation
     name: str = ""                 # label for logging; defaults to basename(path)
-    pct_mode: Literal["lines", "shards"] = "lines"
-    # How train_pct is applied (restores v3.14's MODE_SET1..15):
-    #   'lines'  — read every file, keep a random train_pct FRACTION OF ROWS.
-    #              Maximum mixing, but pays full read I/O even at train_pct=0.02.
-    #   'shards' — keep a random train_pct fraction of the FILES and skip the
-    #              rest without opening them. Far cheaper on a 1460-file
-    #              dataset; slightly coarser sampling (whole shards, so rows
-    #              inside one file are correlated). v3.14 used 'shards' for the
-    #              big chunked datasets and 'lines' for the few-huge-file ones.
-    suffix: str = ".parquet"       # only files ending with this are used (v3.14's input_suffix)
+    pct_mode: Literal["sample-rows", "sample-files"] = "sample-rows"
+    # WHAT `pct` SELECTS — rows, or whole files:
+    #   'sample-rows'   open every file, keep a random `pct` fraction OF ROWS.
+    #                   Best mixing, but pays the full read cost even at
+    #                   pct=0.02: at 2% you still read 100% of the bytes.
+    #   'sample-files'  keep a random `pct` fraction OF FILES and never open
+    #                   the rest. Far cheaper on a 1460-file dataset, but
+    #                   coarser — rows inside one file stay together, so they
+    #                   are correlated within an epoch.
+    # Rule of thumb: 'sample-files' for a dataset split into many shards,
+    # 'sample-rows' for one made of a few huge files.
+    #
+    # WARNING: 'sample-files' cannot subsample a dataset stored as ONE file.
+    # Selection is per file, and a guard keeps at least one file so a source is
+    # never starved to nothing — so a single-file dataset is read IN FULL
+    # whatever `pct` says. Shard such a dataset (~2M rows per file) or use
+    # 'sample-rows'.
+    suffix: str = ".parquet"       # only files ending with this are used
 
     def __post_init__(self) -> None:
         if not self.name:
             self.name = os.path.basename(self.path.rstrip("/\\"))
+        # Accept the previous value names so an old config keeps working.
+        self.pct_mode = _PCT_MODE_ALIASES.get(self.pct_mode, self.pct_mode)
+        if self.pct_mode not in ("sample-rows", "sample-files"):
+            raise SystemExit(
+                f"{self.name}: mode={self.pct_mode!r} is not valid. "
+                f"Use 'sample-rows' or 'sample-files'.")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -185,7 +205,7 @@ class SourceSpec:
 #  HOW IT WORKS
 #    * Set `pct` to the fraction of that dataset used per epoch.
 #      pct = 0.0  DISABLES the dataset entirely (it is not even opened).
-#    * `mode` is 'lines' or 'shards' — see SourceSpec.pct_mode.
+#    * `mode` is 'sample-rows' or 'sample-files' — see SourceSpec.pct_mode.
 #    * `col`  is a LEGACY hint, kept only for logging and for the case of a
 #      dataset with neither `cp` nor `result`. Since
 #      train/labeling/normalize_columns.py made `cp` the single stored
@@ -214,9 +234,9 @@ DATA_DIR = "data"        # root holding one folder per dataset
 #    * `pct`  fraction of that dataset used per epoch. 0.0 DISABLES it
 #             entirely (it is not even opened), which is how you take a
 #             dataset out of the mix without deleting the line.
-#    * `mode` 'lines' (sample rows, reads every file) or 'shards' (sample
-#             whole FILES, skips the rest unopened — far cheaper on a
-#             1000-file dataset, slightly coarser).
+#    * `mode` 'sample-rows' (keeps a fraction of ROWS, reads every file) or
+#             'sample-files' (keeps a fraction of FILES, never opens the
+#             rest — far cheaper on a many-shard dataset, slightly coarser).
 #    * `col`  legacy hint, used only for logging and for the case of a dataset
 #             with neither `cp` nor `result`. `cp` is the single stored
 #             primitive (CLAUDE.md rule 10), so every entry is 'cp'.
@@ -228,23 +248,23 @@ DATA_DIR = "data"        # root holding one folder per dataset
 # low quality. Add it back only with a measured reason.
 DATASETS = [
     # name                                                            pct   mode      col    lam
-    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 0.10, "mode": "shards", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
-    {"name": "lichess_cp_sfdb_filter",                            "pct": 0.10, "mode": "shards", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
-    {"name": "selfplay_cp_sf50k_res_filter_data20260410",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 16.1M  selfplay / SF 50k
-    {"name": "lichess_cp_sf_filter",                              "pct": 0.10, "mode": "shards", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
-    {"name": "selfplay_cp_zchezz_res_filter_data20260401",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  9.1M  selfplay / Zchezz itself
-    {"name": "selfplay_cp_zchezz_res_filter_data20260404",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  8.8M  selfplay / Zchezz itself
-    {"name": "selfplay_cp_sf50k_res_filter_data20260404",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  7.5M  selfplay / SF 50k
-    {"name": "selfplay_cp_sf100k_res_endgames_filter_data20260414","pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},  #  5.7M  selfplay endgames / SF 100k
-    {"name": "extraquiet_cp_sfd14_endgames_filter",               "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  2.8M  human endgames / SF depth 14
-    {"name": "selfplay-lichess_cp_sf500k_res_filter_endgames",    "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #  2.7M  selfplay endgames / SF 500k
-    {"name": "extraquiet_cp_sf60k_filter",                        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  1.5M  humans / SF 60k
-    {"name": "synthetic_endgame_cp_sf_filter_data20260414",       "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  1.2M  generated endgames / SF
-    {"name": "selfplay_cp_zchezz_res_filter_data20260410",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  850k  selfplay / Zchezz itself
-    {"name": "synthetic_endgame_cp_sf_filter_data20260413",       "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #  521k  generated endgames / SF
-    {"name": "extraquiet_cp_sfd12_endgames_filter",               "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  262k  human endgames / SF depth 12
-    {"name": "lichess_cp_sf400k_filter",                          "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  150k  lichess / SF 400k
-    {"name": "miscelaneous_cp_sf1M_res_filter",                   "pct": 1.00, "mode": "lines",  "col": "cp", "lam": 0.00},   #   34k  mixed / SF 1M
+    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
+    {"name": "lichess_cp_sfdb_filter",                            "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
+    {"name": "selfplay_cp_sf50k_res_filter_data20260410",         "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 16.1M  selfplay / SF 50k
+    {"name": "lichess_cp_sf_filter",                              "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
+    {"name": "selfplay_cp_zchezz_res_filter_data20260401",        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  9.1M  selfplay / Zchezz itself
+    {"name": "selfplay_cp_zchezz_res_filter_data20260404",        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  8.8M  selfplay / Zchezz itself
+    {"name": "selfplay_cp_sf50k_res_filter_data20260404",         "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  7.5M  selfplay / SF 50k
+    {"name": "selfplay_cp_sf100k_res_endgames_filter_data20260414","pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},  #  5.7M  selfplay endgames / SF 100k
+    {"name": "extraquiet_cp_sfd14_endgames_filter",               "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  2.8M  human endgames / SF depth 14
+    {"name": "selfplay-lichess_cp_sf500k_res_filter_endgames",    "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #  2.7M  selfplay endgames / SF 500k
+    {"name": "extraquiet_cp_sf60k_filter",                        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  1.5M  humans / SF 60k
+    {"name": "synthetic_endgame_cp_sf_filter_data20260414",       "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  1.2M  generated endgames / SF
+    {"name": "selfplay_cp_zchezz_res_filter_data20260410",        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  850k  selfplay / Zchezz itself
+    {"name": "synthetic_endgame_cp_sf_filter_data20260413",       "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #  521k  generated endgames / SF
+    {"name": "extraquiet_cp_sfd12_endgames_filter",               "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  262k  human endgames / SF depth 12
+    {"name": "lichess_cp_sf400k_filter",                          "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  150k  lichess / SF 400k
+    {"name": "miscelaneous_cp_sf1M_res_filter",                   "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #   34k  mixed / SF 1M
 ]
 
 # Packed .bin selfplay sources (Appendix F.2/F.3). Same rules; `k` is the
@@ -270,7 +290,7 @@ def sources_from_config() -> list[SourceSpec]:
             print(f"  [config] WARNING: dataset dir not found, skipping: {path}")
             continue
         out.append(SourceSpec(kind="parquet", path=path, target_col=d.get("col", "wdl"),
-                              train_pct=float(d["pct"]), pct_mode=d.get("mode", "lines"),
+                              train_pct=float(d["pct"]), pct_mode=d.get("mode", "sample-rows"),
                               lam=float(d.get("lam", 0.0)),
                               suffix=d.get("suffix", ".parquet"), name=d["name"]))
     for d in BIN_DATASETS:
@@ -576,7 +596,7 @@ def report_blend_stats() -> None:
 
 
 # ── Encoded-chunk .pt cache (restores v3.14 mixtrain.py's pt_name()/
-#    _encoded.pt caching, ~lines 597-662 of the old script) ────────────
+#    _encoded.pt caching) ──────────────────────────────────────────────
 #
 # Each parquet FILE gets one sibling cache file holding the ALREADY-
 # ENCODED HalfKP sparse tensors for every legal row in that file, plus
@@ -769,14 +789,14 @@ def iter_parquet_rows(source: SourceSpec, chunk_rows: int, split: Literal["train
         raise FileNotFoundError(
             f"No files matching '*{source.suffix}' for source {source.name!r} at {source.path!r}")
 
-    # pct_mode='shards' (v3.14's MODE_SET*): drop whole FILES up front and
+    # pct_mode='sample-files': drop whole FILES up front and
     # never open them, instead of reading every file and discarding rows.
     # On a 1460-file dataset at train_pct=0.02 this is the difference
     # between reading 18.5M rows and reading 370k. Only the train split is
     # subsampled — validation always sees its full share, otherwise the
     # val loss would be computed on a different amount of data each epoch
     # and stop being comparable across epochs.
-    if source.pct_mode == "shards" and source.train_pct < 1.0 and split == "train":
+    if source.pct_mode == "sample-files" and source.train_pct < 1.0 and split == "train":
         shard_rng = np.random.default_rng(
             np.random.SeedSequence([resample_seed, 0x5A4D5, zlib.crc32(source.name.encode())]))
         pick = shard_rng.random(len(files)) < source.train_pct
@@ -821,7 +841,7 @@ def iter_parquet_rows(source: SourceSpec, chunk_rows: int, split: Literal["train
         is_val = row_u < source.val_frac
         mask = is_val if split == "val" else ~is_val
 
-        if source.pct_mode == "lines" and source.train_pct < 1.0 and split == "train":
+        if source.pct_mode == "sample-rows" and source.train_pct < 1.0 and split == "train":
             # Independent RNG stream so this resamples per epoch without
             # perturbing the train/val split above.
             keep = resample_rng.random(n_rows) < source.train_pct

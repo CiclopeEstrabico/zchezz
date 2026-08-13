@@ -196,10 +196,14 @@ RESULTS_DIR         = r"tests\selfplay_results"  # output directory for .log/.pg
                                                    # four share this dir and only differ by extension
 
 # ── Opening Book ──────────────────────────────────────────────────────────────
-OPENING_MODE        = "book"  # "book" | "random" | "all" (book portion + random portion, split by BOOK_PORTION)
-BOOK_PORTION        = 0.97    # OPENING_MODE="all" only: fraction of iterations drawn from the book (rest random)
+OPENING_MODE        = "book"  # how each game's starting position is chosen:
+                              #   "book"        every game starts from an opening in OPENING_FOLDER
+                              #   "random"      every game starts after RANDOM_PLIES random legal plies
+                              #   "book+random" BOOK_PORTION of games from the book, the rest random
+                              # ("all" is accepted as the old name for "book+random")
+BOOK_PORTION        = 0.97    # "book+random" only: fraction of iterations drawn from the book
 OPENING_FOLDER      = r"openings\lines"  # walked recursively for .pgn/.epd files, see header docstring
-RANDOM_PLIES        = 6       # ply count for OPENING_MODE="random"/the "all" mode's random portion
+RANDOM_PLIES        = 6       # plies of random legal moves, for "random" and the random half of "book+random"
 SAME_OPENING_TWICE  = True    # True: color-swap pair reuses the SAME opening; False: advances to the next one
 COLOR_SWAP          = True    # every opening is always played from both sides (not actually optional — see main())
 
@@ -236,8 +240,9 @@ CLI = [
     ("SAVE_OPENING_IN_EPD", "--opening-in-epd",  bool,  "include forced opening plies in the EPD"),
     ("SAVE_OPENING_IN_BIN", "--opening-in-bin",  bool,  "include forced opening plies in the .bin"),
     ("RESULTS_DIR",         "--results-dir",     str,   "output directory for .log/.pgn/.epd/.bin"),
-    ("OPENING_MODE",        "--opening-mode",    str,   "book | random | all", ("book", "random", "all")),
-    ("BOOK_PORTION",        "--book-portion",    float, "'all' mode: fraction drawn from the book"),
+    ("OPENING_MODE",        "--opening-mode",    str,   "book | random | book+random",
+     ("book", "random", "book+random", "all")),
+    ("BOOK_PORTION",        "--book-portion",    float, "'book+random' mode: fraction drawn from the book"),
     ("OPENING_FOLDER",      "--openings",        str,   "folder walked recursively for .pgn/.epd openings"),
     ("RANDOM_PLIES",        "--random-plies",    int,   "ply count for the random opening mode"),
     ("SAME_OPENING_TWICE",  "--same-opening-twice", bool, "color-swap pair reuses the same opening"),
@@ -875,7 +880,7 @@ def play_game(game_id, w_engine, b_engine, opening, results_queue):
 def main():
     global completed_games, _real_total_games, start_time, _stats_lock, _file_lock, stats, h2h
     kill_leftover_engines()
-    all_openings = load_all_openings(OPENING_FOLDER) if OPENING_MODE in ["book", "all"] else OpeningIndex()
+    all_openings = load_all_openings(OPENING_FOLDER) if OPENING_MODE != "random" else OpeningIndex()
 
     # Shuffle the index once so book picks are non-repeating across the run
     all_openings.shuffle()
@@ -897,7 +902,7 @@ def main():
         raw_n_book, raw_n_rand = raw_iterations, 0
     elif OPENING_MODE == "random":
         raw_n_book, raw_n_rand = 0, raw_iterations
-    else:  # "all"
+    else:  # "book+random" (or its old name, "all")
         raw_n_book = int(raw_iterations * BOOK_PORTION)
         raw_n_rand = raw_iterations - raw_n_book
 

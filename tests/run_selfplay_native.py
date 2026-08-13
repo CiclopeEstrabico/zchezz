@@ -197,9 +197,13 @@ DEFAULT_SAVE_OPENING_IN_EPD  = True     # True = include forced opening plies in
 # Leave this non-empty: an empty value makes OPENING_MODE="book" fall back to
 # random openings without saying so.
 OPENING_FOLDER                = r"openings\lines"  # walked recursively for .pgn/.epd files
-DEFAULT_OPENING_MODE         = "book"   # "book" | "random" | "all"
+DEFAULT_OPENING_MODE         = "book"   # how each game's starting position is chosen:
+                                        #   "book"        from an opening in OPENING_FOLDER
+                                        #   "random"      after RANDOM_PLIES random legal plies
+                                        #   "book+random" BOOK_PORTION from the book, rest random
+                                        # ("all" accepted as the old name for "book+random")
 DEFAULT_RANDOM_PLIES         = 6        # random legal opening plies (random/all modes)
-DEFAULT_BOOK_PORTION         = 0.97     # "all" mode: fraction of (paired) games using a book opening
+DEFAULT_BOOK_PORTION         = 0.97     # "book+random" only: fraction of (paired) games using a book opening
 DEFAULT_SAME_OPENING_TWICE   = True     # True = pair games (2k,2k+1) on the same opening (variance reduction)
 DEFAULT_SAVE_OPENING_SAMPLES = False    # False = exclude forced opening-phase plies from the .bin
 # ═══════════════════════════════════════════════════════════════════
@@ -301,7 +305,9 @@ def main():
                                  action="store_false")
     ap.add_argument("--openings", default=OPENING_FOLDER,
                      help="opening corpus: a .pgn/.epd file OR a directory walked recursively")
-    ap.add_argument("--opening-mode", choices=("book", "random", "all"), default=DEFAULT_OPENING_MODE)
+    ap.add_argument("--opening-mode", choices=("book", "random", "book+random", "all"),
+                    default=DEFAULT_OPENING_MODE,
+                    help="book | random | book+random ('all' = old name for book+random)")
     ap.add_argument("--random-plies", type=int, default=DEFAULT_RANDOM_PLIES)
     ap.add_argument("--book-portion", type=float, default=DEFAULT_BOOK_PORTION)
     same_group = ap.add_mutually_exclusive_group()
@@ -355,7 +361,11 @@ def main():
         "--temp-plies": args.temp_plies, "--temp-final": args.temp_final,
         "--max-plies": args.max_plies, "--seed": args.seed, "--tt-mb": args.tt_mb,
         "--nnue": args.nnue, "--pgn": pgn_path, "--epd": epd_path, "--openings": args.openings,
-        "--opening-mode": args.opening_mode, "--random-plies": args.random_plies,
+        # selfplay.exe still spells this mode "all"; translate at the boundary
+        # so the Python side can use the self-describing name.
+        "--opening-mode": ("all" if args.opening_mode == "book+random"
+                           else args.opening_mode),
+        "--random-plies": args.random_plies,
         "--book-portion": args.book_portion,
     }
     for flag, val in arg_map.items():
