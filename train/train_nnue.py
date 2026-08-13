@@ -126,7 +126,7 @@ import dataset
 #  used when a flag is not passed on the command line.
 # ════════════════════════════════════════════════════════════════════════
 CKPT_DIR = "checkpoints/v400"     # where the per-epoch .pt checkpoints are written
-DATASET_NAME = "halfkp4b_v400"    # tag stored in the checkpoint; resume only continues if this matches
+DATASET_NAME = "halfkp4b_v400_ft"  # tag stored in the checkpoint; resume only continues if this matches
 EPOCHS = 200                      # number of training epochs. This also sets the LR
                                    # schedule: CosineAnnealingLR(T_max=EPOCHS), so a small
                                    # EPOCHS anneals the learning rate to eta_min quickly.
@@ -228,10 +228,10 @@ DATA_DIR = "data"        # root holding one folder per dataset
 # low quality. Add it back only with a measured reason.
 DATASETS = [
     # name                                                            pct   mode      col    lam
-    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
-    {"name": "lichess_cp_sfdb_filter",                            "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
+    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 0.10, "mode": "shards", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
+    {"name": "lichess_cp_sfdb_filter",                            "pct": 0.10, "mode": "shards", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
     {"name": "selfplay_cp_sf50k_res_filter_data20260410",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 16.1M  selfplay / SF 50k
-    {"name": "lichess_cp_sf_filter",                              "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
+    {"name": "lichess_cp_sf_filter",                              "pct": 0.10, "mode": "shards", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
     {"name": "selfplay_cp_zchezz_res_filter_data20260401",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  9.1M  selfplay / Zchezz itself
     {"name": "selfplay_cp_zchezz_res_filter_data20260404",        "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  8.8M  selfplay / Zchezz itself
     {"name": "selfplay_cp_sf50k_res_filter_data20260404",         "pct": 1.00, "mode": "shards", "col": "cp", "lam": 0.00},   #  7.5M  selfplay / SF 50k

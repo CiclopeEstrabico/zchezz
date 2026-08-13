@@ -42,48 +42,37 @@ Written in C with a custom-trained NNUE evaluation, playable directly in the bro
 
 ## Training data
 
-The network was trained on filtered data for quiet positions using PyTorch.
+The network is trained in PyTorch on quiet-position data: human games (lichess and
+assorted collections) evaluated by Stockfish, several generations of iterative
+self-play, and generated endgame positions. **173.5 M positions** across 19
+datasets — see `data/Data.md` for the full map.
 
-**First generation**
-
-- Lichess dataset
-- Ethereal dataset
-- Quiet dataset
-- Self-play from old versions with traditional evaluation function
-
-**New generation**
-
-- 4 generations of iterative self-play
-- Generated endgame positions
-
-Datasets store two columns: `cp`, the evaluation in centipawns, and `result`,
-the real game outcome (0.0 / 0.5 / 1.0). Both are White-relative. `wdl` is
+Datasets store two columns: `cp`, the evaluation in centipawns, and `result`, the
+real game outcome (0.0 / 0.5 / 1.0). Both are White-relative. `wdl` is
 `sigmoid(cp / 320)` — a transform of `cp`, never an outcome, and never stored,
-because a stored copy can rot apart from the `cp` it came from. The training
-target is the blend `lam * result + (1 - lam) * wdl`, computed at training time
-with a per-dataset `lam`. See `data/Data.md` for the full corpus map.
+since a stored copy can rot apart from the `cp` it came from. The training target
+is the blend `lam * result + (1 - lam) * wdl`, computed at training time with a
+per-dataset `lam`.
 
 ### Training the network
 
 Everything is set in the `CONFIGURATION` and `DATASETS` blocks at the top of
-`train/train_nnue.py`. A bare run does exactly what those blocks say; the CLI
-flags only override them.
+`train/train_nnue.py`. A bare run does exactly what those blocks say; CLI flags
+only override them.
 
 | Setting | Meaning |
 |---|---|
 | `LR` | learning rate. ~1e-3 from random weights; ~1e-5 to refine a trained net |
-| `EPOCHS` | also sets the schedule: `CosineAnnealingLR(T_max=EPOCHS)`, so a small value anneals the LR to `eta_min` quickly |
-| `DATASETS` | one entry per dataset: `pct` (fraction used per epoch, 0.0 disables), `mode` (`lines` samples rows, `shards` samples whole files), `lam` (how much game result is blended into the target) |
+| `EPOCHS` | also sets the schedule: `CosineAnnealingLR(T_max=EPOCHS)`, so a small value anneals the LR quickly |
+| `DATASETS` | per dataset: `pct` (fraction used per epoch, 0.0 disables), `mode` (`lines` samples rows, `shards` samples whole files), `lam` (how much game result is blended into the target) |
 
-**Reading the loss.** The target is continuous (0..1), not 0/1, so the BCE floor
-is *not* 0.693 — it is the mean entropy of the target distribution, measured at
-**0.620**. Compare `val_loss` against that number, and read `val_mae` as the
-direct error in wdl units. Judging a run against 0.693 makes a nearly converged
-network look like a failure.
+The target is continuous (0..1), not 0/1, so the BCE floor is **not** 0.693 — it
+is the entropy of the target distribution, measured at **0.620**. Compare
+`val_loss` against that; `val_mae` is the direct error in wdl units.
 
 ```bash
 python train/train_nnue.py                 # trains what the config block says
-python train/train_nnue.py --show-config   # prints the resolved settings, runs nothing
+python train/train_nnue.py --show-config   # prints resolved settings, runs nothing
 python train/export_nnu4.py                # checkpoint -> NNU4 weight file
 ```
 
@@ -177,18 +166,6 @@ architecture and refuses mismatched files with an explicit message. `OUT_SCALE =
 is the same cp↔WDL temperature used by `to_wdl()` in training — changing one without the
 other silently rescales the whole eval.
 
-### Input encoding
-
-**Half-Mirror (HM) features.** The 768 HM features are a dual-perspective encoding of the piece map. For each piece on the board, two feature indices are activated simultaneously — one in the White accumulator and one in the Black accumulator — using mirrored square coordinates so that each side always sees its own pieces as "friendly" without needing to rotate the network. The index formula is `color_offset × 64 + piece_type × 64 + square`, where the square is flipped vertically for the opponent's perspective.
-
-**Dual accumulator.** Two independent 256-element `int16_t` accumulators are maintained in parallel at all times: `_acc_buf_w` (White's perspective) and `_acc_buf_b` (Black's perspective). Both are kept live and updated in lockstep on every make/unmake. At eval time the side-to-move accumulator is selected, the extra-feature delta is added, and the result is passed through ClippedReLU — there is no perspective swap or extra copy.
-
-**Accumulator stack.** The accumulators are managed as a stack of depth 512 (`NN_ACC_DEPTH`), mirroring the board's undo stack. `nnue_push` copies the top-of-stack accumulators and applies an incremental update for the move being made; `nnue_pop` simply decrements the stack pointer. This means unmake is O(1) — no recomputation needed.
-
-**Endgame features.** The 31 appended features give the network explicit positional context that bitboard features cannot easily encode. Piece counts are normalized by their theoretical maximum (8 pawns, 2 knights/bishops/rooks, 1 queen). Total material sums all piece values and normalizes by 78 (the maximum possible). Passed pawn features are binary per-file flags computed with a forward-ray check: a pawn is passed if no opposing pawn blocks or guards any square on its promotion path on the same or adjacent files. King–king Chebyshev distance is the max of the rank and file differences, normalized to [0, 1]. One constant-1 bias feature is also included.
-
----
-
 ### int16 / int8 Quantization
 
 All weights and activations are converted from float32 to fixed-point integers using two scale factors, QA and QB, which must match exactly between the training script, the converter, and the C engine.
@@ -204,13 +181,13 @@ OUT_SCALE = 320 / (QB × QB) = 320 / 4096 ≈ 0.078
 
 **L2 (int8 weights).** Each L2 weight is multiplied by QB and rounded to `int8_t`. The L2 bias is pre-scaled by `QA × QB = 16320` and stored as `int32_t`. The L2 dot product accumulates `uint8_t` activations × `int8_t` weights into `int32_t`, then right-shifts by SHIFT (8) to bring the scale back to QB before ClippedReLU. The output is clamped to `[0, QB] = [0, 64]`.
 
-**L3 (float32).** L3 weights are quantized to `int8_t` (scale QB) in the NNU4 file but the final dot product `L3W · relu2` uses the integer weights scaled back to float for the final scalar. The bias is kept as `float32` — this 64→1 dot product is not a bottleneck and avoiding one more integer scale conversion keeps the output path simple and exact.
+**L3 (float32).** L3 weights are quantized to `int8_t` (scale QB) in the NNU4 file but the final dot product `L3W · relu2` uses the integer weights scaled back to float for the final scalar. The bias is kept as `float32` — this 32→1 dot product is not a bottleneck and avoiding one more integer scale conversion keeps the output path simple and exact.
 
 **Scale chain summary:**
 
 ```
 Input features:  binary {0, 1}
-After L1 matmul: int32 scale QA  →  ClippedReLU  →  uint8 [0, 255]
+After L1 matmul: int32 scale QA  →  SCReLU  →  uint8 [0, 255]
 After L2 matmul: int32 scale QA×QB  →  >>SHIFT  →  ClippedReLU  →  uint8 [0, QB]
 After L3 matmul: float32  ×  OUT_SCALE  →  ×320 cp
 ```
@@ -237,53 +214,21 @@ The sigmoid is baked into the training target (WDL labels in [0, 1]). The networ
 
 ### Quantization-Aware Training (QAT)
 
-Standard post-training quantization clips and rounds weights after training has converged, which degrades accuracy because the float32 network was free to use values outside the integer representable range. QAT instead simulates quantization *during* training so the network learns to work within the integer constraints before weights are ever committed to integers.
+Post-training quantization degrades accuracy because a float32 network is free to
+use values outside the integer range. QAT simulates quantization *during* training,
+so the network learns to work within the integer constraints.
 
-#### ClippedReLU
-
-The standard `ReLU` after L1 and L2 is replaced with `ClippedReLU(clip=1.0)`:
-
-```
-ClippedReLU(x) = clamp(x, 0.0, 1.0)
-```
-
-During training the output stays in `[0, 1.0]` (float). In the engine, `1.0` maps exactly to `QA = 255`, giving a clean bijection between the training float range and the `uint8` inference range with no rounding artifacts at the boundary.
-
-#### Fake-quantization (Straight-Through Estimator)
-
-In every forward pass the weights are temporarily snapped to their nearest representable integer value and then divided back to float, simulating the rounding that will happen at deployment:
-
-```python
-# int16 simulation (L1 weights, scale QA=255)
-limit = 32767 / QA                         # ≈ 128.5
-x_clamped = clamp(w, −limit, +limit)
-x_quantized = round(x_clamped × QA) / QA  # snapped to integer grid
-```
-
-For the backward pass, gradients flow through the rounding as if it were an identity (the Straight-Through Estimator). This lets the optimizer push weights toward better integer-grid values without losing the gradient signal. The same STE trick is applied to L1, L2, and L3 weights, their biases, and the post-ReLU activations.
-
-#### Hard weight clamping
-
-After every optimizer step, all weights are hard-clamped to their representable float range:
-
-```python
-lim1 = 32767 / QA  # ≈ 128.5  — L1 weight max
-lim2 = 127   / QB  # ≈ 1.984  — L2/L3 weight max
-```
-
-Without this, the Adam optimizer's momentum can carry weights outside the clamp on the *next* step, wasting gradient budget on values that will always be clipped. Hard clamping after every step keeps the weights on the integer grid and prevents drift.
-
-#### Training schedule (mixtrain3)
-
-Since the network starts from float32 weights trained by `mixtrain2`, a warm-up schedule is used to ease the transition to integer constraints:
-
-| Epoch range | QAT state         | What's quantized                            |
-| ----------- | ----------------- | ------------------------------------------- |
-| 0 – 14     | float32 (warm-up) | Nothing — lets ClippedReLU stabilize       |
-| 15 – 39    | QAT-L1            | L1 weights/bias + L1 activation             |
-| 40 +        | QAT-ALL           | L1 (int16) + L2/L3 (int8) + all activations |
-
----
+- **ClippedReLU** replaces ReLU after L1 and L2: `clamp(x, 0.0, 1.0)`. Training
+  output stays in `[0, 1]`, and `1.0` maps exactly to `QA = 255` — a clean
+  bijection with the `uint8` inference range, no boundary rounding artifacts.
+- **Fake quantization.** Each forward pass snaps weights to the nearest
+  representable integer and divides back to float; the backward pass treats the
+  rounding as identity (Straight-Through Estimator), so the optimizer can push
+  weights toward better integer-grid values without losing gradient signal.
+  Applied to L1, L2 and L3 weights, biases, and post-ReLU activations.
+- **Hard clamping** after every optimizer step, to `32767/QA ≈ 128.5` (L1) and
+  `127/QB ≈ 1.984` (L2/L3). Without it, Adam's momentum carries weights past the
+  clamp on the next step, spending gradient budget on values that will be clipped.
 
 ### Performance optimisations
 
@@ -291,33 +236,11 @@ Since the network starts from float32 weights trained by `mixtrain2`, a warm-up 
 
 **Cached extra-feature delta.** The 31 endgame feature rows are folded into a per-stack-slot precomputed delta (`_ext_buf`). At eval time no board scan or 31-row multiply is needed — the precomputed delta is simply added to the HM accumulator before ClippedReLU.
 
-**Transposed L2 weights.** The L2 weight matrix is stored in `[in × out]` order (`_nnL2W_T[i × 64 + o]`) so the fused outer-product loop keeps `acc2[64]` hot in registers while streaming `relu1[256]` sequentially. GCC `-O3` auto-vectorises this with AVX/SSE on native and Emscripten with `-msimd128` on WASM.
+**Output-major L2 weights.** The L2 weight matrix is stored as `[NN_L2_OUT][NN_L2_IN]` = `[32][1024]`, row-major per output, so each output neuron's 1024 weights are contiguous and the `maddubs` kernel streams `relu1[1024]` once per output. GCC `-O3` auto-vectorises with AVX2 on native and Emscripten `-msimd128` on WASM.
 
 **Sparsity skip.** The L2 forward pass short-circuits any input where `relu1[i] == 0`, exploiting the natural post-ReLU sparsity of the first hidden layer.
 
 **In-memory WASM loader.** Weights are loaded directly from an `ArrayBuffer` into the WASM heap via `nnue_load_from_mem`, avoiding any filesystem dependency in the browser. The L2 transpose is applied during loading, so the runtime weight layout is always optimal regardless of how the NNU4 file was produced.
-
----
-
-### Weight file format — NNU4
-
-```
-Offset  Size    Content
-──────────────────────────────────────────────────────────────────────────────────
-0        4 B    Magic: "NNU4"
-4        4 B    Epoch (uint32, little-endian)
-8       20 B    5 × uint32 dims: [L1_IN, L1_OUT, L2_IN, L2_OUT, L3_IN]
-                              = [799,    256,     256,    64,     64  ]
-28      16 B    4 × float32 scale params: [QA=255, QB=64, SHIFT=8, OUT_SCALE≈0.078]
-44       …      L1W_T  int16[799 × 256]   weights × QA,  transposed (row = feature)
-                L1B    int32[256]          bias × QA
-                L2W_T  int8[256 × 64]     weights × QB,  transposed (row = feature)
-                L2B    int32[64]           bias × QA × QB
-                L3W    int8[64]            weights × QB
-                L3B    float32[1]          bias (kept float for simplicity)
-```
-
-Total file size: **~426 KB** (vs ~860 KB for the float32 NNU2 format — 50% reduction).
 
 ---
 
@@ -740,7 +663,7 @@ zchezz/
 │   ├── build/                      SHARED build system (Makefile, build_*.bat/.sh, bundle.py, pieces/)
 │   ├── c/tools/                    SHARED native tool sources (selfplay.c, arena.c/.h) — current-API-only, see § engine/c/tools/ below
 │   ├── c/zchezz_v314/              Frozen, deployed engine (~2900 Elo) — playable in the browser today
-│   └── c/zchezz_v400/              Engine source code (current — NNUE not yet trained)
+│   └── c/zchezz_v400/              Engine source code
 │       ├── board.c / board.h          Board state, bitboards, magic attacks, make/unmake
 │       ├── search.c / search.h        Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
 │       ├── nnue.c / nnue.h            NNUE inference, incremental accumulator, NNU4 loader
@@ -763,200 +686,6 @@ zchezz/
 └── index.html                     GitHub Pages deployment (auto-updated by build_wasm.bat)
 ```
 
-### How every tool is configured
-
-Each Python tool opens with a `CONFIGURATION` block: one documented constant per
-setting, with units. **That block is the interface** — running the tool with no
-arguments does exactly what it says, and editing a constant is the normal way to
-change a run. Every constant is also a command-line flag that overrides it for
-scripted or one-off use, and the flag's default IS the constant, so the help text
-can never disagree with the file:
-
-```bash
-python tests/run_tournament.py                        # runs the config block
-python tests/run_tournament.py --games 200 --movetime 100
-python tests/run_tournament.py --show-config          # print settings, run nothing
-python tests/run_tournament.py --help                 # every flag + its real default
-```
-
-`--show-config` exists everywhere and is the cheap way to check a long job before
-starting it. Booleans always come in pairs (`--pgn` / `--no-pgn`), so a constant
-that defaults to on can still be turned off from the command line. List settings
-are repeatable flags, and repeating one replaces the configured list rather than
-appending to it.
-
-The plumbing lives in `utils/cliconf.py`, which also holds the **shared
-configuration vocabulary**: one name per concept across all tools (`GAMES`,
-`CONCURRENCY`, `MOVETIME_MS`, `MAX_PLIES`, `SEED`, `WORKERS`, `RESULTS_DIR`,
-`SAVE_PGN`/`SAVE_EPD`/`SAVE_BIN`, `DRY_RUN`, `ONLY`, …). A `DEFAULT_` prefix marks
-a knob specific to one tool. The vocabulary is defined in that one file and not
-copied into the individual scripts.
-
-### Naming convention — `tests/`, `train/` and `utils/`
-
-`tests/` and `train/` are flat and version-less — one toolset tracking the current
-engine, unlike `engine/c/zchezz_vXXX/`, which is version-suffixed and duplicated per
-release. Neither ever gets a `vNNN` subfolder. `utils/` holds helpers used by both
-(`cliconf.py`) plus standalone maintenance scripts (`kill_ghosts.py`).
-
-**`tests/`:**
-
-| Prefix | Meaning |
-|---|---|
-| `test_*` | Pass/fail correctness check |
-| `bench_*` | Performance measurement |
-| `run_*` | Harness that plays games or runs a long job |
-| `debug_*` | One-off scratch script (gitignored, not part of the suite) |
-| bare noun (e.g. `elo_calc.py`) | Shared library, or a fixture generator (e.g. `make_random_nnu4.py`) |
-
-**`train/`:**
-
-| Form | Meaning |
-|---|---|
-| bare noun (`encoding`, `model`, `dataset`) | Library module, imported by other scripts |
-| `verb_noun` (`train_nnue`, `export_nnu4`, `check_parity`) | Executable script |
-
-### Complete file inventory
-
-Tables below cover every tracked (and gitignore-documented) file in the repo, organized
-by directory, with what changed name in the reorg noted in the third column.
-
-#### Root
-
-| File | What it does | Renamed from |
-|---|---|---|
-| `README.md` | This file — full project documentation | `Readme.md` |
-| `CLAUDE.md` | Development guide and project rules (versioning, testing phases, build layout) | — |
-| `index.html` | GitHub Pages deployment — the WASM bundle served at the public play URL | — |
-| `.gitignore` | Ignore rules for build artifacts, generated data, and large downloaded assets | — |
-| `docs/folder_structure.md` | Regenerated repo-tree reference | `FolderStructure.md` |
-| `docs/v400_implementation_plan.md` | v4.00 HalfKP-4Bucket architecture design doc (Portuguese) | `zchezz_v400_implementation_plan.md` |
-
-#### `engine/build/` — shared build system (new directory)
-
-| File | What it does | Renamed from |
-|---|---|---|
-| `Makefile` | `ENGINE=vXXX`-selectable targets: `native`, `wasm`, `bundle`, `selfplay`, `arena` | new (was one `Makefile` per version folder) |
-| `build_native.bat` | Windows native compile script, `ENGINE` selectable via arg (default v400) | per-version `compile_zchezz.bat` |
-| `build_wasm.bat` | Windows WASM compile + HTML bundle script | per-version `build_wasm.bat` |
-| `build_termux.sh` | Automated Termux build/test suite | `utils/RunZchezzTermux.sh` |
-| `termux.md` | Termux quick-reference command cheat sheet | `utils/RunZchezzTermux.md` |
-| `bundle.py` | Merges compiled WASM + JS + NNUE weights + SVG pieces into one self-contained HTML file | per-version `bundle.py` |
-| `pieces/cburnett/*.svg` | CBurnett piece set (default) used by `bundle.py` | `/pieces/cburnett/*.svg` (repo root) |
-| `pieces/merida/*.svg` | Merida piece set used by `bundle.py` | `/pieces/merida/*.svg` (repo root) |
-| `pieces/staunty/*.svg` | Staunty piece set used by `bundle.py` | `/pieces/staunty/*.svg` (repo root) |
-| `build_selfplay.bat` | Windows one-click compile of `selfplay.exe`, `ENGINE` selectable via arg (default v400) | new |
-| `arena.exe`, `selfplay.exe` | Compiled shared tool binaries (gitignored, built here rather than per-version) | — |
-
-#### `engine/c/tools/` — shared native tool sources (new directory)
-
-Tracks the **current** engine API only (`TTable`, `NnueNet`, `SearchParams` fields that
-only exist in the newest `zchezz_vXXX/`) — will not compile against `zchezz_v314`. That's
-by design, not a defect to fix: `arena.c` compares engine **versions** for the SPRT
-promotion gate (CLAUDE.md rule 9) by driving an already-built `zchezz.exe` as an external
-UCI subprocess (its `uci:` player kind) — it never links an old version's `.c` files
-directly; only same-version, in-process comparisons (two weight files, or two search-constant
-sets, against the *current* engine) use the fast in-process `net:` player kind. `selfplay.c`
-always generates data from the current engine — there is no cross-version self-play
-requirement. So when a new engine version is cut, these tool sources are **not** copied
-into it — they keep compiling as-is against whichever folder `ENGINE=` points at. This
-directory has no separate README; the rationale lives here. It has been
-merged here and the file deleted.
-
-| File | What it does | Renamed from |
-|---|---|---|
-| `selfplay.c` | N-games-in-parallel self-play data generator; emits packed `.bin` and PGN | `zchezz_v400/tools/selfplay_native.c` |
-| `arena.c` / `arena.h` | A/B match harness — the SPRT strength gate for the bootstrap loop; embeddable as a library for a future SPSA tuner | new |
-| `opening_pool.c` / `opening_pool.h` | Shared SAN↔Move conversion and byte-offset opening-book indexing, used by both `arena.c` and `selfplay.c` | factored out of `arena.c` |
-| `sample.h` | Packed `.bin` training-sample record format (`eval_cp`, `game_result`, STM-relative — see § Training-data naming convention in `CLAUDE.md`). 75-byte record: `board[64]` (mailbox, Zchezz encoding, 0=empty, WP=9..BK=22, sq 0=a8), `stm` (uint8), `rule50` (uint8), `castling` (uint8), `ep_file` (uint8, 0..7, 8=none), `eval_cp` (int16, STM-relative, from the search that chose the move), `game_result` (int8, +1/0/-1 from the mover's POV, filled in on a second pass once the game result is known), `move_played` (uint16), `_pad` (uint16) | new |
-| `test_sprt_synthetic.c` | Throwaway synthetic SPRT/Elo math check (no games played, hand-picked W/D/L); links `arena.c` compiled with `-DARENA_NO_MAIN` | new |
-
-#### `engine/c/zchezz_v314/` — frozen, deployed engine
-
-Unmodified since release, per the "never modify a released version" rule — no renames.
-Holds its own `Makefile`, `compile_zchezz.bat`, `build_wasm.bat`, `bundle.py`, and
-`zchezz_bundle.html` (the shared build system in `engine/build/` only targets v400+).
-
-#### `engine/c/zchezz_v400/` — current engine (core only)
-
-Engine core sources plus the browser UI source. Build files, tool sources, and piece
-SVGs live in the shared directories above. There is one README for the whole project,
-not one per version folder.
-
-| File | What it does |
-|---|---|
-| `board.c` / `board.h` | Board state, magic-bitboard attacks, Zobrist hashing, make/unmake |
-| `search.c` / `search.h` | Alpha-beta, staged move generation, TT, LMR/NMP/pruning, Lazy SMP |
-| `nnue.c` / `nnue.h` | HalfKP-4Bucket NNUE inference, incremental accumulator, NNU4 loader |
-| `main.c` | UCI protocol handling, entry point, SMP thread spawn, perft |
-| `syzygy.c` / `syzygy.h` | Zchezz ↔ Fathom tablebase integration layer |
-| `tbprobe.c` / `tbprobe.h`, `tbchess.c`, `tbconfig.h` | Vendored Fathom tablebase library |
-| `book.c` / `book.h` | Polyglot opening book support |
-| `poly_keys.h`, `stdendian.h` | Polyglot Zobrist key table; endian-portable helpers |
-| `nnue_weights.bin` | Trained weights, NNU4 format (~2.6 MB) — **not present**, network untrained |
-| `zchezz_wasm.html` | Browser UI source (bundled into `index.html` by `build_wasm.bat`) |
-| `zchezz.exe` | Native Windows binary (gitignored, built per-version) |
-
-#### `tests/` — flat, version-less test & match scripts
-
-| File | What it does | Renamed from |
-|---|---|---|
-| `test_perft.py` | Perft correctness across 37 positions (make/unmake edge cases) | `perft_test.py` |
-| `test_uci.py` | Minimal UCI handshake/search smoke test | new |
-| `test_uci_extended.py` | Comprehensive UCI suite — handshake, TB, book, MultiPV, threads, options | `uci_test.py` |
-| `test_browser.py` | Automated browser tests for the HTML/WASM UI (clocks, MultiPV, analysis) | `browser_test.py` |
-| `test_browser_html.py` | Static HTML feature validation (no browser needed) | `test_html_features.py` |
-| `test_book.py` | Validates opening book entries for legality and quality | `validate_book.py` |
-| `test_move_parsing.py` | Verifies the engine applies long move sequences correctly | new |
-| `test_nnue_accumulator.py` | Drives a verify-instrumented build to prove the incremental accumulator matches a from-scratch rebuild | new |
-| `test_selfplay_bin.py` | Sanity-checks `.bin` shards produced by `engine/c/tools/selfplay.c` | new |
-| `test_two_nets.c` | Proves `NnueNet` is truly per-instance — two nets loaded and evaluated independently in one process | new |
-| `run_tournament.py` | Universal tournament runner — H2H, anchor-ELO estimation, EPD suites, all via one config block | `tournament.py` |
-| `run_tournament_quick.py` | Quick 200-game H2H regression test between two engine versions | `tournament_quick.py` |
-| `run_selfplay.py` | Python/UCI-subprocess self-play data generator (PGN + Stockfish relabel pipeline) | `selfplay.py` |
-| `run_suite.py` | EPD test suite runner (WAC, STS, etc.) | `suite_runner.py` |
-| `run_arena.py` | Driver/wrapper for the native A/B arena (`engine/c/tools/arena.c`) | new |
-| `run_selfplay_native.py` | Driver/wrapper for the native selfplay generator (`engine/c/tools/selfplay.c`), analogous to `run_arena.py` | new |
-| `bench_nps.py` | 50-position NPS + eval sanity benchmark across game phases | — |
-| `elo_calc.py` | Shared ELO difference + confidence-interval library (trinomial and pentanomial models) | — |
-| `compare_suites.py` | Compares EPD suite results between engine versions | `suite_compare.py` |
-| `make_random_nnu4.py` | Emits a valid random-weight NNU4 binary fixture for structural testing before any training data exists | new |
-| `debug_game.py` | One-off scratch script — finds which move desyncs the engine (gitignored) | `test_debug_game.py` |
-| `debug_engine.py` | One-off scratch script — diagnoses the native UCI engine layer by layer (gitignored) | new |
-| `suites/` | EPD test suite data (gitignored) | root `test_suites/` |
-
-#### `train/` — flat, version-less NNUE training code
-
-| File | What it does | Renamed from |
-|---|---|---|
-| `encoding.py` | Single source of truth (Python side) for HalfKP-4Bucket feature encoding | new |
-| `model.py` | HalfKP-4Bucket model definition, SCReLU/ClippedReLU, QAT fake-quantization | new |
-| `dataset.py` | Packed `.bin` self-play dataset reader (numpy structured dtype, memmap, multi-shard) | new |
-| `train_nnue.py` | Training script (QAT, NNU4) for HalfKP-4Bucket | `mixtrain.py` |
-| `export_nnu4.py` | Converts a training checkpoint into the NNU4 binary weight format | `convert_nnue.py` |
-| `check_parity.py` | Cross-checks the Python feature encoder against the compiled `nnue.c` (17,720 cases) | new |
-
-L1 is a sparse `nn.EmbeddingBag`, not `nn.Linear` — with only ~30 active features out of
-2560, a dense `(N, 2560)` uint8 tensor would waste over 98% of the matmul and cost 2.5 KB
-per position, which doesn't scale to millions of positions. Direct consequence: `L1W` is
-stored `[2560, 512]` (feature-major) in the NNU4 file — the `EmbeddingBag` weight is
-already in that layout, so `export_nnu4.py` does **not** transpose it, unlike an earlier
-plan that assumed a `[512, 2560]` dense layer.
-
-#### `train/labeling/` — Stockfish-based dataset labeling (was `sf_analyze/`)
-
-| File | What it does | Renamed from |
-|---|---|---|
-| `process_positions.py` | **The one position pipe.** Reads `.epd`, `.pgn`, `.bin` or `.parquet`; optionally filters (quiet, endgame, score cap, dedup) and re-evaluates with Stockfish; writes any combination of `parquet`/`bin`/`epd`/`pgn`. With `--filters none` it is a plain format converter | replaces `label_selfplay.py`, `label_quiet_*.py`, `label_all_quiet.py`, `filter_wdl.py` |
-| `generate_endgames.py` | Generates synthetic endgame positions by material group and labels them with Stockfish | `endgame_generator.py` |
-| `normalize_columns.py` | Rewrites a dataset to the canonical `fen`/`cp`/`result` column shape | new |
-| `merge_datasets.py` | Joins two extractions of the SAME positions (one with `cp`, one with `result`) into one dataset, hash-joined on FEN with FEN re-verification | new |
-| `fix_column_names.py` | Renames or drops a mislabelled column after re-verifying, per file, that the column really holds what the name claims | new |
-
-**Format conversion is not a separate tool.** Anything that reads positions and
-writes positions goes through `process_positions.py`:
-
-```bash
 # .pgn games -> packed .bin training samples, no filtering
 python train/labeling/process_positions.py --in games.pgn --out gen7.bin --filters none
 
