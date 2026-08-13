@@ -22,12 +22,7 @@ tests/tb_test_*.txt
 tests/tournament_v*.py
 tests/tournament_*_sf_*.py
 
-# Deprecated test scripts (all replaced by tournament.py + tournament_quick.py)
-tests/quick_match.py
-tests/concurrent_match.py
-tests/parallel_match.py
-tests/tournament_h2h.py
-tests/tournament_compare.py
+# Deprecated test scripts (all replaced by run_tournament.py + run_tournament_quick.py)
 tests/tournament_elo.py
 tests/tournament_complete.py
 tests/tb_tournament.py
@@ -52,8 +47,8 @@ tablebases/
 
 # Large data files (download separately)
 endgames/
-openings_positions/
 openings/
+tests/suites/
 
 # Utility binary files
 utils/OpeningBook.bin
@@ -84,4 +79,26 @@ Thumbs.db
 # IDE
 .vscode/
 *.code-workspace
-engine/c/zchezz_v313/
+
+# Regenerable test fixtures (tests/make_random_nnu4.py)
+tests/random_nnu4*.bin
+tests/*.selfplay.bin
+
+# Shared build system (engine/build/) — binaries, wasm build outputs, and
+# generated bundle. *.exe/*.wasm/*.o above already cover the binaries;
+# these are the non-binary outputs (arena.exe/selfplay.exe land here now,
+# not inside engine/c/zchezz_vXXX/ — see README.md, "engine/c/tools/").
+engine/build/zchezz_bundle.html
+engine/build/*.json
+engine/build/*.pgn
+
+# Arena/selfplay verification-run outputs (arena_run*.json,
+# arena_nodes*.json, test_pgn_out.pgn, etc.) left inside an engine version
+# folder by ad-hoc runs — these are never committed release artifacts.
+engine/c/*/arena_run*.json
+engine/c/*/arena_nodes*.json
+engine/c/*/*.pgn
+engine/c/*/test_pgn_out.pgn
+
+# run_arena.py's ref: git-worktree build cache (fully reproducible from git)
+.arena_build_cache/

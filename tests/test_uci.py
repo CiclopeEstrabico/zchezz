@@ -1,10 +1,19 @@
 import subprocess, time, re, sys, os
 
-os.chdir(r"c:\Zchezz")
+# ═══════════════ CONFIGURATION ═══════════════
+# No CLI in this script — edit these constants directly.
+REPO_DIR = r"c:\Zchezz"                          # working directory the engine is launched from
+ENGINE_EXE = r"engine\c\zchezz_v400\zchezz.exe"  # engine binary under test (relative to REPO_DIR)
+NNUE_WEIGHTS = r"C:\Zchezz\engine\c\zchezz_v400\nnue_weights.bin"  # NNUE weights loaded via setoption
+SYZYGY_PATH = r"C:\Zchezz\tablebases"   # Syzygy tablebase directory loaded via setoption
+READYOK_TIMEOUT_S = 5   # seconds to wait for "readyok"/"uciok" before giving up
+# ═══════════════════════════════════════════
+
+os.chdir(REPO_DIR)
 
 print("=== UCI ENGINE TEST ===\n")
 
-exe = r"engine\c\zchezz_v305\zchezz.exe"
+exe = ENGINE_EXE
 p = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
 def send(cmd):
@@ -12,7 +21,7 @@ def send(cmd):
     p.stdin.write(cmd + "\n")
     p.stdin.flush()
 
-def read_until(keyword, timeout=5):
+def read_until(keyword, timeout=READYOK_TIMEOUT_S):
     lines = []
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -47,8 +56,8 @@ print()
 
 # Test 2: Set options + isready
 print("--- TEST 2: Set NNUE + Syzygy + isready ---")
-send(r"setoption name NNUE value C:\Zchezz\engine\c\zchezz_v305\nnue_weights.bin")
-send(r"setoption name SyzygyPath value C:\Zchezz\tablebases")
+send(f"setoption name NNUE value {NNUE_WEIGHTS}")
+send(f"setoption name SyzygyPath value {SYZYGY_PATH}")
 send("isready")
 lines = read_until("readyok", timeout=10)
 check("readyok received", any("readyok" in l for l in lines))
@@ -144,7 +153,7 @@ def send2(cmd):
     p2.stdin.write(cmd + "\n")
     p2.stdin.flush()
 
-def read2(keyword, timeout=5):
+def read2(keyword, timeout=READYOK_TIMEOUT_S):
     lines = []
     t0 = time.time()
     while time.time() - t0 < timeout:

@@ -184,24 +184,21 @@ function doSearch(fen,moves,depth,id,timeLimitMs,multiPv){{
 
     html = read(html_path)
 
-    # Detect version from the current folder name and inject into HTML
-    folder  = os.path.basename(os.path.abspath('.'))
+    # Detect version from the engine folder name (dirname of html_path, NOT
+    # cwd — bundle.py is shared and invoked from engine/build/, so cwd is no
+    # longer the version directory) and inject into HTML.
+    folder  = os.path.basename(os.path.dirname(os.path.abspath(html_path)))
     version = parse_version(folder)
     html    = html.replace('__VERSION__', version)
     print(f'[bundle] Version: {folder!r} -> {version!r}')
 
-    # Helper to load SVG piece sets from pieces/ directories.
-    # NOTE (frozen version — see CLAUDE.md rule 2): pieces/ moved from
-    # <repo>/pieces/ to <repo>/engine/build/pieces/ when the build system
-    # was restructured to be shared across engine versions. This is the
-    # ONLY change made to this file for that restructuring — v3.14 stays
-    # otherwise untouched and self-contained. Old path from here (up 3 to
-    # repo root, then pieces/) is now up 2 (to engine/) then build/pieces/.
+    # Helper to load SVG piece sets from engine/build/pieces/ (sibling of
+    # this script — pieces/ moved out of the repo root so it can be shared
+    # across engine versions instead of being looked up relative to the
+    # per-version html_path).
     def load_svg_set(dirname):
         """Load SVG pieces from a directory with wK.svg, bK.svg, etc."""
-        base = os.path.join(os.path.dirname(os.path.abspath(html_path)), '..', '..', 'build', 'pieces', dirname)
-        if not os.path.isdir(base):
-            base = os.path.join(os.path.dirname(os.path.abspath('.')), 'pieces', dirname)
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pieces', dirname)
         if not os.path.isdir(base):
             return {}
         fmap = {'wK':'K','wQ':'Q','wR':'R','wB':'B','wN':'N','wP':'P',
@@ -270,7 +267,10 @@ function doSearch(fen,moves,depth,id,timeLimitMs,multiPv){{
     replacement = constants + bundled + "\n\nstartEngine();"
     html = html[:m_start.start()] + replacement + html[m_end.end():]
 
-    out = 'zchezz_bundle.html'
+    # Written next to html_path (the engine version dir), not cwd — bundle.py
+    # is shared and invoked from engine/build/, so cwd is no longer the
+    # version directory.
+    out = os.path.join(os.path.dirname(os.path.abspath(html_path)), 'zchezz_bundle.html')
     with open(out, 'w', encoding='utf-8') as f:
         f.write(html)
 

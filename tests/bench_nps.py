@@ -2,7 +2,8 @@
 """
 bench_nps.py — 50-position NPS + Eval benchmark across game phases
 ===================================================================
-Tests v313-TB, v313-noTB, and v312 on 50 positions spanning:
+Tests HEAD-TB, HEAD-noTB and BASE (set in the CONFIGURATION block) on 50
+positions spanning:
   - Openings (10 positions)
   - Middlegames (15 positions)
   - Endgames 6pc (5 positions)
@@ -13,7 +14,7 @@ Tests v313-TB, v313-noTB, and v312 on 50 positions spanning:
   - Insufficient material (3 positions)
 
 Checks:
-  - NPS drop vs v312 baseline (fail if >5% drop)
+  - NPS drop vs the BASE_VERSION baseline (fail if > NPS_FAIL_PCT)
   - Eval sanity (startpos ~0cp, won positions >+300cp, drawn ~0cp)
   - TB vs noTB node counts (should be equal or fewer for TB)
 """
@@ -26,10 +27,32 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIGURATION
+#
+#  tests/ is flat and version-less (CLAUDE.md § Naming Convention): it always
+#  tracks the CURRENT engine. So the version numbers live here, ONCE, and every
+#  dict key, lookup and printed label below is derived from them.
+#
+#  This block exists because the literals had already drifted: ENGINES held
+#  v400/v314 while the summary code still looked up "v313-TB"/"v312", so the
+#  benchmark ran all 50 positions and then died with a KeyError on the very
+#  last step. A version name written twice is a version name that will rot.
+# ═══════════════════════════════════════════════════════════════════════════════
+HEAD_VERSION = "v400"    # engine under test
+BASE_VERSION = "v314"    # previous stable, the NPS baseline to compare against
+NPS_FAIL_PCT = 5.0       # fail the run if head is more than this % slower than
+                         # base on opening+middlegame (endgame NPS is NOT
+                         # comparable: TB prunes subtrees, so fewer nodes are
+                         # searched and measured NPS drops legitimately)
+
+HEAD_TB   = f"{HEAD_VERSION}-TB"
+HEAD_NOTB = f"{HEAD_VERSION}-noTB"
+
 ENGINES = {
-    "v313-TB":   (os.path.join(BASE_DIR, "engine", "c", "zchezz_v313", "zchezz_v313_clean.exe"), True),
-    "v313-noTB": (os.path.join(BASE_DIR, "engine", "c", "zchezz_v313", "zchezz_v313_clean.exe"), False),
-    "v312":      (os.path.join(BASE_DIR, "engine", "c", "zchezz_v312", "zchezz.exe"), False),
+    HEAD_TB:      (os.path.join(BASE_DIR, "engine", "c", f"zchezz_{HEAD_VERSION}", "zchezz.exe"), True),
+    HEAD_NOTB:    (os.path.join(BASE_DIR, "engine", "c", f"zchezz_{HEAD_VERSION}", "zchezz.exe"), False),
+    BASE_VERSION: (os.path.join(BASE_DIR, "engine", "c", f"zchezz_{BASE_VERSION}", "zchezz.exe"), False),
 }
 
 TB_PATH = os.path.join(BASE_DIR, "tablebases")
@@ -156,7 +179,7 @@ def check_eval(score_str, expected):
 def main():
     print(f"\n{'='*80}")
     print(f"  PHASE 2.5: 50-Position NPS + Eval Benchmark")
-    print(f"  Engines: v313-TB, v313-noTB, v312")
+    print(f"  Engines: v400-TB, v400-noTB, v314")
     print(f"  Positions: {len(POSITIONS)}")
     print(f"{'='*80}\n")
 
@@ -172,23 +195,23 @@ def main():
             row[ename] = (nps, score, nodes, tbhits)
             nps_totals[ename].append(nps)  # always append to keep index alignment
             
-            # Check eval sanity for v313-TB
-            if ename == "v313-TB" and expected:
+            # Check eval sanity for the head engine (TB build)
+            if ename == HEAD_TB and expected:
                 eval_check = check_eval(score, expected)
                 if "❌" in eval_check:
                     fails.append(f"{label}: expected {expected}, got {score}")
         
         # Print comparison
-        tb_nps, tb_score, tb_nodes, tb_tbhits = row.get("v313-TB", (0,"?",0,0))
-        notb_nps, notb_score, notb_nodes, _ = row.get("v313-noTB", (0,"?",0,0))
-        v312_nps, v312_score, v312_nodes, _ = row.get("v312", (0,"?",0,0))
+        tb_nps, tb_score, tb_nodes, tb_tbhits = row.get(HEAD_TB, (0,"?",0,0))
+        notb_nps, notb_score, notb_nodes, _ = row.get(HEAD_NOTB, (0,"?",0,0))
+        v314_nps, v314_score, v314_nodes, _ = row.get(BASE_VERSION, (0,"?",0,0))
         
         eval_ok = check_eval(tb_score, expected) if expected else "—"
-        nps_vs_312 = f"{(tb_nps/v312_nps - 1)*100:+.1f}%" if v312_nps > 0 else "N/A"
+        nps_vs_314 = f"{(tb_nps/v314_nps - 1)*100:+.1f}%" if v314_nps > 0 else "N/A"
         
         print(f"         TB: {tb_nps:>10,} nps  score={tb_score:>8s}  nodes={tb_nodes:>10,}  tbhits={tb_tbhits:>6,}  eval={eval_ok}")
         print(f"       noTB: {notb_nps:>10,} nps  score={notb_score:>8s}  nodes={notb_nodes:>10,}")
-        print(f"       v312: {v312_nps:>10,} nps  score={v312_score:>8s}  nodes={v312_nodes:>10,}  Δvs312={nps_vs_312}")
+        print(f"       v314: {v314_nps:>10,} nps  score={v314_score:>8s}  nodes={v314_nodes:>10,}  Δvs314={nps_vs_314}")
         print()
     
     # Summary by phase (NPS is only meaningful where node counts are comparable)
@@ -211,19 +234,20 @@ def main():
                 print(f"    {ename:12s}: avg NPS = {avg:>12,.0f} ({len(vals)} pos)")
     
     # NPS comparison — only Opening+Middle is meaningful (identical node counts)
-    om_tb = [nps_totals["v313-TB"][i] for i in range(min(25, len(nps_totals["v313-TB"]))) if nps_totals["v313-TB"][i] > 0]
-    om_v312 = [nps_totals["v312"][i] for i in range(min(25, len(nps_totals["v312"]))) if nps_totals["v312"][i] > 0]
-    om_notb = [nps_totals["v313-noTB"][i] for i in range(min(25, len(nps_totals["v313-noTB"]))) if nps_totals["v313-noTB"][i] > 0]
-    
-    if om_v312:
+    om_tb = [nps_totals[HEAD_TB][i] for i in range(min(25, len(nps_totals[HEAD_TB]))) if nps_totals[HEAD_TB][i] > 0]
+    om_base = [nps_totals[BASE_VERSION][i] for i in range(min(25, len(nps_totals[BASE_VERSION]))) if nps_totals[BASE_VERSION][i] > 0]
+    om_notb = [nps_totals[HEAD_NOTB][i] for i in range(min(25, len(nps_totals[HEAD_NOTB]))) if nps_totals[HEAD_NOTB][i] > 0]
+
+    if om_base:
         tb_avg = sum(om_tb) / len(om_tb)
-        v312_avg = sum(om_v312) / len(om_v312)
+        base_avg = sum(om_base) / len(om_base)
         notb_avg = sum(om_notb) / len(om_notb)
-        tb_delta = (tb_avg / v312_avg - 1) * 100
-        notb_delta = (notb_avg / v312_avg - 1) * 100
-        print(f"\n  NPS vs v312 (Opening+Middle only — fair comparison):")
-        print(f"    v313-TB   vs v312: {tb_delta:+.1f}% {'✅ PASS' if abs(tb_delta) <= 5 else '❌ FAIL >5%'}")
-        print(f"    v313-noTB vs v312: {notb_delta:+.1f}% {'✅ PASS' if abs(notb_delta) <= 5 else '❌ FAIL >5%'}")
+        tb_delta = (tb_avg / base_avg - 1) * 100
+        notb_delta = (notb_avg / base_avg - 1) * 100
+        ok = lambda d: '✅ PASS' if d >= -NPS_FAIL_PCT else f'❌ FAIL >{NPS_FAIL_PCT:g}%'
+        print(f"\n  NPS vs {BASE_VERSION} (Opening+Middle only — fair comparison):")
+        print(f"    {HEAD_TB:<11s} vs {BASE_VERSION}: {tb_delta:+.1f}% {ok(tb_delta)}")
+        print(f"    {HEAD_NOTB:<11s} vs {BASE_VERSION}: {notb_delta:+.1f}% {ok(notb_delta)}")
         print(f"  (Endgame NPS is not comparable: TB prunes subtrees → fewer nodes → lower measured NPS)")
     
     if fails:
