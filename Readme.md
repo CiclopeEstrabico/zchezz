@@ -655,8 +655,8 @@ See `docs/folder_structure.md` for the full, regularly-regenerated tree. Summary
 zchezz/
 ├── engine/
 │   ├── build/                      SHARED build system (Makefile, build_*.bat/.sh, bundle.py, pieces/)
-│   ├── c/tools/                    SHARED native tool sources (selfplay.c, arena.c/.h) — current-API-only, see § engine/c/tools/ below
-│   ├── c/zchezz_v314/              Frozen, deployed engine (~2900 Elo) — playable in the browser today
+│   ├── c/tools/                    SHARED native tool sources (selfplay.c, arena.c/.h) — current-API-only
+│   ├── c/zchezz_v314/              Previous released engine (~2900 Elo, measured) — the build index.html still serves
 │   └── c/zchezz_v400/              Engine source code
 │       ├── board.c / board.h          Board state, bitboards, magic attacks, make/unmake
 │       ├── search.c / search.h        Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
@@ -664,14 +664,13 @@ zchezz/
 │       ├── main.c                     UCI protocol, entry point, SMP threads, perft
 │       ├── syzygy.c / syzygy.h + tbprobe.*/tbchess.c/tbconfig.h   Fathom tablebase integration
 │       ├── book.c / book.h            Polyglot opening book support
-│       ├── nnue_weights.bin           Trained weights (NNU4 format, ~2.6 MB) — not present until trained
-│       ├── zchezz_wasm.html           Browser UI source
-│       └── README.md                  v4.00 architecture status (Portuguese)
+│       ├── nnue_weights.bin           Trained weights (NNU4 format, ~2.6 MB)
+│       └── zchezz_wasm.html           Browser UI source
 │
-├── tests/                         Test & match scripts (flat, version-less — see naming convention below)
+├── tests/                         Test & match scripts (flat, version-less)
 ├── train/                         NNUE training code (PyTorch, flat, version-less)
-│   └── labeling/                  Stockfish-based dataset labeling scripts (was sf_analyze/)
-├── utils/                         kill_ghosts.py only (Termux files moved to engine/build/)
+│   └── labeling/                  Stockfish-based dataset labeling scripts
+├── utils/                         Shared by tests/ and train/ — cliconf.py (config-block + CLI plumbing), kill_ghosts.py
 ├── docs/                          folder_structure.md, v400_implementation_plan.md
 ├── openings/                      Opening books (gitignored) — lines/ (PGN), positions/ (EPD), book.bin
 ├── endgames/                      Endgame EPD test positions (gitignored)
@@ -680,30 +679,9 @@ zchezz/
 └── index.html                     GitHub Pages deployment (auto-updated by build_wasm.bat)
 ```
 
-#### `utils/`
-
-| File | What it does | Note |
-| --- | --- | --- |
-| `cliconf.py` | Config-block + CLI plumbing shared by every Python tool, and the single copy of the shared configuration vocabulary (one name per concept, project-wide) | new |
-| `kill_ghosts.py` | Force-kills stray engine/helper processes left over from crashed runs | Termux docs moved to `engine/build/`; `OpeningBook.bin` moved to `openings/book.bin` |
-
-#### `openings/` (gitignored — large downloaded data)
-
-| Path | What it does | Renamed from |
-| --- | --- | --- |
-| `lines/*.pgn` | Flat PGN opening-move-sequence files used to vary game starts | — |
-| `positions/*.epd` | Opening position EPDs (+ `.idx` byte-offset indexes) | `openings_positions/` |
-| `book.bin` | Polyglot opening book | `utils/OpeningBook.bin` |
-
-#### `endgames/` (gitignored)
-
-EPD endgame test positions (`endgames.epd`, `endgames_cdb95105.epd` + `.idx` indexes) used by Phase 4 of the regression suite.
-
-#### Other gitignored directories
-
-`tablebases/` — Syzygy 3-4-5 piece tables (~938 MB). `data/`, `checkpoints/` — training
-data and model checkpoints. `test_suites/` (the old root-level EPD suite folder) was
-removed; its contents live at `tests/suites/` now.
+`openings/`, `endgames/`, `tablebases/`, `data/` and `checkpoints/` are gitignored: you
+supply them yourself. See § Syzygy tablebases for where to get the tables, and the
+`DATASETS` block in `train/train_nnue.py` for where training data is expected.
 
 ---
 
