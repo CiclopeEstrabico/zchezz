@@ -1,6 +1,6 @@
 # Zchezz ♟️
 
-**A chess engine, entirely vibe coded with Claude.**
+**A 2900 ELO chess engine, entirely vibe coded with Claude.**
 
 Written in C with a custom-trained NNUE evaluation, playable directly in the browser via WebAssembly. Compiles to a single self-contained HTML file that works fully offline — no server, no install, no dependencies. Just double-click and play.
 
@@ -678,10 +678,6 @@ zchezz/
 ├── data/ · checkpoints/           Training data and checkpoints (gitignored)
 └── index.html                     GitHub Pages deployment (auto-updated by build_wasm.bat)
 ```
-
-`openings/`, `endgames/`, `tablebases/`, `data/` and `checkpoints/` are gitignored: you
-supply them yourself. See § Syzygy tablebases for where to get the tables, and the
-`DATASETS` block in `train/train_nnue.py` for where training data is expected.
 
 ---
 
