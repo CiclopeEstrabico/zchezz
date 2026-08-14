@@ -170,7 +170,7 @@
  * what these constants say; --show-config prints the resolved values
  * and exits without touching disk or playing a game.
  * ═══════════════════════════════════════════════════════════════════ */
-#define GA_DEFAULT_NET_PATH          "../c/zchezz_v400/nnue_weights.bin"  /* shared weights, both sides */
+#define GA_DEFAULT_NET_PATH          "../c/zchezz_v401/nnue_weights.bin"  /* shared weights, both sides */
 #define GA_DEFAULT_OPENINGS_PATH     "../../openings/lines/2moves_LT_1000.pgn" /* "" = startpos only (see arena.c's OPENINGS warning — do not run empty for real tuning, rule 9 */
 #define GA_DEFAULT_OPENING_PLIES     4          /* PGN opening file: plies replayed per game before recording FEN */
 #define GA_DEFAULT_POP_SIZE          32         /* individuals per generation */

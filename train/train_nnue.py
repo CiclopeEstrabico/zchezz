@@ -130,7 +130,7 @@ DATASET_NAME = "halfkp4b_v400_ft"  # tag stored in the checkpoint; resume only c
 EPOCHS = 200                      # number of training epochs. This also sets the LR
                                    # schedule: CosineAnnealingLR(T_max=EPOCHS), so a small
                                    # EPOCHS anneals the learning rate to eta_min quickly.
-BATCH_SIZE = 16384                # minibatch size (positions per optimizer step)
+BATCH_SIZE = 65536                 # minibatch size (positions per optimizer step)
 MAX_POSITIONS_CHUNK = 1_100_000   # positions buffered before a chunk is handed to the DataLoader
 LR = 1e-3                         # fresh-start learning rate. ~1e-3 suits random weights;
                                    # ~1e-5 suits refining an already-trained net.

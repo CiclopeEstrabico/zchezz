@@ -26,7 +26,7 @@
 # Makefile itself is unchanged either way.
 
 # ═══════════════════════════════════════════════ CONFIGURATION ═══
-ENGINE  ?= v400        # engine/c/zchezz_$(ENGINE)/ — default = newest version
+ENGINE  ?= v401        # engine/c/zchezz_$(ENGINE)/ — default = newest version
 # ════════════════════════════════════════════════════════════════
 
 EDIR    = ../c/zchezz_$(ENGINE)
