@@ -166,7 +166,7 @@ import argparse
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(REPO_ROOT, ".arena_build_cache")
-ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v400")
+ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v401")
 BUILD_DIR = os.path.join(REPO_ROOT, "engine", "build")
 TOOLS_DIR = os.path.join(REPO_ROOT, "engine", "c", "tools")
 # arena.exe is a SHARED tool binary, built in engine/build/ (NOT inside
@@ -413,15 +413,16 @@ def resolve_player_spec(spec):
 # since this fallback only serves resolve_head()'s HEAD-in-place case).
 ARENA_BUILD_CMD_TEMPLATE = [
     "gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavxvnni", "-mavx2",
-    "-I" + os.path.join("..", "c", "zchezz_v400"), "-DNO_TABLEBASES", "-DNO_BOOK",
+    "-I" + os.path.join("..", "c", "zchezz_v401"), "-DNO_TABLEBASES", "-DNO_BOOK",
     "-Wno-unused-variable", "-Wno-unused-but-set-variable",
     "-Wno-maybe-uninitialized", "-Wno-misleading-indentation",
     "-Wno-sign-compare", "-Wno-unused-function", "-Wno-parentheses",
     "-o", "arena.exe",
     os.path.join("..", "c", "tools", "arena.c"),
-    os.path.join("..", "c", "zchezz_v400", "board.c"),
-    os.path.join("..", "c", "zchezz_v400", "search.c"),
-    os.path.join("..", "c", "zchezz_v400", "nnue.c"),
+    os.path.join("..", "c", "tools", "opening_pool.c"),
+    os.path.join("..", "c", "zchezz_v401", "board.c"),
+    os.path.join("..", "c", "zchezz_v401", "search.c"),
+    os.path.join("..", "c", "zchezz_v401", "nnue.c"),
     "-static", "-lm", "-pthread",
 ]
 
@@ -433,7 +434,7 @@ def ensure_arena_built():
             return True
         log("arena.exe is older than engine/c/tools/arena.c — rebuilding")
 
-    for make_cmd in (["make", "ENGINE=v400", "arena"], ["mingw32-make", "ENGINE=v400", "arena"]):
+    for make_cmd in (["make", "ENGINE=v401", "arena"], ["mingw32-make", "ENGINE=v401", "arena"]):
         try:
             r = run(make_cmd, cwd=BUILD_DIR)
         except FileNotFoundError:

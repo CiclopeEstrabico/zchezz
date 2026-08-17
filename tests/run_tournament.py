@@ -173,10 +173,16 @@ MOVETIME_MS             = 200    # ms per move (Phase 9-2: ELO calibration 200ms
 # and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
-        # Engine under test. The previous stable baseline is v3.14; see
-        # run_tournament_quick.py for the v4.00-vs-v3.14 head-to-head preset.
-        "path":     r"engine\c\zchezz_v400\zchezz.exe",
-        "label":    "Zchezz-v400",
+        "path":     r"engine\c\zchezz_v401\zchezz.exe",
+        "label":    "Zchezz-v401",
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME_MS,
+        "tc_inc":   0,
+        "options":  {"SyzygyPath": r"C:\Zchezz\tablebases"},
+    },
+    {
+        "path":     r"engine\c\zchezz_v314\zchezz.exe",
+        "label":    "Zchezz-v314",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
@@ -196,12 +202,21 @@ ANCHORS = [
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
     },
+    {
+        "path":    r"engine\stockfish\stockfish.exe",
+        "label":   "SF-3000",
+        "elo":     3000,
+        "options": {"UCI_LimitStrength": "true", "UCI_Elo": "3000"},
+        "tc_mode":  "movetime",
+        "tc_value": MOVETIME_MS,
+        "tc_inc":   0,
+    },
 ]
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
-GAMES_VS_EACH_ANCHOR = 100   # 100 openings × 2 colors = 200 games (Phase 9-2)
-GAMES_SELF_PLAY      = 200   # openings per MY_ENGINE×MY_ENGINE pair (×2 with COLOR_SWAP)
-SELF_PLAY            = False  # engines in MY_ENGINES play each other?
+GAMES_VS_EACH_ANCHOR = 100   # 100 openings × 2 colors = 200 games per anchor
+GAMES_SELF_PLAY      = 100   # 100 openings × 2 colors = 200 games
+SELF_PLAY            = True  # engines in MY_ENGINES play each other?
 COLOR_SWAP           = True   # repeat each opening with colors reversed?
 
 CONCURRENCY          = 14      # number of concurrent games (= worker threads)
@@ -214,12 +229,12 @@ OPENING_FOLDER       = r"openings\lines"  # folder with .epd and/or .pgn files
 
 # Filter: load ONLY these files from OPENING_FOLDER. Empty list = load ALL.
 # Example: ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
-OPENING_FILES        = []
+OPENING_FILES        = ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
 
 # ── Output ────────────────────────────────────────────────────────────────────
 # SAVE_PGN / SAVE_EPD / SAVE_BIN are independent and additive (CLAUDE.md rule 9
 # — "either or all of them", never mutually exclusive). Turn on any subset.
-SAVE_PGN             = False  # save all games as PGN
+SAVE_PGN             = True   # save all games as PGN
 SAVE_EPD             = True   # save positions + eval as EPD (for NNUE training).
                                # Safe for ANY engine mix — each row's c2 opcode
                                # already records the ACTUAL mover's label

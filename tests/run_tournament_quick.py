@@ -91,7 +91,7 @@ import numpy as np
 from dataset import SAMPLE_DTYPE
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION — v3.14 vs v3.13 regression test (1T, 200 games)
+#  CONFIGURATION — v4.01 vs v4.00 sanity check (1T, 100 games)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,19 +99,19 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Time Control ──────────────────────────────────────────────────────────────
 MOVETIME_MS             = 100    # ms per move
 
-# ── v4.00 1T vs v3.14 1T regression (v3.13 removed from repo, see NOTE above) ──
+# ── v4.01 (trained) vs v4.00 (placeholder weights) sanity check ───────────────
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v400\zchezz.exe",
-        "label":    "v400-1T",
+        "path":     r"engine\c\zchezz_v401\zchezz.exe",
+        "label":    "v401-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
         "options":  {"Threads": "1"},
     },
     {
-        "path":     r"engine\c\zchezz_v314\zchezz.exe",
-        "label":    "v314-1T",
+        "path":     r"engine\c\zchezz_v400\zchezz.exe",
+        "label":    "v400-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
@@ -124,7 +124,7 @@ ANCHORS = []
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
 GAMES_VS_EACH_ANCHOR = 0
-GAMES_SELF_PLAY      = 300    # 300 openings x 2 colors = 600 games
+GAMES_SELF_PLAY      = 50     # 50 openings x 2 colors = 100 games (sanity check)
 SELF_PLAY            = True
 COLOR_SWAP           = True
 
