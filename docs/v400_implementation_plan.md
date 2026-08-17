@@ -6,7 +6,8 @@ _Last updated: 2026-08-16_
 
 ## OBJETIVO
 
-Elevar o Zchezz de ~2700 ELO (v3.14) para >3000 ELO via:
+Elevar o Zchezz de ~2900 ELO (v3.14) para >3000 ELO via:
+
 - **HalfKP-4Bucket**: dependencia de rei nas features -> maior expressividade
 - **L1 = 512** (era 256), **SCReLU** (era ClippedReLU), **concat [stm|opp]**
 - **Eliminacao dos 31 extras** -> 100% incremental, sem merge no hot path
@@ -26,6 +27,7 @@ Pesos: NNU4 (~2.6 MB), quantizacao QA=255 QB=64
 ```
 
 **Invariantes criticos:**
+
 - Concat sempre `[stm, opp]` — trocar invalida toda a rede
 - Mudanca de bucket do rei invalida a perspectiva inteira (flag dirty por frame do stack)
 - TT probe ANTES de TB probe
@@ -37,6 +39,7 @@ Pesos: NNU4 (~2.6 MB), quantizacao QA=255 QB=64
 ## O QUE FOI FEITO (HISTORICO RESUMIDO)
 
 ### Infraestrutura (CONCLUIDO)
+
 - **TTable/NnueNet por instancia** (`create`/`destroy`), sem arrays globais
 - **`tools/arena.c`** + `run_arena.py`: dois tipos de player (`net:`/`uci:`), TT isolada por lado, SPRT real
 - **`tools/selfplay.c`** + `run_selfplay_native.py`: selfplay in-process, `.bin` direto, TT compartilhada com `tt_clear()`, abertura por book, PGN opcional
@@ -45,12 +48,14 @@ Pesos: NNU4 (~2.6 MB), quantizacao QA=255 QB=64
 - **`utils/cliconf.py`**: bloco de configuracao no topo de toda ferramenta, `--show-config` universal
 
 ### Arquitetura NNUE (CONCLUIDO)
+
 - `nnue.h`/`nnue.c` implementam os 2560 features, L1/L2/L3, SCReLU, lazy bucket refresh
 - Acumulador incremental com stack de 128 frames, flags de dirty por perspectiva
 - Loader NNU4 com validacao de dims e magic
 - Paridade C/Python verificada via `train/check_parity.py`
 
 ### Pipeline de treino (CONCLUIDO)
+
 - `train/train_nnue.py`: dois estagios (warmup + finetune), CosineAnnealingLR, BCE com alvo continuo (piso ~0.62, nao 0.693)
 - `train/export_nnu4.py`: checkpoint `.pt` -> `nnue_weights.bin` (NNU4)
 - `train/dataset.py`: blend `target = lambda*result + (1-lambda)*wdl`, lambda por dataset
@@ -58,6 +63,7 @@ Pesos: NNU4 (~2.6 MB), quantizacao QA=255 QB=64
 - Datasets em `data/` com convencao de nomes codificando fonte/tipo/data
 
 ### v4.01 — Primeira rede treinada (CONCLUIDO 2026-08-16)
+
 - Treino completo: warmup 12 epocas + finetune 200 epocas
 - Checkpoint final: `checkpoints/v400/nnue_v400_halfkp4b_v400_ft_epoch200_2026-08-16_21-45-51.pt`
   - `avg_loss = 0.6094`, `val_loss = 0.6255`, `lr = 1e-6`
@@ -65,6 +71,7 @@ Pesos: NNU4 (~2.6 MB), quantizacao QA=255 QB=64
 - Compilado: `engine/c/zchezz_v401/zchezz.exe` + `arena.exe` + `selfplay.exe` com `ENGINE=v401`
 
 ### Phase 1 checks v4.01 (CONCLUIDO 2026-08-16)
+
 - Perft: 37/37
 - UCI extended: 119/120 (falha T3.2c KRKP draw score posicao limitrofe de TB — nao bloqueia)
 - bench_nps: v401-noTB = 1,440,320 NPS avg (+21% vs v314), eval sanity 8/8, TB sanity 2/2
@@ -110,6 +117,7 @@ python tests/run_selfplay_native.py --games 50000 --movetime 30 --threads 14
 ```
 
 **Configuracoes importantes:**
+
 - `MOVETIME_MS = 30` ms (volume, nao profundidade)
 - `GAMES = 50000-200000` por iteracao
 - Saida em `.bin` (treino) + `.pgn` (inspecao)
@@ -156,6 +164,7 @@ python tests/run_arena.py `
 ```
 
 **Se promovido:**
+
 - Copiar `gen2.nnu4` -> `engine/c/zchezz_v401/nnue_weights.bin`
 - Recompilar: `mingw32-make ENGINE=v401 native`
 - Phase 1 checks: `test_perft.py v401`, `bench_nps.py`
@@ -165,15 +174,16 @@ python tests/run_arena.py `
 
 ### Evolucao esperada por geracao
 
-| Geracao | ELO gap vs v314 |
-|---|---|
-| Gen 1 (atual) | -480 ELO |
-| Gen 2-3 | -300 a -400 ELO |
-| Gen 4-6 | -100 a -200 ELO |
-| Gen 7-10 | 0 a +100 ELO |
-| Gen 15+ | +150 a +250 ELO |
+| Geracao       | ELO gap vs v314 |
+| ------------- | --------------- |
+| Gen 1 (atual) | -480 ELO        |
+| Gen 2-3       | -300 a -400 ELO |
+| Gen 4-6       | -100 a -200 ELO |
+| Gen 7-10      | 0 a +100 ELO    |
+| Gen 15+       | +150 a +250 ELO |
 
 **Alavancas de melhora:**
+
 - Aumentar `MOVETIME_MS` do selfplay (30->50->100ms) conforme a rede melhora
 - Aumentar volume de dados por geracao
 - Reduzir LR a cada ciclo: 1e-4 -> 5e-5 -> 2e-5 -> 1e-5
@@ -195,12 +205,12 @@ Fase 5 completa (regressao 700 jogos vs v314) so quando a rede estiver perto de 
 
 ## CONFIGURACAO DOS HARNESSES (ESTADO ATUAL)
 
-| Ferramenta | Configuracao atual |
-|---|---|
-| `run_tournament_quick.py` | v401-1T vs v314-1T, 300 aberturas x 2 = 600 jogos, 100ms |
-| `run_tournament.py` | v401 vs v314 + SF-2800 + SF-3000 (ancoras), 200ms, PGN=True |
-| `run_arena.py` | DEFAULT_PLAYERS: `ref:HEAD` vs `ref:v3.14`, ENGINE=v401 |
-| `engine/build/Makefile` | `ENGINE ?= v401` (padrao) |
+| Ferramenta                  | Configuracao atual                                          |
+| --------------------------- | ----------------------------------------------------------- |
+| `run_tournament_quick.py` | v401-1T vs v314-1T, 300 aberturas x 2 = 600 jogos, 100ms    |
+| `run_tournament.py`       | v401 vs v314 + SF-2800 + SF-3000 (ancoras), 200ms, PGN=True |
+| `run_arena.py`            | DEFAULT_PLAYERS:`ref:HEAD` vs `ref:v3.14`, ENGINE=v401  |
+| `engine/build/Makefile`   | `ENGINE ?= v401` (padrao)                                 |
 
 ---
 
@@ -228,18 +238,18 @@ CP_TO_WDL_T = 320 — mesmo em nnue.c, export_nnu4.py e train_nnue.py
 
 ## ARQUIVOS-CHAVE
 
-| Arquivo | Funcao |
-|---|---|
-| `engine/c/zchezz_v401/` | Engine atual — modificar aqui ou criar v402 |
-| `engine/c/zchezz_v314/` | Baseline frozen — nao modificar |
-| `engine/build/Makefile` | `mingw32-make ENGINE=v401 native/arena/selfplay` |
-| `engine/c/tools/selfplay.c` | Gerador de dados in-process |
-| `engine/c/tools/arena.c` | A/B gate com SPRT |
-| `train/train_nnue.py` | Treino principal |
-| `train/export_nnu4.py` | Checkpoint -> nnue_weights.bin |
-| `train/check_parity.py` | Verificar paridade C/Python de features |
-| `tests/run_arena.py` | Driver Python para arena.exe |
-| `tests/run_selfplay_native.py` | Driver Python para selfplay.exe |
-| `tests/run_tournament_quick.py` | H2H rapido v401 vs v314 |
-| `tests/run_tournament.py` | Torneio com ancoras Stockfish (ELO calibrado) |
-| `checkpoints/v400/` | Checkpoints .pt de todas as geracoes |
+| Arquivo                           | Funcao                                             |
+| --------------------------------- | -------------------------------------------------- |
+| `engine/c/zchezz_v401/`         | Engine atual — modificar aqui ou criar v402       |
+| `engine/c/zchezz_v314/`         | Baseline frozen — nao modificar                   |
+| `engine/build/Makefile`         | `mingw32-make ENGINE=v401 native/arena/selfplay` |
+| `engine/c/tools/selfplay.c`     | Gerador de dados in-process                        |
+| `engine/c/tools/arena.c`        | A/B gate com SPRT                                  |
+| `train/train_nnue.py`           | Treino principal                                   |
+| `train/export_nnu4.py`          | Checkpoint -> nnue_weights.bin                     |
+| `train/check_parity.py`         | Verificar paridade C/Python de features            |
+| `tests/run_arena.py`            | Driver Python para arena.exe                       |
+| `tests/run_selfplay_native.py`  | Driver Python para selfplay.exe                    |
+| `tests/run_tournament_quick.py` | H2H rapido v401 vs v314                            |
+| `tests/run_tournament.py`       | Torneio com ancoras Stockfish (ELO calibrado)      |
+| `checkpoints/v400/`             | Checkpoints .pt de todas as geracoes               |
