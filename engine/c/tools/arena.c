@@ -264,6 +264,7 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 
 #include "board.h"
 #include "search.h"
@@ -1036,8 +1037,43 @@ static int has_suffix(const char *s, const char *suf) {
     return ls >= lsuf && !strcasecmp(s + ls - lsuf, suf);
 }
 
+/* Context passed through opening_walk_files() callbacks when the path
+ * given to load_openings() turns out to be a directory. */
+typedef struct { OpeningPool *op; int opening_plies; int loaded; } WalkOpenCtx;
+
+static void load_openings_walk_cb(const char *filepath, void *ud) {
+    WalkOpenCtx *wc = (WalkOpenCtx *)ud;
+    if (has_suffix(filepath, ".pgn")) {
+        if (load_pgn_openings(filepath, wc->op, wc->opening_plies) == 0) wc->loaded++;
+    } else if (has_suffix(filepath, ".epd") || has_suffix(filepath, ".fen")) {
+        if (load_epd_openings(filepath, wc->op) == 0) wc->loaded++;
+    }
+    /* other extensions (e.g. .idx cache files) are silently skipped */
+}
+
 int load_openings(const char *path, OpeningPool *op, int opening_plies) {
+    /* Single file — dispatch by extension (original behaviour). */
     if (has_suffix(path, ".pgn")) return load_pgn_openings(path, op, opening_plies);
+    if (has_suffix(path, ".epd") || has_suffix(path, ".fen")) return load_epd_openings(path, op);
+
+    /* Check whether the path is a directory; if so, walk it recursively
+     * loading every .pgn/.epd/.fen file found.  opening_walk_files() is
+     * declared in opening_pool.h and implemented in opening_pool.c —
+     * already linked into arena.exe via the Makefile's arena target. */
+    struct stat st;
+    if (stat(path, &st) == 0 && (st.st_mode & S_IFDIR)) {
+        WalkOpenCtx wc = { op, opening_plies, 0 };
+        int rc = opening_walk_files(path, load_openings_walk_cb, &wc);
+        if (rc < 0) return -1;  /* stat() failed inside the walker */
+        if (wc.loaded == 0) {
+            fprintf(stderr, "[arena] directory '%s' contained no .pgn/.epd/.fen files\n", path);
+            return -1;
+        }
+        return 0;
+    }
+
+    /* Unknown extension and not a directory: fall back to EPD parser
+     * (treats the file as one FEN per line, same as before). */
     return load_epd_openings(path, op);
 }
 

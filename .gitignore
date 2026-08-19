@@ -6,6 +6,7 @@ train/logs/
 # Test results (regenerated)
 tests/results/
 tests/selfplay_results/
+tests/arena_results/
 tests/elo_results/
 tests/interaction_results/
 tests/complete_results/

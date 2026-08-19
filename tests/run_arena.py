@@ -210,8 +210,8 @@ DEFAULT_ALPHA            = 0.05     # SPRT false-accept-H1 rate
 DEFAULT_BETA             = 0.05     # SPRT false-accept-H0 rate
 DEFAULT_UCI_TIMEOUT_MS   = 15000    # max wait for a uci: player's "bestmove" line
 SAVE_PGN                 = True    # save games to standard PGN file in RESULTS_DIR
-SAVE_EPD                 = True    # save positions + eval to EPD file in RESULTS_DIR
-SAVE_BIN                 = True    # save packed training samples to BIN file in RESULTS_DIR
+SAVE_EPD                 = False   # EPD requires eval_cp from net: players; off for uci: runs
+SAVE_BIN                 = False   # BIN requires eval_cp from in-process net: players; off for uci: runs
 RESULTS_DIR              = r"tests\arena_results"
 
 OPENING_FOLDER           = r"openings\lines"  # walked recursively for opening files
@@ -229,7 +229,8 @@ DEFAULT_GAUNTLET_SPEC    = ""       # "" = round-robin (no gauntlet candidate)
 # any --player on the CLI overrides this list in its entirety (see main()).
 # Same net:/uci:/ref: syntax as the CLI flag.
 DEFAULT_PLAYERS: list[str] = [
-    "ref:HEAD", "ref:HEAD",
+    r"uci:engine\c\zchezz_v401\zchezz.exe",
+    r"uci:engine\c\zchezz_v401\zchezz.exe",
 ]
 
 # Mirrors CLAUDE.md's "Build Instructions -> Native (Windows/Linux)"
