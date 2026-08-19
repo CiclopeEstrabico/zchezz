@@ -194,14 +194,14 @@ ARENA_EXE = os.path.join(BUILD_DIR, "arena.exe")
 # arg_map below) since "no file" is arena.exe's own meaningful default
 # for those, not a value to forward.
 # ═══════════════════════════════════════════════════════════════════
-GAMES                    = 20       # games per pairing (>2 players) or total (2 players)
+GAMES                    = 2000      # games per pairing (>2 players) or total (2 players)
 CONCURRENCY              = 0        # concurrent GAMES (not threads per game); 0 = arena.exe autodetects logical cores
 MOVETIME_MS              = 100      # per-move time budget, ms; 0 = use NODES instead
 NODES                    = 0        # per-move node budget, used only when movetime==0
 MAX_PLIES                = 400      # game-length safety cap -> counted as a draw (400 is the project-wide value, see CLAUDE.md)
 SEED                     = 1        # opening-cycling RNG seed
 TT_MB                    = 8.0      # per-instance TTable memory budget, MB
-DEFAULT_OPENING_PLIES    = 8        # PGN opening file: plies replayed per game before recording its FEN
+DEFAULT_OPENING_PLIES    = 2        # PGN opening file: plies replayed per game before recording its FEN
 DEFAULT_SPRT_ENABLED     = False    # run as a sequential SPRT gate instead of a fixed-length
                                     # match. Requires exactly 2 players (arena.exe enforces this).
 DEFAULT_ELO0             = 0.0      # SPRT null hypothesis Elo
@@ -209,9 +209,9 @@ DEFAULT_ELO1             = 5.0      # SPRT alt hypothesis Elo
 DEFAULT_ALPHA            = 0.05     # SPRT false-accept-H1 rate
 DEFAULT_BETA             = 0.05     # SPRT false-accept-H0 rate
 DEFAULT_UCI_TIMEOUT_MS   = 15000    # max wait for a uci: player's "bestmove" line
-SAVE_PGN                 = False    # save games to standard PGN file in RESULTS_DIR
-SAVE_EPD                 = False    # save positions + eval to EPD file in RESULTS_DIR
-SAVE_BIN                 = False    # save packed training samples to BIN file in RESULTS_DIR
+SAVE_PGN                 = True    # save games to standard PGN file in RESULTS_DIR
+SAVE_EPD                 = True    # save positions + eval to EPD file in RESULTS_DIR
+SAVE_BIN                 = True    # save packed training samples to BIN file in RESULTS_DIR
 RESULTS_DIR              = r"tests\arena_results"
 
 OPENING_FOLDER           = r"openings\lines"  # walked recursively for opening files
@@ -229,7 +229,7 @@ DEFAULT_GAUNTLET_SPEC    = ""       # "" = round-robin (no gauntlet candidate)
 # any --player on the CLI overrides this list in its entirety (see main()).
 # Same net:/uci:/ref: syntax as the CLI flag.
 DEFAULT_PLAYERS: list[str] = [
-    "ref:HEAD", "ref:v3.14",
+    "ref:HEAD", "ref:HEAD",
 ]
 
 # Mirrors CLAUDE.md's "Build Instructions -> Native (Windows/Linux)"

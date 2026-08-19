@@ -124,7 +124,7 @@ ANCHORS = []
 
 # ── Tournament Parameters ─────────────────────────────────────────────────────
 GAMES_VS_EACH_ANCHOR = 0
-GAMES_SELF_PLAY      = 50     # 50 openings x 2 colors = 100 games (sanity check)
+GAMES_SELF_PLAY      = 500     #  x 2 colors 
 SELF_PLAY            = True
 COLOR_SWAP           = True
 

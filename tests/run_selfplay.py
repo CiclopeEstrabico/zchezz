@@ -156,15 +156,15 @@ def kill_leftover_engines():
 # UCI engines, still with EPD export — this is NOT limited to 2 engines.
 ENGINES_CFG = [
     {
-        "path":     r"engine\c\zchezz_v400\zchezz.exe",
-        "label":    "Zchezz-v400",
+        "path":     r"engine\c\zchezz_v401\zchezz.exe",
+        "label":    "Zchezz-v401",
         "tc_mode":  "movetime",   # "movetime" | "depth" | "nodes" | "fixedtime"
         "tc_value": 200,          # units depend on tc_mode (ms for movetime)
         "tc_inc":   0             # increment in ms, "fixedtime" mode only
     },
     {
-        "path":     r"engine\c\zchezz_v400\zchezz.exe",
-        "label":    "Zchezz-v400",
+        "path":     r"engine\c\zchezz_v401\zchezz.exe",
+        "label":    "Zchezz-v401",
         "tc_mode":  "movetime",
         "tc_value": 200,
         "tc_inc":   0
@@ -174,7 +174,7 @@ ENGINES_CFG = [
 # ── Match Volume & Safety ────────────────────────────────────────────────────
 GAMES  = 20000  # opening-slot budget, NOT the final game count — see
                        # "OPENING BOOK" note in the header docstring above
-CONCURRENCY  = 16      # parallel worker threads (= persistent engine-pair count)
+CONCURRENCY  = 14      # parallel worker threads (= persistent engine-pair count)
 MAX_PLIES    = 400     # half-moves before a game is forced to a draw
 MOVE_TIMEOUT_S = 35.0    # seconds to wait for one "bestmove" before declaring TIMEOUT
 REPORT_EVERY = 10      # print a status block every N completed games
@@ -183,13 +183,13 @@ REPORT_EVERY = 10      # print a status block every N completed games
 # EPD is always saved (see header docstring — this script IS the EPD export).
 # .bin and .pgn are opt-in extras, same status: additive, not either/or
 # (CLAUDE.md rule 9) — any combination of SAVE_BIN/SAVE_PGN can be on at once.
-SAVE_PGN            = False  # save every game as standard PGN alongside the EPD
+SAVE_PGN            = True  # save every game as standard PGN alongside the EPD
 SAVE_EPD            = True   # save positions + eval as EPD
-SAVE_BIN            = False  # save every game as a packed .bin (train/dataset.py's
+SAVE_BIN            = True  # save every game as a packed .bin (train/dataset.py's
                               # SAMPLE_DTYPE — same schema engine/c/tools/selfplay.c
                               # writes, so .bin files from both tools are interchangeable)
 SAVE_OPENING_IN_EPD = True   # include the forced book/random opening plies in the EPD output
-SAVE_OPENING_IN_BIN = False  # include forced opening plies in the .bin output (default OFF,
+SAVE_OPENING_IN_BIN = True  # include forced opening plies in the .bin output (default OFF,
                               # matches selfplay.c's SP_DEFAULT_SAVE_OPENING_SAMPLES=0: those
                               # plies were not chosen by search, so eval_cp is meaningless for them)
 RESULTS_DIR         = r"tests\selfplay_results"  # output directory for .log/.pgn/.epd/.bin — all

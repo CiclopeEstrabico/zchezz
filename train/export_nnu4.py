@@ -112,8 +112,8 @@ MAGIC = b"NNU4"
 # Everything reachable from the CLI (see build_arg_parser below) also lives
 # here — edit these to change the defaults without typing flags every time.
 CKPT = None                                             # explicit checkpoint .pt path; None = auto-pick newest in CKPT_DIR
-CKPT_DIR = Path("C:/nnue_checkpoints/checkpoints_v400")  # directory searched for nnue_v400_*.pt when --ckpt is not given
-DST_PATH = Path("C:/nnue_checkpoints/nnue_weights_v400.bin")  # output NNU4 binary path
+CKPT_DIR = Path("C:/Zchezz/checkpoints/v402")  # directory searched for nnue_v400_*.pt when --ckpt is not given
+DST_PATH = Path("C:/Zchezz/checkpoints/v402/nnue_weights.bin")  # output NNU4 binary path
 # ═══════════════════════════════════════════
 
 

@@ -125,16 +125,16 @@ import dataset
 #  never a literal (CLAUDE.md rule 8). Edit here to change the defaults
 #  used when a flag is not passed on the command line.
 # ════════════════════════════════════════════════════════════════════════
-CKPT_DIR = "checkpoints/v400"     # where the per-epoch .pt checkpoints are written
-DATASET_NAME = "halfkp4b_v400_ft"  # tag stored in the checkpoint; resume only continues if this matches
-EPOCHS = 200                      # number of training epochs. This also sets the LR
+CKPT_DIR = "checkpoints/v402"     # where the per-epoch .pt checkpoints are written
+DATASET_NAME = "halfkp4b_v402_ft"  # tag stored in the checkpoint; resume only continues if this matches
+EPOCHS = 100                      # number of training epochs. This also sets the LR
                                    # schedule: CosineAnnealingLR(T_max=EPOCHS), so a small
                                    # EPOCHS anneals the learning rate to eta_min quickly.
 BATCH_SIZE = 65536                 # minibatch size (positions per optimizer step)
 MAX_POSITIONS_CHUNK = 1_100_000   # positions buffered before a chunk is handed to the DataLoader
 LR = 1e-3                         # fresh-start learning rate. ~1e-3 suits random weights;
                                    # ~1e-5 suits refining an already-trained net.
-TRANSFER_LR = 1e-5                # learning rate when resuming onto a different --dataset-name
+TRANSFER_LR = 3e-5                # learning rate when resuming onto a different --dataset-name
                                    # (weight transfer / refinement of an already-trained net)
 WEIGHT_DECAY = 1e-4                # Adam weight decay
 WORKERS = os.cpu_count() or 4     # multiprocessing.Pool size for FEN -> HalfKP encoding
@@ -248,22 +248,22 @@ DATA_DIR = "data"        # root holding one folder per dataset
 # low quality. Add it back only with a measured reason.
 DATASETS = [
     # name                                                            pct   mode      col    lam
-    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
-    {"name": "lichess_cp_sfdb_filter",                            "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
-    {"name": "selfplay_cp_sf50k_res_filter_data20260410",         "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 16.1M  selfplay / SF 50k
-    {"name": "lichess_cp_sf_filter",                              "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
-    {"name": "selfplay_cp_zchezz_res_filter_data20260401",        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  9.1M  selfplay / Zchezz itself
-    {"name": "selfplay_cp_zchezz_res_filter_data20260404",        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  8.8M  selfplay / Zchezz itself
-    {"name": "selfplay_cp_sf50k_res_filter_data20260404",         "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  7.5M  selfplay / SF 50k
-    {"name": "selfplay_cp_sf100k_res_endgames_filter_data20260414","pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},  #  5.7M  selfplay endgames / SF 100k
+    {"name": "extraquiet_cp_sf5k_res_filter",                     "pct": 0.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 40.1M  humans / SF 5k nodes
+    {"name": "lichess_cp_sfdb_filter",                            "pct": 0.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 18.6M  lichess / SF evals from the lichess DB
+    {"name": "selfplay_cp_sf50k_res_filter_data20260410",         "pct": 0.20, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 16.1M  selfplay / SF 50k
+    {"name": "lichess_cp_sf_filter",                              "pct": 0.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   # 15.2M  lichess / SF
+    {"name": "selfplay_cp_zchezz_res_filter_data20260401",        "pct": 0.50, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  9.1M  selfplay / Zchezz itself
+    {"name": "selfplay_cp_zchezz_res_filter_data20260404",        "pct": 0.50, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  8.8M  selfplay / Zchezz itself
+    {"name": "selfplay_cp_sf50k_res_filter_data20260404",         "pct": 0.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  7.5M  selfplay / SF 50k
+    {"name": "selfplay_cp_sf100k_res_endgames_filter_data20260414","pct": 0.50, "mode": "sample-files", "col": "cp", "lam": 0.00},  #  5.7M  selfplay endgames / SF 100k
     {"name": "extraquiet_cp_sfd14_endgames_filter",               "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  2.8M  human endgames / SF depth 14
     {"name": "selfplay-lichess_cp_sf500k_res_filter_endgames",    "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #  2.7M  selfplay endgames / SF 500k
-    {"name": "extraquiet_cp_sf60k_filter",                        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  1.5M  humans / SF 60k
+    {"name": "extraquiet_cp_sf60k_filter",                        "pct": 0.10, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  1.5M  humans / SF 60k
     {"name": "synthetic_endgame_cp_sf_filter_data20260414",       "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  1.2M  generated endgames / SF
     {"name": "selfplay_cp_zchezz_res_filter_data20260410",        "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  850k  selfplay / Zchezz itself
     {"name": "synthetic_endgame_cp_sf_filter_data20260413",       "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #  521k  generated endgames / SF
-    {"name": "extraquiet_cp_sfd12_endgames_filter",               "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  262k  human endgames / SF depth 12
-    {"name": "lichess_cp_sf400k_filter",                          "pct": 1.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  150k  lichess / SF 400k
+    {"name": "extraquiet_cp_sfd12_endgames_filter",               "pct": 0.50, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  262k  human endgames / SF depth 12
+    {"name": "lichess_cp_sf400k_filter",                          "pct": 0.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  150k  lichess / SF 400k
     {"name": "miscelaneous_cp_sf1M_res_filter",                   "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #   34k  mixed / SF 1M
 ]
 
