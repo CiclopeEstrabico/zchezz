@@ -12,7 +12,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-VERSION="${1:-v313}"                          # engine version (override via arg)
+VERSION="${1:-v401}"                          # engine version (override via arg)
 MODE="${2:-full}"                             # "quick" or "full"
 ENGINE_DIR="$HOME/zchezz_${VERSION}"
 ENGINE="${ENGINE_DIR}/zchezz"

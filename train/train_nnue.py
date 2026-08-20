@@ -126,6 +126,12 @@ import dataset
 #  used when a flag is not passed on the command line.
 # ════════════════════════════════════════════════════════════════════════
 CKPT_DIR = "checkpoints/v402"     # where the per-epoch .pt checkpoints are written
+CHECKPOINT_SOURCE = "auto"        # checkpoint to resume or transfer from:
+                                   #   'auto'         -> check CKPT_DIR first; if empty, find the newest .pt
+                                   #                     in any subfolder under checkpoints/ for weight transfer
+                                   #   'new' / '' / False -> start fresh from random init (no checkpoint)
+                                   #   'path/to/dir'  -> pick the newest checkpoint inside that folder
+                                   #   'path/to/file.pt' -> load this exact checkpoint
 DATASET_NAME = "halfkp4b_v402_ft"  # tag stored in the checkpoint; resume only continues if this matches
 EPOCHS = 100                      # number of training epochs. This also sets the LR
                                    # schedule: CosineAnnealingLR(T_max=EPOCHS), so a small
@@ -351,6 +357,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--ckpt-dir", default=CKPT_DIR,
                     help="Where to write nnue_v400_epochNN_*.pt checkpoints.")
+    p.add_argument("--checkpoint-source", "--resume-from", default=CHECKPOINT_SOURCE,
+                    help="Where to find a checkpoint to resume/transfer from: "
+                         "'auto' (scans CKPT_DIR first, then all subfolders in checkpoints/), "
+                         "'new'/''/False (start from scratch), a directory path, or an exact .pt file path.")
     p.add_argument("--dataset-name", default=DATASET_NAME,
                     help="Tag stored in the checkpoint; resume logic only resumes "
                          "if this matches the latest checkpoint's tag.")
@@ -1178,14 +1188,84 @@ ARCH_DICT = {
 }
 
 
+def find_checkpoint(source: str | bool | None = "auto",
+                    current_ckpt_dir: str = "checkpoints",
+                    root_checkpoints_dir: str = "checkpoints") -> str | None:
+    """Resolve which .pt checkpoint file to resume or transfer weights from.
+
+    Behavior based on `source`:
+      * None, False, "", "new", "scratch":
+          Returns None -> starts fresh training from random initialization.
+      * "auto", True:
+          1. Searches `current_ckpt_dir` for existing checkpoints (to resume an
+             in-progress training run in that directory).
+          2. If none found, searches recursively across all subfolders in
+             `root_checkpoints_dir` (e.g. 'checkpoints/**/nnue_*.pt') and picks
+             the newest file by modification time (for weight transfer).
+          3. If no checkpoint exists anywhere, returns None (fresh start).
+      * An explicit file path (e.g. 'checkpoints/v400/nnue_v400_...epoch99.pt'):
+          Returns that exact file if it exists.
+      * An explicit directory path (e.g. 'checkpoints/v400'):
+          Searches recursively within that folder and picks the newest checkpoint.
+    """
+    if source is None or source is False:
+        return None
+    if isinstance(source, str):
+        s_norm = source.strip().lower()
+        if s_norm in ("", "none", "false", "new", "scratch"):
+            return None
+
+    def _find_newest_in_tree(directory: str) -> str | None:
+        if not os.path.isdir(directory):
+            return None
+        candidates: list[tuple[float, str]] = []
+        for root, _, files in os.walk(directory):
+            for f in files:
+                if f.endswith(".pt") and (f.startswith("nnue_") or "epoch" in f):
+                    full = os.path.join(root, f)
+                    try:
+                        mtime = os.path.getmtime(full)
+                        candidates.append((mtime, full))
+                    except OSError:
+                        pass
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        return candidates[-1][1]
+
+    # Explicit file path
+    if isinstance(source, str) and os.path.isfile(source):
+        return source
+
+    # Explicit directory path
+    if isinstance(source, str) and source.strip().lower() not in ("auto", "true"):
+        if os.path.isdir(source):
+            found = _find_newest_in_tree(source)
+            if not found:
+                print(f"  [checkpoint] WARNING: no .pt checkpoints found in directory: {source}")
+            return found
+        print(f"  [checkpoint] WARNING: specified checkpoint path does not exist: {source}")
+        return None
+
+    # "auto" mode:
+    # 1. Search current_ckpt_dir first
+    if os.path.isdir(current_ckpt_dir):
+        local_latest = _find_newest_in_tree(current_ckpt_dir)
+        if local_latest:
+            return local_latest
+
+    # 2. Search root_checkpoints_dir recursively across all subfolders
+    if os.path.isdir(root_checkpoints_dir):
+        global_latest = _find_newest_in_tree(root_checkpoints_dir)
+        if global_latest:
+            return global_latest
+
+    return None
+
+
 def find_latest_checkpoint(ckpt_dir: str) -> str | None:
-    if not os.path.isdir(ckpt_dir):
-        return None
-    candidates = [f for f in os.listdir(ckpt_dir) if f.startswith("nnue_v400_") and f.endswith(".pt")]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda f: os.path.getmtime(os.path.join(ckpt_dir, f)))
-    return os.path.join(ckpt_dir, candidates[-1])
+    """Legacy alias: find newest checkpoint in a specific directory or its subdirectories."""
+    return find_checkpoint(source=ckpt_dir, current_ckpt_dir=ckpt_dir)
 
 
 def save_checkpoint(ckpt_dir: str, dataset_name: str, epoch: int, model: NNUE,
@@ -1247,7 +1327,7 @@ def train(args: argparse.Namespace) -> None:
 
     start_epoch = 0
     resume_lr = args.lr
-    latest = find_latest_checkpoint(args.ckpt_dir)
+    latest = find_checkpoint(args.checkpoint_source, args.ckpt_dir)
     if latest:
         # Mirrors v3.14 mixtrain.py's try/except around checkpoint load: a
         # corrupt file, an incompatible/renamed state_dict key, or any other
@@ -1259,7 +1339,7 @@ def train(args: argparse.Namespace) -> None:
             if ckpt.get("dataset") == args.dataset_name:
                 start_epoch = ckpt["epoch"]
                 resume_lr = ckpt.get("lr", args.lr)
-                print(f"Resumed from {latest} (same dataset) at epoch {start_epoch}, lr={resume_lr:.2e}")
+                print(f"Resumed from {latest} (same dataset: {args.dataset_name!r}) at epoch {start_epoch}, lr={resume_lr:.2e}")
             else:
                 start_epoch = 0
                 resume_lr = args.transfer_lr
@@ -1271,7 +1351,7 @@ def train(args: argparse.Namespace) -> None:
             print(f"WARNING: checkpoint at {latest} is incompatible or corrupt ({e!r}); "
                   f"falling back to fresh random-init training at epoch 0, lr={resume_lr:.2e}.")
     else:
-        print("No checkpoint found — training from random init.")
+        print("No checkpoint loaded — training from random init (fresh start).")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=resume_lr, weight_decay=args.weight_decay)
     if start_epoch > 0:

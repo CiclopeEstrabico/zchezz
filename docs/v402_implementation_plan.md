@@ -203,17 +203,6 @@ Fase 5 completa (regressao 700 jogos vs v314) so quando a rede estiver perto de 
 
 ---
 
-## CONFIGURACAO DOS HARNESSES (ESTADO ATUAL)
-
-| Ferramenta                  | Configuracao atual                                          |
-| --------------------------- | ----------------------------------------------------------- |
-| `run_tournament_quick.py` | v401-1T vs v314-1T, 300 aberturas x 2 = 600 jogos, 100ms    |
-| `run_tournament.py`       | v401 vs v314 + SF-2800 + SF-3000 (ancoras), 200ms, PGN=True |
-| `run_arena.py`            | DEFAULT_PLAYERS:`ref:HEAD` vs `ref:v3.14`, ENGINE=v401  |
-| `engine/build/Makefile`   | `ENGINE ?= v401` (padrao)                                 |
-
----
-
 ## ARQUITETURA NNUE — REFERENCIA RAPIDA
 
 ```
@@ -235,21 +224,3 @@ CP_TO_WDL_T = 320 — mesmo em nnue.c, export_nnu4.py e train_nnue.py
 **Lazy bucket refresh:** mudanca de bucket invalida a perspectiva inteira. Flag dirty no frame do stack do acumulador (nao num campo flat), para sobreviver pushes/pops corretos.
 
 ---
-
-## ARQUIVOS-CHAVE
-
-| Arquivo                           | Funcao                                             |
-| --------------------------------- | -------------------------------------------------- |
-| `engine/c/zchezz_v401/`         | Engine atual — modificar aqui ou criar v402       |
-| `engine/c/zchezz_v314/`         | Baseline frozen — nao modificar                   |
-| `engine/build/Makefile`         | `mingw32-make ENGINE=v401 native/arena/selfplay` |
-| `engine/c/tools/selfplay.c`     | Gerador de dados in-process                        |
-| `engine/c/tools/arena.c`        | A/B gate com SPRT                                  |
-| `train/train_nnue.py`           | Treino principal                                   |
-| `train/export_nnu4.py`          | Checkpoint -> nnue_weights.bin                     |
-| `train/check_parity.py`         | Verificar paridade C/Python de features            |
-| `tests/run_arena.py`            | Driver Python para arena.exe                       |
-| `tests/run_selfplay_native.py`  | Driver Python para selfplay.exe                    |
-| `tests/run_tournament_quick.py` | H2H rapido v401 vs v314                            |
-| `tests/run_tournament.py`       | Torneio com ancoras Stockfish (ELO calibrado)      |
-| `checkpoints/v400/`             | Checkpoints .pt de todas as geracoes               |
