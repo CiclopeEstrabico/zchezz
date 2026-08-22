@@ -173,7 +173,7 @@ MOVETIME_MS             = 200    # ms per move (Phase 9-2: ELO calibration 200ms
 # and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v401\zchezz.exe",
+        "path":     r"engine\c\zchezz_v402\zchezz.exe",
         "label":    "Zchezz-v401",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,

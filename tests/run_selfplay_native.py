@@ -21,7 +21,7 @@ zchezz.exe instead of selfplay.exe): before every run, this script
 mtime-checks selfplay.exe against every source file the Makefile's
 `selfplay` target actually depends on (SELFPLAY_SRCS — see
 BUILD_DEPS below, kept in sync BY HAND with engine/build/Makefile)
-and rebuilds via `mingw32-make`/`make ENGINE=v400 selfplay` whenever
+and rebuilds via `mingw32-make`/`make ENGINE=v402 selfplay` whenever
 any of them is newer. This is the "auto-compile every time we start
 a selfplay run" behavior requested for this tool. Everything else —
 game playing, temperature move selection, TT policy, opening
@@ -102,6 +102,7 @@ for _s in (_sys.stdout, _sys.stderr):
 
 import os
 import sys
+import time
 import subprocess
 import glob
 import argparse
@@ -109,7 +110,7 @@ import argparse
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD_DIR = os.path.join(REPO_ROOT, "engine", "build")
 TOOLS_DIR = os.path.join(REPO_ROOT, "engine", "c", "tools")
-ENGINE_DIR = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v400")
+ENGINE_DIR = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v402")
 # selfplay.exe is a SHARED tool binary, built in engine/build/ (NOT inside
 # any engine/c/zchezz_vXXX/ folder) — see header comment above and
 # README.md's engine/c/tools/ file inventory.
@@ -139,16 +140,16 @@ BUILD_DEPS += glob.glob(os.path.join(ENGINE_DIR, "*.h"))
 # header "BUILD" section for the exact same command spelled out).
 DIRECT_GCC_BUILD_CMD = [
     "gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavxvnni", "-mavx2",
-    "-I" + os.path.join("..", "c", "zchezz_v400"), "-DNO_TABLEBASES", "-DNO_BOOK",
+    "-I" + os.path.join("..", "c", "zchezz_v402"), "-DNO_TABLEBASES", "-DNO_BOOK",
     "-Wno-unused-variable", "-Wno-unused-but-set-variable",
     "-Wno-maybe-uninitialized", "-Wno-misleading-indentation",
     "-Wno-sign-compare", "-Wno-unused-function", "-Wno-parentheses",
     "-o", "selfplay.exe",
     os.path.join("..", "c", "tools", "selfplay.c"),
     os.path.join("..", "c", "tools", "opening_pool.c"),
-    os.path.join("..", "c", "zchezz_v400", "board.c"),
-    os.path.join("..", "c", "zchezz_v400", "search.c"),
-    os.path.join("..", "c", "zchezz_v400", "nnue.c"),
+    os.path.join("..", "c", "zchezz_v402", "board.c"),
+    os.path.join("..", "c", "zchezz_v402", "search.c"),
+    os.path.join("..", "c", "zchezz_v402", "nnue.c"),
     "-static", "-lm", "-pthread",
 ]
 
@@ -194,7 +195,7 @@ MAX_PLIES                    = 400      # game-length safety cap -> counted as a
 SEED                         = 1        # RNG base seed, per-game deterministic
 DEFAULT_SEPARATE_TT          = False    # False = shared TT between colors within a game (default)
 TT_MB                        = 8.0      # per-TTable memory budget, MB
-DEFAULT_NNUE_PATH            = "nnue_weights.bin"  # NNUE weights file (relative to cwd selfplay.exe runs in)
+DEFAULT_NNUE_PATH            = os.path.join(ENGINE_DIR, "nnue_weights.bin")  # v4.02: absolute path into the engine folder (selfplay runs with the caller's cwd)
 DEFAULT_SAVE_OPENING_IN_EPD  = True     # True = include forced opening plies in the EPD output (default ON,
                                          # matches tests/run_selfplay.py's SAVE_OPENING_IN_EPD=True; deliberately
                                          # the OPPOSITE default of DEFAULT_SAVE_OPENING_SAMPLES below)
@@ -259,7 +260,7 @@ def ensure_selfplay_built():
         log(f"selfplay.exe is up to date, reusing {SELFPLAY_EXE}")
         return True
 
-    for make_cmd in (["make", "ENGINE=v400", "selfplay"], ["mingw32-make", "ENGINE=v400", "selfplay"]):
+    for make_cmd in (["make", "ENGINE=v402", "selfplay"], ["mingw32-make", "ENGINE=v402", "selfplay"]):
         try:
             r = run(make_cmd, cwd=BUILD_DIR)
         except FileNotFoundError:
