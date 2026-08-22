@@ -513,7 +513,7 @@ Accessible via the ⚙ button in-game.
 The build system is **shared** across engine versions and lives in `engine/build/`
 (`Makefile`, `build_native.bat`, `build_wasm.bat`, `build_termux.sh`, `bundle.py`,
 `pieces/`) — it is not duplicated per `zchezz_vXXX/` folder. Every target takes
-`ENGINE=vXXX` (default `v400`) to select which `engine/c/zchezz_vXXX/` folder to build
+`ENGINE=vXXX` (default `v402`) to select which `engine/c/zchezz_vXXX/` folder to build
 from. This machine has `mingw32-make`, not `make`.
 
 ### Native — Windows / Linux
@@ -560,7 +560,7 @@ state is `static` rather than `_Thread_local`, since there's only ever one threa
 
 `tests/run_selfplay_native.py` drives the compiled `selfplay.exe` (see § Native tools above)
 as a Python wrapper — the same role `run_arena.py` plays for `arena.exe`. Build the binary
-first with `mingw32-make ENGINE=v400 selfplay` or the one-click
+first with `mingw32-make ENGINE=v402 selfplay` or the one-click
 `engine/build/build_selfplay.bat`.
 
 ### Tests
