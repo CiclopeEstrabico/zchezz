@@ -520,9 +520,9 @@ from. This machine has `mingw32-make`, not `make`.
 
 ```bash
 cd engine/build
-build_native.bat v400              # Windows one-click compile (MinGW); ENGINE arg optional
-mingw32-make ENGINE=v400 native    # Windows, via make
-make ENGINE=v400 native            # Linux
+build_native.bat v402              # Windows one-click compile (MinGW); ENGINE arg optional
+mingw32-make ENGINE=v402 native    # Windows, via make
+make ENGINE=v402 native            # Linux
 # binary lands in engine/c/zchezz_v402/zchezz.exe
 ```
 
@@ -530,22 +530,22 @@ make ENGINE=v400 native            # Linux
 
 ```bash
 cd engine/build
-mingw32-make ENGINE=v400 arena     # -> engine/build/arena.exe
-mingw32-make ENGINE=v400 selfplay  # -> engine/build/selfplay.exe
+mingw32-make ENGINE=v402 arena     # -> engine/build/arena.exe
+mingw32-make ENGINE=v402 selfplay  # -> engine/build/selfplay.exe
 ```
 
 ### Android / Termux
 
 ```bash
 cd engine/build
-./build_termux.sh v400
+./build_termux.sh v402
 ```
 
 ### WebAssembly (requires [Emscripten](https://emscripten.org))
 
 ```bash
 cd engine/build
-build_wasm.bat v400
+build_wasm.bat v402
 # Compiles WASM, bundles HTML, and copies the result to the repo-root index.html
 ```
 
@@ -577,7 +577,7 @@ Each accepts flags that override its config block — useful while iterating:
 python tests/test_perft.py --only Kiwipete --max-depth 3   # one position, shallow
 python tests/test_uci_extended.py --only T3 --only T7      # two test groups
 python tests/bench_nps.py --phase Opening --no-run-base    # opening positions, head only
-python tests/test_perft.py v400                            # legacy positional form still works
+python tests/test_perft.py v402                            # legacy positional form still works
 ```
 
 See `CLAUDE.md` for the full Phase 1–9 testing workflow.
@@ -721,7 +721,7 @@ zchezz/
 ├── train/                         NNUE training code (PyTorch, flat, version-less)
 │   └── labeling/                  Stockfish-based dataset labeling scripts
 ├── utils/                         Shared by tests/ and train/ — cliconf.py (config-block + CLI plumbing), kill_ghosts.py
-├── docs/                          folder_structure.md, v400_implementation_plan.md
+├── docs/                          folder_structure.md, v402_implementation_plan.md
 ├── openings/                      Opening books (gitignored) — lines/ (PGN), positions/ (EPD), book.bin
 ├── endgames/                      Endgame EPD test positions (gitignored)
 ├── tablebases/                    Syzygy 3-4-5 piece tables (gitignored, ~938 MB)
