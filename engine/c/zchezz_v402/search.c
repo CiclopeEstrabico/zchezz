@@ -147,16 +147,16 @@ static float lmr_log_product[LMR_D * LMR_M];
  * the original literals. See search.h's SearchTunables comment for
  * the full contract. */
 #define TUNE_RAZOR_MARGIN_DEFAULT             200
-#define TUNE_RFP_MULT_DEFAULT                  90
-#define TUNE_RFP_IMPROVING_BONUS_DEFAULT       50
+#define TUNE_RFP_MULT_DEFAULT                  105
+#define TUNE_RFP_IMPROVING_BONUS_DEFAULT       24
 #define TUNE_NMP_BASE_DEFAULT                   3
 #define TUNE_NMP_DEPTH_DIV_DEFAULT              3
 #define TUNE_NMP_MAX_R_DEFAULT                  6
-#define TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT 200
-#define TUNE_PROBCUT_MARGIN_DEFAULT           200
+#define TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT 134
+#define TUNE_PROBCUT_MARGIN_DEFAULT           215
 #define TUNE_LMR_DIVISOR_DEFAULT              1.5
-#define TUNE_FUT_MULT_DEFAULT                 150
-#define TUNE_FUT_IMPROVING_ADJ_DEFAULT          50
+#define TUNE_FUT_MULT_DEFAULT                 91
+#define TUNE_FUT_IMPROVING_ADJ_DEFAULT          76
 #define TUNE_ASP_DELTA_INIT_DEFAULT            20
 #define TUNE_ASP_DELTA_MAX_DEFAULT            500
 
