@@ -192,7 +192,7 @@ python train/export_nnu4.py --ckpt checkpoints/v400/<gen2_epoch_best>.pt `
 # SPRT gate
 python tests/run_arena.py `
     --player net:checkpoints/v400/gen2.nnu4 `
-    --player net:engine/c/zchezz_v401/nnue_weights.bin `
+    --player net:engine/c/zchezz_v402/nnue_weights.bin `
     --games 400 --movetime 30 --threads 14 `
     --sprt --elo0 0 --elo1 5 `
     --json checkpoints/v400/gen2_gate_result.json
@@ -200,7 +200,7 @@ python tests/run_arena.py `
 
 **Se promovido:**
 
-- Copiar `gen2.nnu4` -> `engine/c/zchezz_v401/nnue_weights.bin`
+- Copiar `gen2.nnu4` -> `engine/c/zchezz_v402/nnue_weights.bin`
 - Recompilar: `mingw32-make ENGINE=v401 native`
 - Phase 1 checks: `test_perft.py v401`, `bench_nps.py`
 - Repetir o ciclo com mais dados
