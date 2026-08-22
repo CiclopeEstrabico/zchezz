@@ -104,3 +104,6 @@ engine/c/*/test_pgn_out.pgn
 # run_arena.py's ref: git-worktree build cache (fully reproducible from git)
 .arena_build_cache/
 engine/c/zchezz_v402/exe_backup/
+
+# LC0 raw training-data downloads (import_lc0.py cache, ~200MB per tar)
+data_raw/

@@ -414,12 +414,22 @@ static inline uint64_t see_attackers(const Board *bd, int sq, uint64_t occ) {
 }
 
 static int see_board(const Board *bd, int from, int to, int is_epc) {
-    if (!bd->b[to] && !is_epc) return 0;
-
+    /* Empty target square = QUIET move (v4.02 exp_seeq): treated as the
+     * capture of a zero-valued piece.  PC_TYPE(empty)==0 and
+     * MV_TAB[0]==0, so gained[0]==0 automatically; the normal SWAP
+     * loop below then runs over the opponent's recaptures of the
+     * moving piece, which is exactly the SEE of a non-capture move
+     * (e.g. a piece moving to an attacked square).  Call sites that
+     * still rely on the old "capture-only" contract are all guarded:
+     *   - score_move()      : only reached when `cap || m->epc`
+     *   - qsearch()         : captures from board_gen_captures(),
+     *                         skipped when prom/epc
+     *   - ProbCut           : same pattern as qsearch()
+     * so passing quiets happens ONLY from the STAGE 3 SEE pruning. */
     int gained[32];
     int ng = 0;
 
-    /* Initial capture value */
+    /* Initial capture value (empty target -> MV_TAB[0] == 0) */
     int attacker_type = PC_TYPE(bd->b[from]);
     if (is_epc)
         gained[ng++] = MV_TAB[1]; /* pawn captured via ep */
@@ -1472,6 +1482,20 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
 
                 /* Skip singular move */
                 if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
+
+                /* v4.02: SEE pruning of quiet moves (Stockfish-style): a quiet move
+                 * that loses material even in a favourable exchange sequence cannot
+                 * be best at shallow depth.
+                 * Killers and the current counter-move are exempted (experiment
+                 * spec: they already carry proven tactical weight; the material
+                 * heuristic alone misjudges quiet defensive resources), as are
+                 * direct checking moves via quiet_direct_check(). */
+                if (!in_check && !is_pv && legal_count > 0 && depth <= 3 &&
+                    !is_killer &&
+                    !(cur_prev_ft >= 0 && ss->counter_move[cur_prev_ft] == (mfr*64+mto)) &&
+                    !quiet_direct_check(b, mfr, mto)) {
+                    if (see_board(b, mfr, mto, 0) < -(depth * 60)) { continue; }
+                }
 
                 /* Futility pruning (pre-make, v4.02) ─────────────────
                  * Same margin as before (static_eval + fut_mult*depth +
