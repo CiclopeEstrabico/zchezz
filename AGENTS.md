@@ -254,6 +254,17 @@ objects — this list is just the tripwire.
 - Square encoding: a8=0, h1=63 (rank 0 = rank 8, file 0 = file a)
 - Test scripts: engine path configured in run_tournament.py config block
 
+## Technical English - writing-rules skill
+
+All English prose in this repository (code comments, docstrings, commit
+messages, help and error strings, Markdown docs) follows the
+**writing-rules** skill, a domain-neutral style guide adapted from
+ASD-STE100 (Simplified Technical English). Canonical copy, usable by any
+LLM or agent: `.agents/skills/writing-rules/SKILL.md`. Identical copy for
+Claude Code auto-discovery: `.claude/skills/writing-rules/SKILL.md`. Load
+the skill BEFORE writing or reviewing any such text, and keep the two
+copies identical when editing either one.
+
 ## Naming Convention — `tests/` and `train/`
 
 `tests/` and `train/` are **flat and version-less** — one toolset tracking the current
