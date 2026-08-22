@@ -287,9 +287,59 @@ The engine uses an explicit undo stack (`UndoFrame g_undo[512]`) rather than cop
 Full support for en-passant, all four castling rights with legal-position verification, and queen/rook/bishop/knight promotions. Every special case is handled correctly in both the move generator and the NNUE accumulator update path.
 
 ---
+## Search (v4.02 changes, branch `v402-search-strength`)
+
+v4.02 keeps the v4.01 architecture and network and reworks search policy
+and memory layout. Every change below was gated with 800-game blind
+arenas at 100 ms/move against the previous binary before being kept;
+changes that regressed were reverted (see "Rejected" list).
+
+### Kept (validated)
+
+- **TT entries are packed 24-byte structs** (`TTEntry`, AoS) instead of six
+  parallel arrays: a probe touches one cache line instead of up to six.
+- **TT generation is stable within a game.** The generation counter is bumped
+  once per `ucinewgame` (and physically cleared by self-play/arena per game),
+  never per move. Scores from previous moves are reusable again.
+- **The root never takes TT score cutoffs** (only TT-move ordering), so a deep
+  entry written by an earlier search of the same position cannot end a new
+  search with no PV.
+- **Aborted searches store nothing.** When `time_up` fires, `tt_store` calls in
+  `alpha_beta`/`qsearch` are skipped: bounds unwinding out of an aborted
+  subtree are garbage, and with a stable generation they would poison later moves.
+- **Futility pruning runs before `board_make`**, guarded by a cheap magic-based
+  direct-check test (`quiet_direct_check`), saving make/unmake + NNUE push/pop
+  for pruned quiets.
+- **qsearch persists fail-highs and improved results** (depth-0 entries; EXACT
+  only when a real searched move produced the score).
+- **AVX-VNNI `dpbusd` kernel for NNUE L2** (~+7% NPS, bit-exact result).
+- **`board_is_attacked` early-exit reordering; NNUE dirty-side skip on
+  `nnue_push_na`; weight-row prefetching.**
+- **GA-tuned search constants** (`SearchTunables` defaults): rfp_mult 105,
+  rfp_improving_bonus 24, nmp_eval_bonus_threshold 134, probcut_margin 215,
+  fut_mult 91, fut_improving_adj 76.
+- **SEE pruning of quiet moves** at depth <= 3 (`see_board` extended to empty
+  targets); killers/counters/direct checks exempted (-24% nodes).
+
+### Measured strength (800 games, 100 ms/move, single-threaded)
+
+| match | Elo |
+|---|---|
+| v402 vs v401 | **+157 +/- 20** |
+| v402 vs v314 | **-146 +/- 22** (was -268 +/- 30) |
+
+Phase checks: perft 37/37, UCI extended 119/120 (known non-blocking T3.2c),
+bench node counts deterministic.
+
+### Rejected after negative/tie SPRTs
+
+capture history + 3rd CMH slot (+/-0 but more nodes), removing history aging,
+per-search TT generation bump removal without abort guards (-88),
+stand-pat fail-high stores, counter-move persistence, exact per-piece direct
+checks + UNKNOWN check hints (-35 at fast TC), evasion CMH ordering in qsearch,
+a second GA harvest round (noise).
 
 ## Search
-
 ### Iterative deepening
 
 The engine always starts at depth 1 and searches progressively deeper, retaining the best move from each completed iteration. The previous iteration's score seeds the aspiration window for the next. If the search is interrupted by the time or node budget, the last completed iteration's best move is returned. `MAX_PLY` (64) bounds recursion depth; all per-search state is `_Thread_local` to support Lazy SMP without locking.
