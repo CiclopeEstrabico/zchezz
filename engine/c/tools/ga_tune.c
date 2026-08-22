@@ -468,6 +468,11 @@ static Outcome play_one_game(PlayerSlot *cand, PlayerSlot *base, int cand_white,
 
     tt_clear(cand->tt);
     tt_clear(base->tt);
+    /* v4.02: wipe ordering state per game too — search_reset() no longer
+     * ages history per move, so tables would otherwise persist across the
+     * whole GA run (same reasoning as arena.c's per-game reset). */
+    search_clear_ordering(cand->ss);
+    search_clear_ordering(base->ss);
 
     PlayerSlot *white = cand_white ? cand : base;
     PlayerSlot *black = cand_white ? base : cand;

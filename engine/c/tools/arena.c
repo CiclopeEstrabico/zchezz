@@ -1476,6 +1476,13 @@ static Outcome play_one_game(PlayerInstance *instA, PlayerInstance *instB, int a
      * path-dependent and the TT does not know which game wrote them). */
     if (instA->def->kind == PLAYER_NET) tt_clear(instA->tt);
     if (instB->def->kind == PLAYER_NET) tt_clear(instB->tt);
+    /* v4.02: also wipe per-game ordering state for net: participants.
+     * search_reset() no longer ages history every move, so killers and
+     * history tables would otherwise carry across ALL games of a match
+     * (uci: players get the equivalent reset via their "ucinewgame"
+     * handler). Keeps each game independent, matching selfplay.c. */
+    if (instA->def->kind == PLAYER_NET && instA->ss) search_clear_ordering(instA->ss);
+    if (instB->def->kind == PLAYER_NET && instB->ss) search_clear_ordering(instB->ss);
     /* Give a previously-dead uci: instance a fresh chance every game —
      * see uci_instance_revive_if_dead()'s header comment. No-op for
      * live instances. */

@@ -1,0 +1,225 @@
+/* search.h — Zchezz search layer
+ *
+ * Provides:
+ *   search_init()     — call once after board_init()
+ *   search_reset()    — call at start of every new search
+ *   search_best()     — iterative deepening, returns best move + score
+ *
+ * All search parameters are passed through SearchParams.
+ */
+#pragma once
+#include <stddef.h>
+#include "board.h"
+
+/* Forward declare SearchState for per-thread search data */
+typedef struct SearchState SearchState;
+
+#define MAX_PLY     64
+#ifdef __EMSCRIPTEN__
+#define TT_SIZE     (1 << 19)   /* 512K entries (~13 MB) — fits in WASM memory */
+#else
+#define TT_SIZE     (1 << 22)   /* 4M entries in 2M buckets (~104 MB) — native */
+#endif
+#define TT_BUCKETS  2           /* entries per bucket */
+#define TT_SLOTS    (TT_SIZE / TT_BUCKETS)   /* number of logical slots */
+#define TT_MASK     (TT_SLOTS - 1)
+#define TT_EVAL_NONE 32001
+
+/* TT entry flags (match JS: 0=exact, 1=lower, 2=upper) */
+#define TT_EXACT  0
+#define TT_LOWER  1
+#define TT_UPPER  2
+
+/* ── Transposition table (SoA layout for cache efficiency) ──────
+ * Packaged into a per-instance struct (v4.00) so that independent
+ * searches (native self-play workers, A/B arena) can each own an
+ * isolated TTable instead of sharing process-global arrays.  The
+ * single-search / Lazy-SMP-helpers-share-one-TT behaviour used by
+ * the UCI engine is unchanged: main() allocates ONE TTable (g_tt)
+ * and every SearchParams in that process points at it. */
+typedef struct {
+    uint64_t hash;     /* full 64-bit Zobrist hash (0 = empty slot)  */
+    int32_t  score;    /* stored score (mate distance adjusted)       */
+    int32_t  move;     /* packed move (pack_move() layout)            */
+    int32_t  eval;     /* static eval at store time or TT_EVAL_NONE   */
+    uint16_t gen;      /* generation stamp                            */
+    int16_t  dflag;    /* (depth<<8)|flag — same packing as old D[]   */
+} TTEntry;
+
+/* v4.02: entries switched from six parallel SoA arrays to one array
+ * of packed 24-byte structs.  A probe previously touched up to six
+ * different cache lines (H, then S/D/G/M/E on a hit); now the whole
+ * 2-entry bucket fits in 48 bytes — typically one cache line pair,
+ * with the hash and dflag of both entries in the FIRST line, so most
+ * probes and the prefetch pay a single miss. */
+typedef struct {
+    TTEntry *e;    /* n_entries packed entries, TT_BUCKETS per slot */
+    uint16_t gen;  /* current generation; incremented once per ID iteration
+                    * by the main thread only (helpers read but don't write) */
+    size_t   size; /* number of logical entries (== TT_SIZE today) */
+    size_t   mask; /* slot mask = (size/TT_BUCKETS)-1 */
+} TTable;
+
+/* Allocate a new TTable with n_entries logical entries (must be a
+ * power of two multiple of TT_BUCKETS).  Returns NULL on OOM. */
+TTable *tt_create(size_t n_entries);
+
+/* Free a TTable and all of its backing arrays. Safe to call with NULL. */
+void    tt_destroy(TTable *tt);
+
+/* Physical memset of the hash array + reset of static-eval sentinels
+ * and generation.  Use between independent games (self-play/arena)
+ * to fully wipe stale entries. */
+void    tt_clear(TTable *tt);
+
+/* Logical generation bump (current ucinewgame semantics) — old
+ * entries are ignored on next probe but not physically erased. */
+void    tt_new_generation(TTable *tt);
+
+/* Process-wide default TTable used by the UCI engine (main.c).
+ * Allocated once by search_init(); every SearchParams constructed by
+ * main.c points p->tt at this (Lazy SMP helpers inherit it via the
+ * struct copy of SearchParams — same pointer, intentional sharing). */
+extern TTable *g_tt;
+
+#define MAX_MULTI_PV 6
+
+typedef struct {
+    Move    best;           /* best move found (PV 1) */
+    int     score;          /* score in cp (PV 1), White-relative */
+    int     depth;          /* actual depth searched */
+    long    nodes;
+    long    tb_hits;        /* tablebase probes that returned a result */
+    char    pv[256];        /* PV string for line 1 (UCI notation) */
+    /* Multi-PV extension */
+    int     num_pvs;        /* actual PVs returned (1..MAX_MULTI_PV) */
+    int     scores[MAX_MULTI_PV];   /* scores for each PV (White-relative) */
+    char    pvs[MAX_MULTI_PV][256]; /* PV strings for each line */
+    Move    bests[MAX_MULTI_PV];    /* best move per PV line */
+} SearchResult;
+
+/* ── Search parameters ────────────────────────────────────────── */
+typedef struct {
+    int  max_depth;         /* hard depth limit */
+    int  start_depth;       /* starting depth for iterative deepening (0 or 1 = start from 1) */
+    int  time_limit_ms;     /* 0 = no time limit */
+    long node_limit;        /* 0 = unlimited */
+    int  multi_pv;          /* number of PV lines (1..MAX_MULTI_PV) */
+    int  threads;           /* number of search threads (1 = single, Lazy SMP) */
+    volatile int *stop;     /* pointer to shared stop flag (NULL = no external stop) */
+    SearchState *search_state;  /* per-thread state (NULL = use global default) */
+    void (*info_cb)(int depth, int score, long nodes, const char *pv, int turn, int multipv);
+    TTable *tt;              /* transposition table to search with (NULL = use g_tt) */
+    /* v4.00: MultiPV time-budget sharing.
+     *   0 (default) = current/interactive behavior: EACH PV line gets its
+     *       own full time_limit_ms budget (deadline reset every PV loop
+     *       iteration).  This is what UCI `go movetime X multipv N` wants —
+     *       every candidate line should be searched as deeply as a single
+     *       PV search would be.
+     *   1 = the total time_limit_ms is divided evenly across the n_pvs
+     *       lines (time_limit_ms / n_pvs each), so the whole MultiPV call
+     *       costs about the same as ONE ordinary search instead of N.
+     *       Intended for callers that only want per-move root scores
+     *       (e.g. the self-play generator sampling by temperature), not
+     *       full per-line analysis depth.  See search_best() for the
+     *       depth>=2 guarantee this relies on. */
+    int  mpv_share_budget;
+} SearchParams;
+
+/* ── Tunable search constants (v4.00 GA tuner, tools/ga_tune.c) ──
+ * The pruning/reduction margins alpha_beta() uses were originally bare
+ * literals scattered through the function body. This struct pulls the
+ * ones worth tuning out into one place, read from g_tune at each
+ * decision point, so a search can be re-parameterised WITHOUT
+ * recompiling — the whole point being that tools/ga_tune.c can run one
+ * individual's parameter vector per thread.
+ *
+ * g_tune is _Thread_local with a static default initializer (see
+ * search.c), so every thread that never touches it (main.c's UCI
+ * thread, every selfplay.c/arena.c worker) transparently gets the
+ * SAME behavior as before this struct existed — nothing has to call
+ * search_tunables_apply() for existing tools to keep working.
+ *
+ * A tuner that DOES want a different vector per player must call
+ * search_tunables_apply() on its worker thread immediately before each
+ * search_best() call for that player (see ga_tune.c's play_one_game()
+ * equivalent) — g_tune is read on every node of the NEXT search only,
+ * there is no per-node player tag. */
+typedef struct {
+    int    razor_margin;        /* depth-1 razoring: prune if eval+margin < alpha (cp) */
+    int    rfp_mult;             /* reverse futility: margin = depth*rfp_mult - (improving?bonus:0) (cp/ply) */
+    int    rfp_improving_bonus;  /* RFP margin reduction when static eval is improving (cp) */
+    int    nmp_base;             /* null-move reduction R = nmp_base + depth/nmp_depth_div */
+    int    nmp_depth_div;        /* see above; must be >= 1 */
+    int    nmp_max_r;            /* cap on null-move reduction R */
+    int    nmp_eval_bonus_threshold; /* extra +1 to R when static_eval-beta exceeds this (cp) */
+    int    probcut_margin;       /* ProbCut: shallow-search beta = beta + margin (cp) */
+    double lmr_divisor;          /* LMR: R = ln(depth)*ln(move_count) / lmr_divisor (lower = more aggressive) */
+    int    fut_mult;             /* futility margin(depth) = fut_mult * depth (cp/ply), depth capped at 8 */
+    int    fut_improving_adj;    /* extra futility margin allowed when NOT improving (cp) */
+    int    asp_delta_init;       /* aspiration window: initial half-width around previous score (cp) */
+    int    asp_delta_max;        /* aspiration window: half-width cap after widening (cp) */
+} SearchTunables;
+
+/* Per-thread active tunable set. Declared here, DEFINED with the
+ * project's current hand-tuned defaults in search.c so a thread that
+ * never calls search_tunables_apply() behaves exactly as before this
+ * struct existed. */
+extern _Thread_local SearchTunables g_tune;
+
+/* Copy *t into this thread's g_tune. Cheap (13 scalars) — safe to call
+ * before every search_best() if a caller needs per-call tunables (see
+ * ga_tune.c). */
+void search_tunables_apply(const SearchTunables *t);
+
+/* The struct's compiled-in defaults, as a plain function (not just the
+ * g_tune initializer) so a caller can build a "baseline" vector without
+ * hardcoding the numbers a second time. */
+SearchTunables search_tunables_defaults(void);
+
+/* Syzygy tablebase probing configuration (set from UCI options) */
+extern int g_tb_probe_depth;   /* minimum depth for WDL probing */
+extern int g_tb_probe_limit;   /* maximum pieces for probing */
+
+/* One-time initialisation (LMR table, MVV-LVA, clear TT) */
+void search_init(void);
+
+/* Reset per-search state (killers, history, counters) */
+void search_reset(SearchState *ss);
+
+/* Hard-zero every learned ordering table (killers, history, counter-moves,
+ * continuation history).  search_reset() only AGES history (>>= 2) so that
+ * ordering knowledge carries across the moves of one game, which is what you
+ * want inside a game and NOT what you want across independent games: a
+ * self-play worker that keeps its tables would make game N's data depend on
+ * which games happened to run before it on that worker, and since games are
+ * handed out dynamically that differs run to run.  Call this between games
+ * (next to tt_clear()) to make each game self-contained.
+ * Zquoridor's equivalent (resetOrderingState()) zeroes the same tables. */
+void search_clear_ordering(SearchState *ss);
+
+/* Zera tabelas de história completamente (chamar em ucinewgame) */
+void search_history_clear(SearchState *s);
+
+/* Default global SearchState (used by main thread / single-threaded mode) */
+extern SearchState g_ss;
+
+/* Allocate a new SearchState on the heap (for helper threads) */
+SearchState *search_state_new(void);
+
+/* Free a heap-allocated SearchState */
+void search_state_free(SearchState *state);
+
+/* Find best move.  Board b is not modified (make/unmake balanced). */
+SearchResult search_best(Board *b, const SearchParams *p);
+
+/* Stand-alone eval for a position (calls NNUE or fast classical) */
+int eval_stm(Board *b);
+
+/* WASM sret wrapper — called from JS worker via ccall */
+void search_best_sret(SearchResult *out, Board *b, const SearchParams *p);
+
+/* WASM helper — applies a space-separated UCI move list to *b (which must
+ * already be loaded with board_load_fen).  Seeds b->hist so that
+ * search_best can detect threefold repetitions correctly. */
+void board_apply_moves(Board *b, const char *moves_str);
