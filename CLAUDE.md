@@ -4,7 +4,14 @@
 
 Zchezz is a chess engine written in C with NNUE evaluation, targeting both native platforms (Windows/Linux/Android) and WebAssembly for browser play. The engine communicates via the UCI protocol.
 
-**Current engine version: `engine/c/zchezz_v400/`.** NNUE architecture HalfKP-4Bucket (README.md § NNUE), trained by `train/train_nnue.py` and exported to NNU4 by `train/export_nnu4.py`. A strength number for a network that has not cleared Phase 1 means nothing — an undertrained net loses by construction, so never quote Elo for one.
+**Current engine version: `engine/c/zchezz_v402/`.** NNUE HalfKP-4Bucket
+(README.md § NNUE), trained by `train/train_nnue.py` and exported to NNU4 by
+`train/export_nnu4.py`, on top of the v4.02 search rework (README.md §
+Search). Self-play / arena / tuning tools build against it by default
+(`ENGINE=v402`). `engine/c/zchezz_v403/` is an untracked LC0-training working
+copy of the same code.
+
+A strength number for a network that has not cleared Phase 1 means nothing — an undertrained net loses by construction, so never quote Elo for one.
 
 For architecture, file structure, and build instructions, see `README.md` — this file is rules only.
 
@@ -146,7 +153,7 @@ Rules, all of them enforced by review:
    is not copied into individual files. A `DEFAULT_` prefix marks a knob
    specific to one tool.
 5. **Old invocations keep working.** Where a script had a positional form
-   (`test_perft.py v400`), it is translated to the equivalent flag.
+   (`test_perft.py v402`), it is translated to the equivalent flag.
 
 **Python** — declare each option once, next to its constant, and let
 `utils/cliconf.py` build the parser from that list:

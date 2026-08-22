@@ -12,7 +12,7 @@ Written in C with a custom-trained NNUE evaluation, playable directly in the bro
 
 |                        |                                                                            |
 | ---------------------- | -------------------------------------------------------------------------- |
-| **Version**      | v4.00 —`engine/c/zchezz_v400/`                                          |
+| **Version**      | v4.02 —`engine/c/zchezz_v402/`                                          |
 | **Search**       | Alpha-beta with staged move generation, aspiration windows, PVS, Lazy SMP  |
 | **Evaluation**   | Custom NNUE, HalfKP-4Bucket — int16/int8 quantized, AVX2 SIMD + WASM SIMD |
 | **Endgames**     | Syzygy tablebase support (3-4-5 piece WDL + DTZ probing)                   |
@@ -77,7 +77,7 @@ python train/export_nnu4.py                # checkpoint -> NNU4 weight file
 
 ### Architecture — HalfKP-4Bucket
 
-Implemented in `engine/c/zchezz_v400/nnue.c`.
+Implemented in `engine/c/zchezz_v402/nnue.c`.
 
 ```
 Features : HalfKP-4Bucket, 2560 per perspective (no hand-built extra features —
@@ -523,7 +523,7 @@ cd engine/build
 build_native.bat v400              # Windows one-click compile (MinGW); ENGINE arg optional
 mingw32-make ENGINE=v400 native    # Windows, via make
 make ENGINE=v400 native            # Linux
-# binary lands in engine/c/zchezz_v400/zchezz.exe
+# binary lands in engine/c/zchezz_v402/zchezz.exe
 ```
 
 ### Native tools (selfplay / arena)
@@ -549,7 +549,7 @@ build_wasm.bat v400
 # Compiles WASM, bundles HTML, and copies the result to the repo-root index.html
 ```
 
-The bundler (`bundle.py`) reads the compiled WASM binary, the NNUE weight file, and the JS worker, base64-encodes them, and splices everything directly into the HTML as inline constants. It also embeds the CBurnett, Merida, and Staunty piece SVGs from `engine/build/pieces/` so every piece style is available without any network request. The version string is parsed automatically from the engine folder name (e.g. `zchezz_v400` → `4.00`). The resulting file is fully self-contained — no server, no network, no dependencies.
+The bundler (`bundle.py`) reads the compiled WASM binary, the NNUE weight file, and the JS worker, base64-encodes them, and splices everything directly into the HTML as inline constants. It also embeds the CBurnett, Merida, and Staunty piece SVGs from `engine/build/pieces/` so every piece style is available without any network request. The version string is parsed automatically from the engine folder name (e.g. `zchezz_v402` → `4.02`). The resulting file is fully self-contained — no server, no network, no dependencies.
 
 WASM builds compile with `-DNO_TABLEBASES -DNO_BOOK` (no file I/O is available in the
 browser sandbox) and `-msimd128` for 128-bit WASM SIMD. The build is single-threaded (no
@@ -707,7 +707,7 @@ zchezz/
 │   ├── build/                      SHARED build system (Makefile, build_*.bat/.sh, bundle.py, pieces/)
 │   ├── c/tools/                    SHARED native tool sources (selfplay.c, arena.c/.h) — current-API-only
 │   ├── c/zchezz_v314/              Previous released engine (~2900 Elo, measured) — the build index.html still serves
-│   └── c/zchezz_v400/              Engine source code
+│   └── c/zchezz_v402/              Engine source code (v4.02)
 │       ├── board.c / board.h          Board state, bitboards, magic attacks, make/unmake
 │       ├── search.c / search.h        Alpha-beta, staged move gen, TT, LMR, NMP, Lazy SMP
 │       ├── nnue.c / nnue.h            NNUE inference, incremental accumulator, NNU4 loader

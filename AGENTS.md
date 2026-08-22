@@ -4,7 +4,16 @@
 
 Zchezz is a chess engine written in C with NNUE evaluation, targeting both native platforms (Windows/Linux/Android) and WebAssembly for browser play. The engine communicates via the UCI protocol.
 
-**Current engine version: `engine/c/zchezz_v400/`.** Its NNUE architecture (HalfKP-4Bucket, see README.md § NNUE) is implemented and structurally validated, but the network is **not trained yet** — with random/placeholder weights the engine plays badly by construction. Do not run or interpret Phase 2–9 strength tests against v4.00 until a trained NNU4 weight file exists; until then only Phase 1 (perft, UCI, structural checks) is meaningful.
+**Current engine version: `engine/c/zchezz_v402/`.** NNUE HalfKP-4Bucket
+(README.md § NNUE) with a TRAINED Gen-1 network plus the v4.02 search rework
+(stable-TT policy, packed TT entries, VNNI eval kernel, GA-tuned pruning
+constants — see README.md § Search). Measured: **+157 ±20 Elo vs v401**,
+**−146 ±22 vs v314** (800 games, 100 ms/move). Phase 1 checks pass (perft
+37/37, UCI extended 119/120 with known non-blocking T3.2c).
+
+`engine/c/zchezz_v403/` is an UNTRACKED working copy used by the LC0-training
+effort (branch `v403-lc0-training`); its engine code is identical to v402 —
+do not release from it, and do not edit v402's files expecting them there.
 
 For architecture, file structure, and build instructions, see `README.md` — this file is rules only.
 

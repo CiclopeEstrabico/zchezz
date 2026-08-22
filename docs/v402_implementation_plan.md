@@ -93,6 +93,41 @@ Pesos: NNU4 (~2.6 MB), quantizacao QA=255 QB=64
 
 ---
 
+## RESULTADO DA CAMPANHA DE BUSCA — V4.02 (CONCLUIDO 2026-08-22)
+
+Branch `v402-search-strength` (mesclado em `v400-data-and-harness`).
+Sem tocar na rede: apenas politica de busca, memoria e constantes.
+Cada mudanca passou por arena cega de 800 jogos a 100 ms/lance antes
+de ser mantida; tudo que regrediu foi revertido (lista no README,
+secao Search).
+
+| confronto                    | Elo                |
+|------------------------------|--------------------|
+| v402 vs v401                 | **+157 +/- 20**    |
+| v402 vs v314                 | **-146 +/- 22**    |
+| v401 vs v314 (linha de base) | -268 +/- 30        |
+
+Ganhos principais: geracao da TT estavel dentro da partida + corte de
+raiz proibido + nada gravado apos aborto (+109 so isso), ajuste fino
+das 13 constantes por algoritmo genetico (+23), poda SEE de silenciosos
+(-24% nos nos), entradas de TT compactas (AoS 24 B), nucleo AVX-VNNI na
+camada L2 (+7% NPS), futilidade antes do make, stores da qsearch.
+Rejeitados com SPRT negativo: historico de capturas, 3o slot de CMH,
+remocao do envelhecimento de historico, stores de stand-pat,
+persistencia de counter-moves, xeque direto exato por peca.
+
+Ferramentas: pipeline de treino (selfplay/arena/suite/torneio)
+reapontado para a v402; `ga_tune.exe`, `arena.exe`, `selfplay.exe`
+recompilados contra ela. Smoke test de auto-jogo OK (4 jogos, 339
+posicoes).
+
+Proximo passo do roadmap (abaixo) continua valido, agora sobre a base
+de busca v402: selfplay Gen-1 -> treino Gen-2 -> gate SPRT. O folder
+nao-rastreado `engine/c/zchezz_v403/` e o branch `v403-lc0-training`
+abrigam o esforco de dados LC0 para esse ciclo.
+
+---
+
 ## ROADMAP — A PARTIR DE AGORA
 
 ### O loop de bootstrap

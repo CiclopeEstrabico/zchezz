@@ -18,7 +18,7 @@ of excluded paths (summarized inline below as *(gitignored)*).
 | File | Description |
 |------|-------------|
 | `folder_structure.md` | This file — explains every folder and file |
-| `v400_implementation_plan.md` | Design plan for the v4.00 HalfKP-4Bucket NNUE rewrite |
+| `v402_implementation_plan.md` | Plan + results: v4.00/v4.01 NNUE rewrite and the v4.02 search campaign |
 
 ---
 
@@ -56,13 +56,13 @@ See the root `README.md`, "engine/c/tools/" section.
 | `arena.c` / `arena.h` | Native A/B strength-gate harness — SPRT gate for the training bootstrap loop |
 | `test_sprt_synthetic.c` | Throwaway synthetic SPRT/Elo math verification, not part of the normal build |
 
-### `engine/c/zchezz_v400/` — v4.00: Current Engine (NNUE not yet trained)
+### `engine/c/zchezz_v402/` — v4.02: Current Engine (trained Gen-1 net + search rework)
 
-HalfKP-4Bucket NNUE architecture. Compiles, plays, passes perft; structurally validated
-(feature-index parity, incremental-accumulator-vs-rebuild proofs) but has **no trained
-weight file yet** — see the root `README.md` ("NNUE → v4.00" section) for the full
-architecture writeup and verification status, and `docs/v400_implementation_plan.md`
-("STATUS ATUAL") for what's done vs pending. Contains **only** core sources plus a couple of
+HalfKP-4Bucket NNUE architecture with a TRAINED Gen-1 network plus the v4.02 search
+rework (stable-TT policy, packed TT entries, AVX-VNNI eval kernel, GA-tuned pruning
+constants — see `README.md` § Search for the full writeup and measured strength, and
+`docs/v402_implementation_plan.md` ("RESULTADO DA CAMPANHA DE BUSCA") for the change
+log. Contains **only** core sources plus a couple of
 generated/version-specific files — build files and tool sources live in `engine/build/`
 and `engine/c/tools/` respectively (see above).
 
@@ -91,7 +91,7 @@ and `engine/c/tools/` respectively (see above).
 Last engine version with a trained network; currently what's actually deployed and
 playable at the GitHub Pages link. Kept in the repo as the previous stable baseline
 (per the versioning rule: new work happens in a new `vXXX` folder, this one is not
-modified). Unlike `zchezz_v400/`, this folder is **self-contained**: it keeps its own
+modified). Unlike `zchezz_v402/`, this folder is **self-contained**: it keeps its own
 `Makefile`, `build_wasm.bat`, `compile_zchezz.bat`, and `bundle.py` — released versions
 are frozen and don't get migrated into the shared build system retroactively. The
 **only** change made to this folder when `pieces/` moved to `engine/build/pieces/` was
@@ -253,41 +253,41 @@ exact patterns):
 ## Build Commands
 
 All build commands run from `engine/build/` (shared build system, see above), not from
-inside `engine/c/zchezz_vXXX/`. Every target accepts `ENGINE=vXXX` (default: `v400`).
+inside `engine/c/zchezz_vXXX/`. Every target accepts `ENGINE=vXXX` (default: `v402`).
 
 ### Windows (GCC/MinGW)
 ```bash
 cd engine/build
-build_native.bat v400        # Windows one-click compile; ENGINE arg optional
-mingw32-make ENGINE=v400 native   # or via Makefile — Windows
-make ENGINE=v400 native            # Linux
+build_native.bat v402        # Windows one-click compile; ENGINE arg optional
+mingw32-make ENGINE=v402 native   # or via Makefile — Windows
+make ENGINE=v402 native            # Linux
 
 # Or manually — output goes INTO the version folder, not engine/build/:
-gcc -O3 -ffast-math -D_GNU_SOURCE -std=c11 -mavxvnni -mavx2 -I../c/zchezz_v400 \
-    -o ../c/zchezz_v400/zchezz.exe ../c/zchezz_v400/main.c ../c/zchezz_v400/board.c \
-    ../c/zchezz_v400/search.c ../c/zchezz_v400/nnue.c ../c/zchezz_v400/syzygy.c \
-    ../c/zchezz_v400/tbprobe.c ../c/zchezz_v400/book.c -static -lm -pthread
+gcc -O3 -ffast-math -D_GNU_SOURCE -std=c11 -mavxvnni -mavx2 -I../c/zchezz_v402 \
+    -o ../c/zchezz_v402/zchezz.exe ../c/zchezz_v402/main.c ../c/zchezz_v402/board.c \
+    ../c/zchezz_v402/search.c ../c/zchezz_v402/nnue.c ../c/zchezz_v402/syzygy.c \
+    ../c/zchezz_v402/tbprobe.c ../c/zchezz_v402/book.c -static -lm -pthread
 ```
 
 ### WASM (Emscripten)
 ```bash
-build_wasm.bat v400          # Windows (emcc + bundle.py); ENGINE arg optional
+build_wasm.bat v402          # Windows (emcc + bundle.py); ENGINE arg optional
 # Or:
-mingw32-make ENGINE=v400 wasm     # Produces ../c/zchezz_v400/zchezz_wasm.{js,wasm}
-mingw32-make ENGINE=v400 bundle   # Produces ../c/zchezz_v400/zchezz_bundle.html
+mingw32-make ENGINE=v402 wasm     # Produces ../c/zchezz_v402/zchezz_wasm.{js,wasm}
+mingw32-make ENGINE=v402 bundle   # Produces ../c/zchezz_v402/zchezz_bundle.html
 ```
 
 ### HTML Bundle
 ```bash
-python bundle.py ../c/zchezz_v400/zchezz_wasm.html ../c/zchezz_v400/zchezz_wasm.js \
-    ../c/zchezz_v400/zchezz_wasm.wasm ../c/zchezz_v400/nnue_weights.bin
+python bundle.py ../c/zchezz_v402/zchezz_wasm.html ../c/zchezz_v402/zchezz_wasm.js \
+    ../c/zchezz_v402/zchezz_wasm.wasm ../c/zchezz_v402/nnue_weights.bin
 ```
 
 ### Native tools
 ```bash
 cd engine/build
-mingw32-make ENGINE=v400 selfplay   # -> engine/build/selfplay.exe
-mingw32-make ENGINE=v400 arena      # -> engine/build/arena.exe
+mingw32-make ENGINE=v402 selfplay   # -> engine/build/selfplay.exe
+mingw32-make ENGINE=v402 arena      # -> engine/build/arena.exe
 # engine/c/tools/selfplay.c and engine/c/tools/arena.c link against the
 # selected version's board.c / search.c / nnue.c sources, same as the UCI
 # binary — but they are SHARED sources tracking the current engine API
