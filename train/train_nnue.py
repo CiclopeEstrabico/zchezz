@@ -271,12 +271,28 @@ DATASETS = [
     {"name": "extraquiet_cp_sfd12_endgames_filter",               "pct": 0.50, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  262k  human endgames / SF depth 12
     {"name": "lichess_cp_sf400k_filter",                          "pct": 0.00, "mode": "sample-files", "col": "cp", "lam": 0.00},   #  150k  lichess / SF 400k
     {"name": "miscelaneous_cp_sf1M_res_filter",                   "pct": 1.00, "mode": "sample-rows",  "col": "cp", "lam": 0.00},   #   34k  mixed / SF 1M
+    # AlphaZero-style results-only source (TD(1)): LCZ test91 self-play,
+    # imported by train/labeling/import_lc0.py into data/lc0_test91_res/.
+    # Carries fen+result (+ LC0's own eval as cp, derived from root_q), so
+    # lam=1.00 trains purely on outcomes while future lam<1 runs can reuse
+    # the same files without relabelling.
+    {"name": "lc0_test91_res",                                    "pct": 0.00, "mode": "sample-files",  "col": "result", "lam": 1.00},   # 351k  LC0 test91 selfplay / real game outcomes
 ]
 
 # Packed .bin selfplay sources (Appendix F.2/F.3). Same rules; `k` is the
 # wl_target blend (1.0 = pure game result, see dataset.py).
+#
+# READY-TO-CLICK AlphaZero-style sources (results-only, TD(1)): imported
+# from LCZ run test91 by train/labeling/import_lc0.py, then quiet-filtered
+# to .bin by train/labeling/process_positions.py --filters quiet. The
+# records carry LC0's own search eval as eval_cp, so k can be lowered
+# later WITHOUT relabelling.
+#   smoke : 244k rows   (already built on this branch, 4 tars of 2026-08-20)
+#   big   : ~9M rows    (run `import_lc0.py --big --go` first — see its docstring)
 BIN_DATASETS = [
     # {"path": "C:/nnue_checkpoints/selfplay/gen1/*.bin", "pct": 1.00, "k": 1.0, "name": "gen1"},
+    # {"path": "C:/Zchezz/data/lc0_test91_res_q/*.bin",   "pct": 1.00, "k": 1.0, "name": "lc0_t91_q_smoke"},
+    # {"path": "C:/Zchezz/data/lc0_t91_big_q/*.bin",      "pct": 1.00, "k": 1.0, "name": "lc0_t91_big"},
 ]
 
 
