@@ -11,9 +11,10 @@ constants — see README.md § Search). Measured: **+157 ±20 Elo vs v401**,
 **−146 ±22 vs v314** (800 games, 100 ms/move). Phase 1 checks pass (perft
 37/37, UCI extended 119/120 with known non-blocking T3.2c).
 
-`engine/c/zchezz_v403/` is an UNTRACKED working copy used by the LC0-training
-effort (branch `v403-lc0-training`); its engine code is identical to v402 —
-do not release from it, and do not edit v402's files expecting them there.
+`engine/c/zchezz_v403/` is the LC0-training working copy (branch
+`v403-lc0-training`, tracked since commit bb26755); its engine code is identical
+to v402 - do not release from it, and do not edit v402's files expecting them
+there.
 
 For architecture, file structure, and build instructions, see `README.md` — this file is rules only.
 

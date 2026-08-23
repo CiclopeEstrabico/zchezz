@@ -8,8 +8,8 @@ Zchezz is a chess engine written in C with NNUE evaluation, targeting both nativ
 (README.md § NNUE), trained by `train/train_nnue.py` and exported to NNU4 by
 `train/export_nnu4.py`, on top of the v4.02 search rework (README.md §
 Search). Self-play / arena / tuning tools build against it by default
-(`ENGINE=v402`). `engine/c/zchezz_v403/` is an untracked LC0-training working
-copy of the same code.
+(`ENGINE=v402`). `engine/c/zchezz_v403/` is the LC0-training working copy
+(tracked on branch `v403-lc0-training`), same code as v402.
 
 A strength number for a network that has not cleared Phase 1 means nothing — an undertrained net loses by construction, so never quote Elo for one.
 

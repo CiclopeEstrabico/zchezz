@@ -74,11 +74,14 @@ import numpy as np
 from encoding import king_bucket, halfkp_active_indices, NN_FEAT_IN
 
 HERE = Path(__file__).resolve().parent
-NNUE_C = HERE.parent / "engine" / "c" / "zchezz_v400" / "nnue.c"
 
 # ═══════════════ CONFIGURATION ═══════════════
-N_POSITIONS = 300   # random positions compared between the C engine and PyTorch
-POSITION_SEED = 42  # RNG seed for _random_positions(), so runs are reproducible
+ENGINE_DIR  = "zchezz_v403"  # engine folder whose nnue.c is compiled for the C side
+N_POSITIONS = 300            # random positions compared between the C engine and PyTorch
+POSITION_SEED = 42           # RNG seed for _random_positions(), so runs are reproducible
+# ════════════════════════════════════════════
+
+NNUE_C = HERE.parent / "engine" / "c" / ENGINE_DIR / "nnue.c"
 
 # ═══════════════ COMMAND LINE ═══════════════
 # The CONFIGURATION block is the interface: a bare `python train/check_parity.py`

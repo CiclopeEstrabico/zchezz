@@ -1,6 +1,14 @@
 ﻿# Zchezz v4.00/v4.01 — Implementation Plan (Status & Roadmap)
 
-_Last updated: 2026-08-16_
+_Last updated: 2026-08-23_
+
+> **Status da branch `v403-lc0-training` (2026-08-23):** 10 receitas de treino
+> com dados LCZ test91 (fresh e warm-start da v402) nao superaram a v402 —
+> teto = paridade (-3 +/-29, soup de dois warm-starts). Diagnostico: calibracao
+> dos rotulos LCZ vs margins desta busca; paridade Python<->C confirmada sem
+> mismatches. Proximo passo em andamento: loop de self-play proprio
+> (`tools/selfplay.c`, ~6-7 jogos/s a 20k nodes/lance); iteracao 1 pausada com
+> ~1.64M posicoes. Bug avistado uma vez no log: `[BUG] undo overflow`.
 
 ---
 

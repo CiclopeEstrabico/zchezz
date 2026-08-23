@@ -46,6 +46,28 @@ The network is trained in PyTorch on quiet-position data: human games (lichess a
 assorted collections) evaluated by Stockfish, several generations of iterative
 self-play, and generated endgame positions. **173.5 M positions.**
 
+### LC0 self-play experiment (branch `v403-lc0-training`)
+
+An attempt to close the gap to v314 by training on AlphaZero-style data: LC0
+test91 self-play tars, imported by `train/labeling/import_lc0.py` (chunk
+decoder, quiet filter via `process_positions.py --out-format bin`), then
+fine-tuned from the v402 weights (`train/make_pt_from_nnu4.py` rebuilds a
+loadable `.pt` from the exported NNU4 binary). Result after 10 gated recipes
+(400 games each): fresh nets lose 59-173 Elo; warm-started nets peak at
+**parity with v402 (-3 +/-29, weight-soup of two runs)** and MORE LCZ data is
+monotonically worse (30M -> 52M rows: -12 -> -45) at every learning rate,
+outcome/eval blend and epoch count tried. Diagnosis: LCZ root-Q labels have a
+draw-compressed calibration that this engine's margin-tuned classical search
+punishes; label scale, not hyperparameters, is the ceiling. Feature parity
+Python<->C verified (`train/check_parity.py`, 17,720 cases, 0 mismatches).
+
+Next step in flight: a pure self-play loop (`engine/c/tools/selfplay.c`,
+~6-7 games/s at 20k nodes/move, labels = real result + own-search eval,
+k=0.5) so training targets come from THIS search's own distribution.
+Iteration 1 paused at ~18k games / 1.64M positions. Known issue spotted in
+its log once: `[BUG] undo overflow` — investigate before long generation
+runs.
+
 Datasets store two columns: `cp`, the evaluation in centipawns, and `result`, the
 real game outcome (0.0 / 0.5 / 1.0). Both are White-relative. `wdl` is`sigmoid(cp / 320)` — a transform of `cp`, never an outcome, and never stored, since a stored copy can rot apart from the `cp` it came from. The training target is the blend `lam * result + (1 - lam) * wdl`, computed at training time with a per-dataset `lam`.
 
