@@ -26,14 +26,15 @@
 # Makefile itself is unchanged either way.
 
 # ═══════════════════════════════════════════════ CONFIGURATION ═══
-ENGINE  ?= v402        # engine/c/zchezz_$(ENGINE)/ — default = newest version
+ENGINE  ?= v403        # engine/c/zchezz_$(ENGINE)/ — default = active version
 # ════════════════════════════════════════════════════════════════
 
 EDIR    = ../c/zchezz_$(ENGINE)
 TOOLDIR = ../c/tools
 
 CC      = gcc
-CFLAGS  = -O3 -ffast-math -D_GNU_SOURCE -std=c11 -mavxvnni -mavx2 -I$(EDIR)
+ARCH_FLAGS ?= -mavxvnni -mavx2
+CFLAGS  = -O3 -ffast-math -D_GNU_SOURCE -std=c11 $(ARCH_FLAGS) -I$(EDIR)
 WARNS   = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-maybe-uninitialized \
           -Wno-misleading-indentation -Wno-sign-compare -Wno-unused-function -Wno-parentheses
 LDFLAGS = -static -lm -pthread
@@ -58,12 +59,22 @@ else
     PYTHON = python3
 endif
 
-.PHONY: native clean wasm bundle selfplay arena ga_tune
+.PHONY: native debug sanitize test-c clean wasm bundle selfplay arena ga_tune
 
 native: $(TARGET)
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(WARNS) -o $@ $^ $(LDFLAGS)
+
+debug: $(SRCS)
+	$(CC) -O0 -g3 -D_GNU_SOURCE -std=c11 -I$(EDIR) -Wall -Wextra -Wpedantic -Wshadow -o $(EDIR)/zchezz_debug.exe $(SRCS) -lm -pthread
+
+sanitize: $(SRCS)
+	$(CC) -O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined -D_GNU_SOURCE -std=c11 -I$(EDIR) -o $(EDIR)/zchezz_sanitize.exe $(SRCS) -lm -pthread -fsanitize=address,undefined
+
+test-c: ../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c
+	$(CC) -O2 -g -D_GNU_SOURCE -std=c11 -I$(EDIR) -o test_engine_invariants.exe ../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c -lm
+	./test_engine_invariants.exe $(EDIR)/nnue_weights.bin
 
 # Native in-process self-play data generator (Appendix F.2/F.3 of
 # docs/v400_implementation_plan.md). Links board.c/search.c/nnue.c but
@@ -105,4 +116,4 @@ bundle: wasm
 	$(PYTHON) bundle.py $(EDIR)/zchezz_wasm.html $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/nnue_weights.bin
 
 clean:
-	rm -f $(TARGET) arena.exe selfplay.exe ga_tune.exe *.o $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/zchezz_bundle.html
+	rm -f $(TARGET) $(EDIR)/zchezz_debug.exe $(EDIR)/zchezz_sanitize.exe test_engine_invariants.exe arena.exe selfplay.exe ga_tune.exe *.o $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/zchezz_bundle.html

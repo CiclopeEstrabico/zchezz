@@ -5,13 +5,16 @@
 Zchezz is a chess engine written in C with NNUE evaluation, targeting both native platforms (Windows/Linux/Android) and WebAssembly for browser play. The engine communicates via the UCI protocol.
 
 **Current engine version: `engine/c/zchezz_v402/`.** NNUE HalfKP-4Bucket
-(README.md § NNUE), trained by `train/train_nnue.py` and exported to NNU4 by
-`train/export_nnu4.py`, on top of the v4.02 search rework (README.md §
-Search). Self-play / arena / tuning tools build against it by default
-(`ENGINE=v402`). `engine/c/zchezz_v403/` is the LC0-training working copy
-(tracked on branch `v403-lc0-training`), same code as v402.
+(README.md § NNUE) with a TRAINED Gen-1 network plus the v4.02 search rework
+(stable-TT policy, packed TT entries, VNNI eval kernel, GA-tuned pruning
+constants — see README.md § Search). Measured: **+157 ±20 Elo vs v401**,
+**−146 ±22 vs v314** (800 games, 100 ms/move). Phase 1 checks pass (perft
+37/37, UCI extended 119/120 with known non-blocking T3.2c).
 
-A strength number for a network that has not cleared Phase 1 means nothing — an undertrained net loses by construction, so never quote Elo for one.
+`engine/c/zchezz_v403/` is the LC0-training working copy (branch
+`v403-lc0-training`, tracked since commit bb26755); its engine code is identical
+to v402 - do not release from it, and do not edit v402's files expecting them
+there.
 
 For architecture, file structure, and build instructions, see `README.md` — this file is rules only.
 
@@ -114,80 +117,26 @@ These checks catch regressions in seconds. Run after every recompile.
 - Document all changes in the `README.md` file with clarity and details.
 - Document all changes in the engine with clarity and details. We want no regressions in future work.
 
-**Comments and docstrings explain the PRESENT, not the past.** A reader opens a
-file to learn what it does, what to set, and how to run it — not to learn what a
-previous version got wrong. Write:
+### 8. CONFIGURATION BLOCK AT THE TOP OF EVERY TOOL — MANDATORY
 
-- **what the tool does**, in one paragraph, first;
-- **how to run it**, with a real command line;
-- **what to set**, naming the constants in the order that matters;
-- **the traps that are still live**: an invariant that will break something if
-  violated ("keep this 320, it must match `nnue.c`"), stated as a rule.
+**Everything reachable from the command line MUST also be settable from a
+documented configuration block at the top of the file, and the CLI default MUST
+BE that constant — not a copy of it.** A flag with no documented default in the
+config block is a defect; so is a default that is written twice and can drift.
 
-Do NOT write: "this used to be X", "an earlier draft had a bug", "v3.14 did it
-differently", "kept for the record", "this was measured on 47M rows", or a
-paragraph arguing with a decision that is already made. If a past mistake taught
-a rule, keep the RULE and drop the story. Comments in English (CLAUDE.md
-§ Coding Conventions); user-facing strings may be in Portuguese.
-
-### 8. CONFIGURATION BLOCK FIRST, CLI SECOND — MANDATORY
-
-**The configuration block at the top of the file IS the interface.** Running the
-tool with NO arguments at all must work and must do exactly what those constants
-say. The command line only OVERRIDES them, for scripted or one-off runs. Every
-value reachable from the command line has a documented constant with units; a
-flag with no constant is a defect, and so is a default written twice, since the
-two copies will drift.
-
-Rules, all of them enforced by review:
-
-1. **The CLI default IS the constant**, never a copy of the literal.
-2. **No knob hidden in the body of the code.** A timeout, a port, an output
-   path, a seed, a sampling fraction — if the code reads it, the top of the file
-   declares it.
-3. **`--show-config`**: every tool prints its resolved settings and exits,
-   running nothing and writing nothing. This is how you check what a bare run
-   will do before starting a job that takes hours.
-4. **One name per concept, everywhere.** The shared vocabulary lives in ONE
-   place — `utils/cliconf.py`, section "SHARED CONFIGURATION VOCABULARY" — and
-   is not copied into individual files. A `DEFAULT_` prefix marks a knob
-   specific to one tool.
-5. **Old invocations keep working.** Where a script had a positional form
-   (`test_perft.py v402`), it is translated to the equivalent flag.
-
-**Python** — declare each option once, next to its constant, and let
-`utils/cliconf.py` build the parser from that list:
-
+**Python:**
 ```python
 # ═══════════════ CONFIGURATION ═══════════════
 GAMES       = 500      # number of games to play
 MOVETIME_MS = 100      # per-move budget, milliseconds
 CONCURRENCY = 14       # parallel games (NOT threads per game)
-SAVE_PGN    = False    # write a PGN of every game
+OUT_PGN     = None     # path to PGN output, None = disabled
 # ═════════════════════════════════════════════
 
-sys.path.insert(0, os.path.join(REPO_ROOT, "utils"))
-from cliconf import override_from_cli
-
-CLI = [
-    ("GAMES",       "--games",       int,  "number of games to play"),
-    ("MOVETIME_MS", "--movetime",    int,  "per-move budget, ms"),
-    ("CONCURRENCY", "--concurrency", int,  "parallel games"),
-    ("SAVE_PGN",    "--pgn",         bool, "write a PGN of every game"),
-]
-
-if __name__ == "__main__":
-    override_from_cli(globals(), CLI, description=__doc__)
-    main()
+p.add_argument("--games",     type=int, default=GAMES)
+p.add_argument("--movetime",  type=int, default=MOVETIME_MS)
 ```
-
-This gives `--games N`, `--pgn`/`--no-pgn` for every bool, repeatable flags for
-every list, `--show-config`, and a `--help` that prints the value the config
-block actually holds. Call it right after the config block and BEFORE anything
-derived from it (timestamps, output paths, `os.makedirs`, validation).
-
-A hand-written `argparse` is fine when a tool needs richer syntax — it must
-still read its defaults from the constants and still provide `--show-config`.
+Never `default=500`. The literal lives in the config block, once.
 
 **C:**
 ```c
@@ -200,8 +149,8 @@ still read its defaults from the constants and still provide `--show-config`.
 /* ════════════════════════════════════════════ */
 ```
 
-Applies to: `tests/*.py`, `train/*.py`, `train/labeling/*.py`, `utils/*.py`, and
-every `engine/c/tools/*.c`.
+Applies to: `tests/*.py`, `train/*.py`, `train/labeling/*.py`, and every
+`engine/c/tools/*.c`.
 
 ### 9. Native and non-native paths are a BLEND, not a replacement
 
@@ -223,47 +172,54 @@ keep that harness's capabilities, and the Python harness stays.
 - Before replacing any harness, inventory what the old one did and state, item by item,
   whether the new one covers it, deliberately does not (with the reason), or still needs it.
 
-### 10. TRAINING-DATA NAMING CONVENTION — `cp`, `result`, `wdl`, `target`
+### 10. TRAINING-DATA NAMING CONVENTION — `result`, `cp`, `wdl`
 
-The vocabulary is closed. Do not invent a fifth name.
+Every training dataset (parquet columns, and the `.bin` record in
+`engine/c/tools/sample.h`) uses exactly these three names, with exactly
+these meanings. Do not invent a fourth.
 
-| Name | Meaning | Range | Stored? |
-|---|---|---|---|
-| `cp` | evaluation in centipawns, WHITE-relative | int | **yes — the primitive** |
-| `result` | the REAL game outcome, WHITE-relative | 0.0 / 0.5 / 1.0 (0 = Black won) | **yes, when a game was played** |
-| `wdl` | `sigmoid(cp / 320)` — a pure function of `cp` | 0..1, WHITE-relative | **never** |
-| `target` | `lambda * result + (1 - lambda) * wdl` | 0..1, WHITE-relative | **never** |
+| Name | Meaning | Range |
+|---|---|---|
+| `result` | the REAL game outcome, WHITE-relative | **0.0 / 0.5 / 1.0** (0 = Black won, 0.5 = draw, 1 = White won) |
+| `cp` | evaluation in centipawns, WHITE-relative | int |
+| `wdl` | `sigmoid(cp / 320)` — a pure function of `cp` | 0..1, WHITE-relative |
 
-**`cp` and `result` are the only stored columns.** `wdl` is derived at training
-time. Storing it beside `cp` lets the two rot apart, so a dataset carrying a
-`wdl` column is a defect — fix it with `train/labeling/normalize_columns.py`.
+All three are WHITE-RELATIVE and `result`/`wdl` share the SAME 0..1 scale — this matters
+because the training target is a CONVEX combination (below): a `result` on a different scale
+(e.g. -1..1) would push the target outside the sigmoid's range at lambda=1 and break the BCE
+loss (the trainer detects and converts a -1..1 column rather than training on it), and because
+one STM flip (`x -> 1-x`) applied downstream must be correct for all three at once.
 
-**`wdl` IS NOT AN OUTCOME.** The temperature 320 is the same constant as
-`nnue.c`'s `_nnL3B * 320.0f` output scale and `train/train_nnue.py`'s
-`CP_TO_WDL_T`; changing one without the others silently rescales everything.
+`result` is written as a NUMBER in new datasets; the legacy PGN strings (`'1-0'` etc.) are
+still accepted when reading. The `.bin` record (`sample.h`) keeps its own
+internally-consistent convention: `eval_cp` and `game_result` (`+1/0/-1`) are both
+STM-relative there, and `dataset.py` converts `game_result` to the 0..1 probability at read
+time.
 
-Both stored columns are WHITE-RELATIVE, and `result` shares `wdl`'s 0..1 scale.
-This matters because `target` is a CONVEX combination: a `result` on a -1..1
-scale would leave the sigmoid's range at lambda=1 and break the BCE loss, and
-one STM flip (`x -> 1-x`) applied downstream must be correct for both at once.
+**`wdl` IS NOT AN OUTCOME.** It is a transform of the evaluation, stored for convenience. The
+temperature 320 is the same constant as `nnue.c`'s `_nnL3B * 320.0f` output scale and
+`train/train_nnue.py`'s `CP_TO_WDL_T`; changing one without the others silently rescales
+everything.
 
-`result` is a NUMBER; PGN strings (`'1-0'`) are accepted when reading but never
-written. The `.bin` record (`engine/c/tools/sample.h`) keeps its own convention:
-`eval_cp` and `game_result` (`+1/0/-1`) are both STM-relative there, and
-`dataset.py` converts to the 0..1 probability at read time.
+**The training target is a blend, computed AT TRAINING TIME, never baked into a dataset:**
 
-**`target` is computed AT TRAINING TIME, never baked into a dataset.** `lambda`
-is set PER DATASET in the `DATASETS` block at the top of `train/train_nnue.py`:
-lambda=0 trusts the labelling engine's evaluation, lambda=1 trusts only the real
-game outcome. Baking it in freezes lambda at generation time — and lambda is
-exactly the knob you anneal across bootstrap generations.
+```
+target = lambda * result_prob + (1 - lambda) * wdl
+```
 
-**`lambda` is INERT unless a dataset has BOTH `cp` and `result`.** With one term
-the blend collapses to that term whatever lambda says. A dataset with neither is
-an error, not a fallback: there is nothing to train on.
+`lambda` is set PER DATASET in the `DATASETS` block at the top of `train/train_nnue.py`.
+lambda=0 trusts the labelling engine's evaluation; lambda=1 trusts only the real game outcome.
 
-**Never synthesise a `result` from `cp`.** That turns ground truth into the
-labelling engine's own opinion. If no game was played, the column is absent.
+**Why the blend must not live in the dataset:** baking it in freezes lambda at generation
+time, and lambda is exactly the knob you anneal across bootstrap generations. It also went
+wrong in practice — a labeling script blended the stored `wdl` with `cp`, i.e. `f(cp)` with
+`f(cp)`, so lambda silently did nothing; and another synthesised `result` from `cp`, turning
+"ground truth" into the labelling engine's own opinion.
+
+**Because `wdl` is derivable from `cp`, they can rot apart.** The trainer therefore
+recomputes `wdl` from `cp` whenever `cp` is present, uses a stored `wdl` only when `cp` is
+absent, and reports any dataset where the two disagree. Missing columns are not fatal:
+whichever term exists is used alone, and the fallback is counted and printed.
 
 ## CRITICAL INVARIANTS — landmines, not documentation
 
@@ -310,7 +266,7 @@ Claude Code auto-discovery: `.claude/skills/writing-rules/SKILL.md`. Load
 the skill BEFORE writing or reviewing any such text, and keep the two
 copies identical when editing either one.
 
-## Naming Convention — `tests/`, `train/` and `utils/`
+## Naming Convention — `tests/` and `train/`
 
 `tests/` and `train/` are **flat and version-less** — one toolset tracking the current
 engine, unlike `engine/c/zchezz_vXXX/` which is version-suffixed. **Never create a
@@ -331,28 +287,8 @@ engine, unlike `engine/c/zchezz_vXXX/` which is version-suffixed. **Never create
 | bare noun (`encoding`, `model`, `dataset`) | Library module, imported by other scripts |
 | `verb_noun` (`train_nnue`, `export_nnu4`, `check_parity`) | Executable script |
 
-**`utils/`:** helpers shared by BOTH `tests/` and `train/`, plus standalone
-maintenance scripts. `cliconf.py` (config-block + CLI plumbing, and the one copy
-of the shared configuration vocabulary — rule 8) and `kill_ghosts.py` live here.
-Anything used by only one of the two folders belongs in that folder instead.
-
 When adding a new script, name it by what it does using this table — don't invent a new
 prefix.
-
-### One tool per job — don't fork a script to change a setting
-
-A second script that differs from an existing one only by its constants is a
-maintenance trap: the machinery drifts between the copies. Add the case to the
-existing tool's config block instead. In particular:
-
-- **positions in, positions out** → `train/labeling/process_positions.py`. It
-  reads `.epd`, `.pgn`, `.bin` and `.parquet`, writes any combination of
-  `parquet`/`bin`/`epd`/`pgn`, and every filter is optional, so it is also the
-  format converter (`--filters none`). Do not write a new one-off converter.
-- **games between two engine versions** → `run_arena.py` (SPRT gate) or
-  `run_tournament.py` (cross-table / anchored Elo).
-- **training data from self-play** → `selfplay.exe` via `run_selfplay_native.py`
-  (fast path) or `run_selfplay.py` (any UCI engine).
 
 ## Per-instance objects — `TTable` and `NnueNet`
 
@@ -365,3 +301,4 @@ that follow from this, and README.md § Per-instance objects for the full ration
 
 Everything else — architecture, file structure, and build instructions — lives in
 `README.md`. Do not duplicate it here; if it drifts, fix it there.
+

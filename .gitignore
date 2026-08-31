@@ -107,3 +107,9 @@ engine/c/zchezz_v402/exe_backup/
 
 # LC0 raw training-data downloads (import_lc0.py cache, ~200MB per tar)
 data_raw/
+# Professionalization artifacts
+artifacts/
+dist/
+engine/c/zchezz_v*/zchezz_debug.exe
+engine/c/zchezz_v*/zchezz_sanitize.exe
+engine/build/test_engine_invariants.exe

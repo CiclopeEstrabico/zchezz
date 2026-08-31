@@ -1,0 +1,74 @@
+name: quality
+
+on:
+  push:
+    branches: [main, "v*", "403_testsuits"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  repository-contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: python tools/check_repo.py
+      - run: python -m pytest tests/test_agent_instructions.py tests/test_repository_contracts.py tests/test_documentation.py tests/test_test_runner.py -q
+
+  native:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+      ARCH_FLAGS: -mavx2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Deterministic smoke
+        run: python tests/run_tests.py smoke --version v403 --baseline v402
+
+  sanitize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ASan and UBSan build
+        run: make -C engine/build ENGINE=v403 sanitize
+      - name: Exercise sanitized engine
+        run: python tests/test_uci_extended.py --exe engine/c/zchezz_v403/zchezz_sanitize.exe --only T1 --only T2
+
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[all]"
+      - run: playwright install --with-deps chromium
+      - run: make -C engine/build ENGINE=v403 bundle
+      - name: Browser static checks
+        run: python tests/test_browser_html.py
+      - name: Browser end-to-end
+        env:
+          ZCHEZZ_BROWSER_HEADLESS: "1"
+        run: python tests/test_browser.py --version v403 --headless
+
