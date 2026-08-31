@@ -1,48 +1,33 @@
-# engine/build/Makefile — shared build system for all Zchezz engine versions.
-#
-# Build files and tool sources are shared across engine versions; only the
-# per-version engine core (engine/c/zchezz_vXXX/*.c *.h) is duplicated per
-# release, per CLAUDE.md rule 2 (Versioning).
-#
-# IMPORTANT — engine/c/tools/ tracks the CURRENT engine API only.
-# selfplay.c / arena.c / arena.h use TTable, NnueNet, SearchParams fields
-# etc. that only exist in the newest engine folder. They will NOT compile
-# against an older version (e.g. zchezz_v314) — that is by design, not a
-# bug. arena.exe never links an old version's .c files; it compares older
-# versions through its `uci:` external-process player, driving an
-# already-built zchezz.exe for that version instead. See
-# README.md ("engine/c/tools/" section) in the repo root.
-#
-# Usage (ENGINE selects which engine/c/zchezz_vXXX/ folder to build from;
-# defaults to the newest release below):
-#   mingw32-make ENGINE=v400 native      # -> ../c/zchezz_v400/zchezz.exe
-#   mingw32-make ENGINE=v400 arena       # -> ./arena.exe    (this dir)
-#   mingw32-make ENGINE=v400 selfplay    # -> ./selfplay.exe (this dir)
-#   mingw32-make ENGINE=v400 wasm        # -> ../c/zchezz_v400/zchezz_wasm.{js,wasm}
-#   mingw32-make ENGINE=v400 bundle      # -> ../c/zchezz_v400/zchezz_bundle.html
-#
-# `make` (Linux) or `mingw32-make` (this project's Windows dev machines,
-# which ship mingw32-make rather than a `make` alias) both work — the
-# Makefile itself is unchanged either way.
+# Shared build system for all Zchezz engine versions.
 
-# ═══════════════════════════════════════════════ CONFIGURATION ═══
-ENGINE  ?= v403        # engine/c/zchezz_$(ENGINE)/ — default = active version
-# ════════════════════════════════════════════════════════════════
+ENGINE     ?= v403
+CC         ?= gcc
+ARCH_FLAGS ?= -mavxvnni -mavx2
 
 EDIR    = ../c/zchezz_$(ENGINE)
 TOOLDIR = ../c/tools
 
-CC      = gcc
-ARCH_FLAGS ?= -mavxvnni -mavx2
 CFLAGS  = -O3 -ffast-math -D_GNU_SOURCE -std=c11 $(ARCH_FLAGS) -I$(EDIR)
 WARNS   = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-maybe-uninitialized \
           -Wno-misleading-indentation -Wno-sign-compare -Wno-unused-function -Wno-parentheses
 LDFLAGS = -static -lm -pthread
 
-SRCS    = $(EDIR)/main.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c $(EDIR)/syzygy.c $(EDIR)/tbprobe.c $(EDIR)/book.c
-TARGET  = $(EDIR)/zchezz.exe
+CORE_SRCS = $(EDIR)/main.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c $(EDIR)/syzygy.c $(EDIR)/book.c
+TB_C      = $(EDIR)/tbprobe.c
+TB_H      = $(EDIR)/tbprobe.h
 
-# WASM build (no tablebases, no book file I/O)
+ifneq ($(and $(wildcard $(TB_C)),$(wildcard $(TB_H))),)
+    HAVE_FATHOM = 1
+    NATIVE_SRCS = $(CORE_SRCS) $(TB_C)
+    TB_DEFS =
+else
+    HAVE_FATHOM = 0
+    NATIVE_SRCS = $(CORE_SRCS)
+    TB_DEFS = -DNO_TABLEBASES
+endif
+
+TARGET = $(EDIR)/zchezz.exe
+
 EMCC     = emcc
 EMFLAGS  = -O3 -std=c11 -msimd128 -DNO_TABLEBASES -DNO_BOOK \
            -s MODULARIZE=1 -s EXPORT_NAME=ZchezzEngine \
@@ -51,7 +36,7 @@ EMFLAGS  = -O3 -std=c11 -msimd128 -DNO_TABLEBASES -DNO_BOOK \
            -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=268435456 \
            -s MAXIMUM_MEMORY=536870912 -s STACK_SIZE=4194304 \
            -s 'ENVIRONMENT=web,worker' -s NO_EXIT_RUNTIME=1
-WASM_SRCS = $(EDIR)/main.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c $(EDIR)/syzygy.c $(EDIR)/book.c
+WASM_SRCS = $(CORE_SRCS)
 
 ifeq ($(OS),Windows_NT)
     PYTHON = python
@@ -59,52 +44,47 @@ else
     PYTHON = python3
 endif
 
-.PHONY: native debug sanitize test-c clean wasm bundle selfplay arena ga_tune
+.PHONY: native debug sanitize test-c clean wasm bundle selfplay arena ga_tune build-info require-tablebases
+
+build-info:
+	@echo "ENGINE=$(ENGINE)"
+	@echo "CC=$(CC)"
+	@echo "HAVE_FATHOM=$(HAVE_FATHOM)"
+	@if [ "$(HAVE_FATHOM)" = "0" ]; then echo "Tablebases: disabled"; else echo "Tablebases: enabled"; fi
+
+require-tablebases:
+	@if [ "$(HAVE_FATHOM)" != "1" ]; then \
+		echo "ERROR: Fathom sources unavailable. Required: $(TB_C) and $(TB_H)"; \
+		exit 1; \
+	fi
 
 native: $(TARGET)
 
-$(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) $(WARNS) -o $@ $^ $(LDFLAGS)
+$(TARGET): $(NATIVE_SRCS)
+	@if [ "$(HAVE_FATHOM)" = "0" ]; then echo "NOTE: building with NO_TABLEBASES"; fi
+	$(CC) $(CFLAGS) $(TB_DEFS) $(WARNS) -o $@ $^ $(LDFLAGS)
 
-debug: $(SRCS)
-	$(CC) -O0 -g3 -D_GNU_SOURCE -std=c11 -I$(EDIR) -Wall -Wextra -Wpedantic -Wshadow -o $(EDIR)/zchezz_debug.exe $(SRCS) -lm -pthread
+debug: $(NATIVE_SRCS)
+	$(CC) -O0 -g3 -D_GNU_SOURCE -std=c11 -I$(EDIR) $(TB_DEFS) -Wall -Wextra -Wpedantic -Wshadow \
+		-o $(EDIR)/zchezz_debug.exe $(NATIVE_SRCS) -lm -pthread
 
-sanitize: $(SRCS)
-	$(CC) -O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined -D_GNU_SOURCE -std=c11 -I$(EDIR) -o $(EDIR)/zchezz_sanitize.exe $(SRCS) -lm -pthread -fsanitize=address,undefined
+sanitize: $(NATIVE_SRCS)
+	$(CC) -O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined -D_GNU_SOURCE -std=c11 -I$(EDIR) $(TB_DEFS) \
+		-o $(EDIR)/zchezz_sanitize.exe $(NATIVE_SRCS) -lm -pthread -fsanitize=address,undefined
 
 test-c: ../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c
-	$(CC) -O2 -g -D_GNU_SOURCE -std=c11 -I$(EDIR) -o test_engine_invariants.exe ../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c -lm
+	$(CC) -O2 -g -D_GNU_SOURCE -std=c11 -I$(EDIR) -o test_engine_invariants.exe \
+		../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c -lm
 	./test_engine_invariants.exe $(EDIR)/nnue_weights.bin
 
-# Native in-process self-play data generator (Appendix F.2/F.3 of
-# docs/v400_implementation_plan.md). Links board.c/search.c/nnue.c but
-# NOT main.c (which owns main()) and NOT syzygy.c/tbprobe.c/book.c —
-# -DNO_TABLEBASES/-DNO_BOOK stub those calls out entirely (see
-# ../c/tools/selfplay.c's header comment). Output: selfplay.exe, built
-# in THIS directory (engine/build/), not the version folder — it is a
-# shared tool binary, not a per-version artifact.
 SELFPLAY_SRCS = $(TOOLDIR)/selfplay.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
 selfplay: $(SELFPLAY_SRCS)
 	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o selfplay.exe $(SELFPLAY_SRCS) $(LDFLAGS)
 
-# Native in-process A/B arena (implementation plan Appendix F.4), the
-# SPRT gate for Appendix F.5's bootstrap loop. Links board.c/search.c/
-# nnue.c but NOT main.c/syzygy.c/tbprobe.c/book.c — same
-# -DNO_TABLEBASES/-DNO_BOOK rationale as `selfplay` above (see
-# ../c/tools/arena.c's header comment). Output: arena.exe, built in THIS
-# directory (engine/build/) — shared tool binary, not per-version.
 ARENA_SRCS = $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
 arena: $(ARENA_SRCS)
 	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o arena.exe $(ARENA_SRCS) $(LDFLAGS)
 
-# Native genetic-algorithm tuner for search.c's pruning/reduction constants
-# (implementation plan Appendix F.4's "SPSA tuner", built as a GA instead —
-# see ../c/tools/ga_tune.c's header comment). Links arena.c compiled with
-# -DARENA_NO_MAIN (reused as a library ONLY for board_init/search_init,
-# OpeningPool/load_openings, and elo_diff_ci() — see that header for what
-# is and is not reused from arena.c) plus board.c/search.c/nnue.c, same
-# -DNO_TABLEBASES/-DNO_BOOK rationale as `arena`/`selfplay` above. Output:
-# ga_tune.exe, built in THIS directory — shared tool binary, not per-version.
 GA_TUNE_SRCS = $(TOOLDIR)/ga_tune.c $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
 ga_tune: $(GA_TUNE_SRCS)
 	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -DARENA_NO_MAIN -o ga_tune.exe $(GA_TUNE_SRCS) $(LDFLAGS)
@@ -116,4 +96,6 @@ bundle: wasm
 	$(PYTHON) bundle.py $(EDIR)/zchezz_wasm.html $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/nnue_weights.bin
 
 clean:
-	rm -f $(TARGET) $(EDIR)/zchezz_debug.exe $(EDIR)/zchezz_sanitize.exe test_engine_invariants.exe arena.exe selfplay.exe ga_tune.exe *.o $(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/zchezz_bundle.html
+	rm -f $(TARGET) $(EDIR)/zchezz_debug.exe $(EDIR)/zchezz_sanitize.exe \
+		test_engine_invariants.exe arena.exe selfplay.exe ga_tune.exe *.o \
+		$(EDIR)/zchezz_wasm.js $(EDIR)/zchezz_wasm.wasm $(EDIR)/zchezz_bundle.html
