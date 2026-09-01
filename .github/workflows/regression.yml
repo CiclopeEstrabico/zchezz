@@ -4,19 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: Candidate engine path or label
+        description: Candidate version/label, normally v403
         required: false
+        default: v403
       baseline:
-        description: Baseline engine path or label
+        description: Baseline version/label, normally v402
         required: false
+        default: v402
 
 jobs:
   instructions:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          echo "Long strength tests are intentionally not a PR gate on shared runners."
-          echo "Use the repository regression harness on a stable machine/self-hosted runner."
-          echo "Record the run manifest and PGN as described in docs/regression-testing.md."
-
+      - name: Promotion-test policy
+        run: |
+          echo "Long strength tests are intentionally not an automatic shared-runner PR gate."
+          echo "Run the regression/SPRT harness on a stable machine or self-hosted runner."
+          echo "Use paired openings, reverse colors, fixed metadata, and predeclared decision bounds."
+          echo "See docs/regression-testing.md."

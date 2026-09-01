@@ -10,10 +10,25 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "python-chess>=1.999", "numpy>=1.24"]
-web = ["playwright>=1.45"]
-all = ["pytest>=8.0", "python-chess>=1.999", "numpy>=1.24", "playwright>=1.45"]
+dev = [
+  "pytest>=8.0",
+  "python-chess>=1.999",
+  "numpy>=1.24",
+]
+web = [
+  "playwright>=1.45",
+]
+all = [
+  "pytest>=8.0",
+  "python-chess>=1.999",
+  "numpy>=1.24",
+  "playwright>=1.45",
+]
 
+# This repository is not a Python distribution. The project table exists to
+# provide a reproducible dependency-install surface for development and CI.
+# Disable setuptools flat-layout discovery so engine/ and train/ are not
+# mistaken for Python packages.
 [tool.setuptools]
 packages = []
 

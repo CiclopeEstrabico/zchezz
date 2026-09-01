@@ -2,7 +2,7 @@ name: quality
 
 on:
   push:
-    branches: [main, "v*", "403_testsuits"]
+    branches: [main, "v*"]
   pull_request:
   workflow_dispatch:
 
@@ -18,7 +18,17 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - run: python tools/check_repo.py
-      - run: python -m pytest tests/test_agent_instructions.py tests/test_repository_contracts.py tests/test_documentation.py tests/test_test_runner.py -q
+      - run: >-
+          python -m pytest
+          tests/test_agent_instructions.py
+          tests/test_repository_contracts.py
+          tests/test_documentation.py
+          tests/test_test_runner.py
+          tests/test_repo_policy.py
+          tests/test_wasm_wiring.py
+          tests/test_repo_paths.py
+          tests/test_quality_tools.py
+          -q
 
   native:
     runs-on: ubuntu-24.04
@@ -29,6 +39,7 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,10 +48,20 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - name: Deterministic smoke
-        run: python tests/run_tests.py smoke --version v403 --baseline v402
+        run: python tests/run_tests.py smoke --version v403 --baseline v402 --keep-going
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.cc }}
+          path: artifacts/tests/
+          if-no-files-found: ignore
 
   sanitize:
     runs-on: ubuntu-24.04
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,9 +70,12 @@ jobs:
       - name: ASan and UBSan build
         run: make -C engine/build ENGINE=v403 sanitize
       - name: Exercise sanitized engine
-        run: python tests/test_uci_extended.py --exe engine/c/zchezz_v403/zchezz_sanitize.exe --only T1 --only T2
+        run: >-
+          python tests/test_uci_extended.py
+          --exe engine/c/zchezz_v403/zchezz_sanitize.exe
+          --only T1 --only T2
 
-  wasm:
+  web:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -63,12 +87,13 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[all]"
-      - run: playwright install --with-deps chromium
-      - run: make -C engine/build ENGINE=v403 bundle
-      - name: Browser static checks
-        run: python tests/test_browser_html.py
-      - name: Browser end-to-end
-        env:
-          ZCHEZZ_BROWSER_HEADLESS: "1"
-        run: python tests/test_browser.py --version v403 --headless
-
+      - run: python -m playwright install --with-deps chromium
+      - name: Web profile
+        run: python tests/run_tests.py web --version v403 --baseline v402 --keep-going
+      - name: Upload web evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-evidence
+          path: artifacts/tests/
+          if-no-files-found: ignore

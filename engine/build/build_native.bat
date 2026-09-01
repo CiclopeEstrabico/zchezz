@@ -1,7 +1,7 @@
 @echo off
 REM ═══════════════════════ CONFIGURATION ═══════════════════════
 REM ENGINE selects engine/c/zchezz_%ENGINE%/ — pass as first arg to override.
-set ENGINE=v402
+set ENGINE=v403
 REM ═══════════════════════════════════════════════════════════
 if not "%~1"=="" set ENGINE=%~1
 set "PATH=C:\mingw64\bin;%PATH%"
