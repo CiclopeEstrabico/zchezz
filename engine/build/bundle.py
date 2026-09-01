@@ -85,7 +85,22 @@ self.onmessage=async function(e){{
   try{{self.postMessage(doSearch(msg.fen,msg.moves||'',msg.depth||9,msg.id,msg.timeLimitMs||0,msg.multiPv||1,msg.startDepth||0));}}catch(err){{self.postMessage({{id:msg.id,error:err.message}});}}
 }};
 async function init(wb,wts){{
-  Mod=await ZchezzEngine({{noInitialRun:true,wasmBinary:wb,print:function(){{}},printErr:function(){{}}}});
+  const wasmBlobUrl=URL.createObjectURL(new Blob([wb],{{type:'application/wasm'}}));
+  try {{
+    Mod=await ZchezzEngine({{
+      noInitialRun:true,
+      wasmBinary:wb,
+      locateFile:function(path,prefix){{
+        if(path.endsWith('.wasm')) return wasmBlobUrl;
+        if(prefix && !prefix.startsWith('blob:')) return prefix+path;
+        return path;
+      }},
+      print:function(){{}},
+      printErr:function(){{}}
+    }});
+  }} finally {{
+    URL.revokeObjectURL(wasmBlobUrl);
+  }}
   _binit=Mod.cwrap('board_init',null,[]);
   _sinit=Mod.cwrap('search_init',null,[]);
   _bfen=Mod.cwrap('board_load_fen',null,['number','number']);
