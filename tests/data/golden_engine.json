@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "description": "Deterministic external contracts for the v403-quality baseline.",
+  "required_uci_options": [
+    "Hash",
+    "Threads",
+    "MultiPV",
+    "SyzygyPath",
+    "OwnBook",
+    "BookFile"
+  ],
+  "feature_index_fixtures": [
+    {"piece": 9, "zsq": 48, "white_pov": 1, "bucket": 0, "expected": 8},
+    {"piece": 17, "zsq": 8, "white_pov": 0, "bucket": 0, "expected": 8}
+  ]
+}
+

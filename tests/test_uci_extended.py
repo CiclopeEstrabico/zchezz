@@ -149,8 +149,11 @@ class UCIEngine:
 
 def resolve_engine() -> Path:
     if ENGINE_PATH:
-        return Path(ENGINE_PATH)
-    return engine_executable(VERSION or latest_version())
+        path = Path(ENGINE_PATH)
+        if not path.is_absolute():
+            path = ROOT / path
+        return path.resolve()
+    return engine_executable(VERSION or latest_version()).resolve()
 
 def handshake(eng: UCIEngine) -> tuple[list[str], set[str]]:
     eng.send("uci")

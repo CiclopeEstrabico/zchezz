@@ -79,7 +79,7 @@ endif
 native: $(TARGET)
 
 $(TARGET): $(NATIVE_SRCS)
-	@echo Building $(ENGINE); tablebases $(TB_STATUS).
+	@echo Building $(ENGINE) - tablebases $(TB_STATUS).
 	$(CC) $(CFLAGS) $(TB_DEFS) $(WARNS) -o $@ $^ $(LDFLAGS)
 
 debug: $(NATIVE_SRCS)

@@ -1,5 +1,5 @@
 # Data & training artifacts
-data/
+/data/
 checkpoints/
 train/logs/
 
