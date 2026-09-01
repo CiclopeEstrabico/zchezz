@@ -82,7 +82,7 @@ self.onmessage=async function(e){{
   const msg=e.data;
   if(msg._init){{try{{await init(msg.wasmBytes,msg.weightsBytes);}}catch(err){{self.postMessage({{_status:'error',error:err.message}});}}return;}}
   if(!ready){{self.postMessage({{id:msg.id,error:'not ready'}});return;}}
-  try{{self.postMessage(doSearch(msg.fen,msg.moves||'',msg.depth||9,msg.id,msg.timeLimitMs||0,msg.multiPv||1));}}catch(err){{self.postMessage({{id:msg.id,error:err.message}});}}
+  try{{self.postMessage(doSearch(msg.fen,msg.moves||'',msg.depth||9,msg.id,msg.timeLimitMs||0,msg.multiPv||1,msg.startDepth||0));}}catch(err){{self.postMessage({{id:msg.id,error:err.message}});}}
 }};
 async function init(wb,wts){{
   Mod=await ZchezzEngine({{noInitialRun:true,wasmBinary:wb,print:function(){{}},printErr:function(){{}}}});
@@ -103,7 +103,7 @@ async function init(wb,wts){{
   ready=true;self.postMessage({{_status:'ready',nnue:ok}});
 }}
 function hs(s){{const b=new TextEncoder().encode(s);const p=Mod._malloc(b.length+1);Mod.HEAPU8.set(b,p);Mod.HEAPU8[p+b.length]=0;return p;}}
-function doSearch(fen,moves,depth,id,timeLimitMs,multiPv){{
+function doSearch(fen,moves,depth,id,timeLimitMs,multiPv,startDepth){{
   _binit();
   _nnrst();
   const fp=hs(fen);try{{_bfen(bPtr,fp);}}finally{{Mod._free(fp);}}
@@ -113,17 +113,17 @@ function doSearch(fen,moves,depth,id,timeLimitMs,multiPv){{
   const WASM_MAX_MS=10000;
   if(timeLimitMs<=0||timeLimitMs>WASM_MAX_MS) timeLimitMs=WASM_MAX_MS;
   const nPv=multiPv||1;
-  const pp=Mod._malloc(32);
-  Mod.HEAPU8.fill(0,pp,pp+32);
-  const pdv=new DataView(Mod.HEAPU8.buffer,pp,32);
+  const SP_SZ=44;\n  const pp=Mod._malloc(SP_SZ);
+  Mod.HEAPU8.fill(0,pp,pp+SP_SZ);
+  const pdv=new DataView(Mod.HEAPU8.buffer,pp,SP_SZ);
   pdv.setInt32(0,depth,true);
-  pdv.setInt32(4,0,true);
+  pdv.setInt32(4,startDepth||0,true);
   pdv.setInt32(8,timeLimitMs,true);
   pdv.setInt32(12,0,true);
   pdv.setInt32(16,nPv,true);
   pdv.setInt32(20,1,true);
   pdv.setInt32(24,0,true);
-  pdv.setInt32(28,0,true);
+  pdv.setInt32(28,0,true);\n  pdv.setInt32(32,0,true);  // info_cb = NULL\n  pdv.setInt32(36,0,true);  // tt = NULL (search uses g_tt)\n  pdv.setInt32(40,0,true);  // mpv_share_budget = 0
   const SR_SZ=1920;
   const rp=Mod._malloc(SR_SZ);
   Mod.HEAPU8.fill(0,rp,rp+SR_SZ);

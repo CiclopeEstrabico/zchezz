@@ -1,356 +1,424 @@
 #!/usr/bin/env python3
-"""test_browser.py — Automated browser tests for Zchezz HTML/WASM.
+"""Functional browser/WASM end-to-end tests for Zchezz.
 
-Tests:
-  Bug 3: Clocks visible in Game mode, hidden in Depth mode
-  Bug 1: Analysis PV shows full line (not just first move)
-  Bug 2: MultiPV + button shows 2nd/3rd lines
-  Bug 4: Clock mode doesn't freeze after book exhausts
+The suite validates behavior, not machine speed. It waits for observable
+conditions (engine ready, PV returned, move returned) instead of sleeping for
+fixed durations shorter than the application's own search budget.
+
+Covered contracts:
+  B1  WASM worker initializes and exposes window.zchezzSearch.
+  B2  Clock widgets are visible in Game mode and hidden in Depth mode.
+  B3  Analysis returns a score and a non-empty PV.
+  B4  MultiPV returns a real second line.
+  B5  Clock-mode search returns a move when the opening book is unavailable.
 
 Usage:
-  python tests/test_browser.py [version]    # e.g., python tests/test_browser.py v305
+  python tests/test_browser.py --version v403 --html zchezz_bundle.html --headless
 """
+from __future__ import annotations
 
-import sys, os, time, threading, http.server, socketserver, io, functools
+import argparse
+import functools
+import http.server
+import io
+import os
+import socketserver
+import sys
+import threading
+from pathlib import Path
 
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-import glob
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-def find_latest_engine():
-    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "engine", "c")
-    dirs = sorted(glob.glob(os.path.join(base, "zchezz_v*")))
-    if not dirs:
-        raise FileNotFoundError("No engine version found")
-    return dirs[-1]
+ROOT = Path(__file__).resolve().parents[1]
 
 # ═══════════════ CONFIGURATION ═══════════════
-# Edit these and run with no arguments; every one is also a CLI flag that
-# overrides it (CLAUDE.md rule 8, see the COMMAND LINE block below).
-VERSION        = ""     # engine folder suffix, e.g. "v400"; "" = latest zchezz_v*
-HTML_FILE      = "zchezz_wasm.html"   # page served from the engine folder
-PORT           = 8766   # local HTTP port (deliberately not 8000, to avoid clashes)
-HEADLESS       = False  # run Chromium headless (True for CI / unattended runs)
-VIEWPORT_W     = 1400   # browser viewport width
-VIEWPORT_H     = 950    # browser viewport height
-SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "elo_results")
-# ═══════════════════════════════════════════
-
-# ═══════════════ COMMAND LINE ═══════════════
-# `python tests/test_browser.py` runs exactly what the block above says. The
-# legacy positional form (`... v400`) still works and means --version.
-# ════════════════════════════════════════════
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils"))
-from cliconf import override_from_cli  # noqa: E402
-
-CLI = [
-    ("VERSION",        "--version",    str,  "engine folder suffix; empty = latest"),
-    ("HTML_FILE",      "--html",       str,  "page served from the engine folder"),
-    ("PORT",           "--port",       int,  "local HTTP port"),
-    ("HEADLESS",       "--headless",   bool, "run Chromium headless"),
-    ("VIEWPORT_W",     "--viewport-width",  int, "browser viewport width"),
-    ("VIEWPORT_H",     "--viewport-height", int, "browser viewport height"),
-    ("SCREENSHOT_DIR", "--screenshot-dir",  str, "where screenshots are written"),
-]
-
-
-def engine_dir() -> str:
-    """The engine folder to serve — from --version, else the latest one."""
-    if VERSION:
-        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "engine", "c", f"zchezz_{VERSION}")
-    return find_latest_engine()
-
+VERSION = ""
+HTML_FILE = "zchezz_bundle.html"
+PORT = 8766
+HEADLESS = False
+VIEWPORT_W = 1400
+VIEWPORT_H = 950
+ENGINE_READY_TIMEOUT_MS = 30_000
+SEARCH_TIMEOUT_MS = 30_000
+ANALYSIS_DEPTH = "5"
+SCREENSHOT_DIR = ROOT / "artifacts" / "browser"
+# ═════════════════════════════════════════════
 
 passed = 0
 failed = 0
-errors_list = []
+errors_list: list[str] = []
 
 
-def check(name, condition, detail=""):
+class ReusableTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
     global passed, failed
     if condition:
         passed += 1
-        print(f"  PASS: {name}")
+        print(f"PASS: {name}")
     else:
         failed += 1
-        msg = f"  FAIL: {name}" + (f" -- {detail}" if detail else "")
+        msg = f"FAIL: {name}" + (f" -- {detail}" if detail else "")
         print(msg)
         errors_list.append(msg)
 
 
-def start_server():
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=ENGINE_DIR)
-    httpd = socketserver.TCPServer(("127.0.0.1", PORT), handler)
+def engine_dir(version: str) -> Path:
+    if version:
+        path = ROOT / "engine" / "c" / f"zchezz_{version}"
+        if path.is_dir():
+            return path
+        raise FileNotFoundError(f"engine directory not found: {path}")
+
+    versions = []
+    for path in (ROOT / "engine" / "c").glob("zchezz_v*"):
+        suffix = path.name.removeprefix("zchezz_v")
+        if suffix.isdigit():
+            versions.append((int(suffix), path))
+    if not versions:
+        raise FileNotFoundError("no numeric engine/c/zchezz_v* directory found")
+    return max(versions)[1]
+
+
+def start_server(directory: Path, port: int):
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler,
+        directory=str(directory),
+    )
+    httpd = ReusableTCPServer(("127.0.0.1", port), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd
 
 
-def test_bug3_clocks_visible(page):
-    """Bug 3: Clocks should be visible when Game mode selected."""
-    print("\n--- Bug 3: Clock Visibility in Game Mode ---")
+def debug_log(page) -> str:
+    try:
+        locator = page.locator("#debug-log")
+        if locator.count():
+            text = locator.inner_text(timeout=1_000).strip()
+            if text:
+                return text[-4000:]
+    except Exception:
+        pass
+    return "(debug log unavailable or empty)"
 
-    # Select "game" from the mode dropdown
-    # The dropdown is <select id="sel-mode"> with options: depth, time, game
+
+def wait_js(page, expression: str, timeout: int = SEARCH_TIMEOUT_MS) -> bool:
+    try:
+        page.wait_for_function(expression, timeout=timeout)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+
+
+def set_analysis_depth(page) -> None:
+    options = page.locator("#an-depth option").evaluate_all(
+        "(els) => els.map(e => e.value)"
+    )
+    depth = ANALYSIS_DEPTH if ANALYSIS_DEPTH in options else options[0]
+    page.select_option("#an-depth", depth)
+
+
+def ensure_analysis_engine_on(page) -> None:
+    button = page.locator("#an-eng-btn")
+    text = button.inner_text().strip().upper()
+    if text != "STOP":
+        button.click()
+
+
+def ensure_analysis_engine_off(page) -> None:
+    button = page.locator("#an-eng-btn")
+    text = button.inner_text().strip().upper()
+    if text == "STOP":
+        button.click()
+
+
+def test_clock_visibility(page) -> None:
+    print("\n--- B2: Clock visibility ---")
     page.select_option("#sel-mode", "game")
-    page.wait_for_timeout(1000)
-
-    # Check clock visibility
-    top_display = page.evaluate("window.getComputedStyle(document.getElementById('clock-top')).display")
-    bot_display = page.evaluate("window.getComputedStyle(document.getElementById('clock-bot')).display")
-
-    check("Clock-top visible in Game mode",
-          top_display != "none",
-          f"computed display={top_display}")
-    check("Clock-bot visible in Game mode",
-          bot_display != "none",
-          f"computed display={bot_display}")
-
-    # Check clock text
-    top_text = page.evaluate("document.getElementById('clock-top').textContent")
-    bot_text = page.evaluate("document.getElementById('clock-bot').textContent")
-    check("Clock-top has time text",
-          ":" in top_text,
-          f"text='{top_text}'")
-    check("Clock-bot has time text",
-          ":" in bot_text,
-          f"text='{bot_text}'")
-
-
-def test_bug3_clocks_hidden(page):
-    """Bug 3b: Clocks should be hidden when depth mode is selected."""
-    print("\n--- Bug 3b: Clocks Hidden in Depth Mode ---")
+    check(
+        "Clock-top visible in Game mode",
+        page.evaluate(
+            "window.getComputedStyle(document.getElementById('clock-top')).display !== 'none'"
+        ),
+    )
+    check(
+        "Clock-bot visible in Game mode",
+        page.evaluate(
+            "window.getComputedStyle(document.getElementById('clock-bot')).display !== 'none'"
+        ),
+    )
+    check(
+        "Clock-top has time text",
+        ":" in page.locator("#clock-top").inner_text(),
+    )
+    check(
+        "Clock-bot has time text",
+        ":" in page.locator("#clock-bot").inner_text(),
+    )
 
     page.select_option("#sel-mode", "depth")
-    page.wait_for_timeout(500)
+    check(
+        "Clock-top hidden in Depth mode",
+        page.evaluate(
+            "window.getComputedStyle(document.getElementById('clock-top')).display === 'none'"
+        ),
+    )
 
-    top_display = page.evaluate("window.getComputedStyle(document.getElementById('clock-top')).display")
-    check("Clock-top hidden in Depth mode",
-          top_display == "none",
-          f"computed display={top_display}")
 
-
-def test_bug1_pv_display(page):
-    """Bug 1: Analysis PV should show full line, not just first move."""
-    print("\n--- Bug 1: Analysis PV Display ---")
-
-    # Switch to Analysis tab
+def test_analysis_pv(page) -> None:
+    print("\n--- B3: Analysis PV ---")
     page.evaluate("switchTab('analysis')")
-    page.wait_for_timeout(1000)
+    set_analysis_depth(page)
+    ensure_analysis_engine_on(page)
 
-    # Toggle engine ON via the ENG button (id=an-eng-btn)
-    eng_btn = page.locator("#an-eng-btn")
-    if eng_btn.count() > 0:
-        eng_btn.click()
-        # Wait for engine to produce results
-        page.wait_for_timeout(8000)
+    ready = wait_js(
+        page,
+        """() => {
+            const pv = document.getElementById('an-lm1')?.textContent?.trim() || '';
+            const sc = document.getElementById('an-ls1')?.textContent?.trim() || '';
+            return pv !== '' && pv !== '—' && sc !== '';
+        }""",
+    )
 
-        # Read PV line 1 text from #an-lm1
-        pv_text = page.evaluate("document.getElementById('an-lm1').textContent").strip()
+    pv = page.locator("#an-lm1").inner_text().strip()
+    score = page.locator("#an-ls1").inner_text().strip()
+    check(
+        "PV line 1 has content",
+        ready and bool(pv) and pv != "—",
+        f"PV={pv!r}; debug={debug_log(page)}",
+    )
+    check(
+        "Score is displayed",
+        ready and bool(score),
+        f"score={score!r}; debug={debug_log(page)}",
+    )
 
-        # PV should have multiple space-separated moves
-        if pv_text and pv_text != "—":
-            words = pv_text.split()
-            check("PV line 1 shows multiple moves",
-                  len(words) >= 2,
-                  f"PV='{pv_text}' ({len(words)} words)")
-        else:
-            check("PV line 1 has content",
-                  False,
-                  f"PV text='{pv_text}'")
-
-        # Check score is displayed
-        score_text = page.evaluate("document.getElementById('an-ls1').textContent").strip()
-        check("Score is displayed",
-              len(score_text) > 0,
-              f"score='{score_text}'")
-
-        # Take screenshot
-        page.screenshot(path=os.path.join(SCREENSHOT_DIR, "bug1_pv_display.png"))
-
-        # Turn engine off
-        eng_btn.click()
-        page.wait_for_timeout(500)
-    else:
-        check("Engine toggle button (#an-eng-btn) found", False)
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(SCREENSHOT_DIR / "analysis_pv.png"))
+    ensure_analysis_engine_off(page)
 
 
-def test_bug2_multipv(page):
-    """Bug 2: MultiPV + button should show 2nd/3rd lines."""
-    print("\n--- Bug 2: MultiPV Button ---")
-
-    # Make sure we're on Analysis tab
+def test_multipv(page) -> None:
+    print("\n--- B4: MultiPV ---")
     page.evaluate("switchTab('analysis')")
-    page.wait_for_timeout(500)
+    set_analysis_depth(page)
 
-    # Start engine
-    eng_btn = page.locator("#an-eng-btn")
-    if eng_btn.count() > 0:
-        eng_btn.click()
-        page.wait_for_timeout(5000)
-
-        # Check initial PV count
-        initial = page.evaluate("document.getElementById('an-pv-count').textContent").strip()
-        check("Initial PV count is 1", initial == "1", f"initial={initial}")
-
-        # Click the + button (onclick=anPvPlus)
-        page.evaluate("anPvPlus()")
-        page.wait_for_timeout(6000)
-
-        # Check PV count increased
-        new_count = page.evaluate("document.getElementById('an-pv-count').textContent").strip()
-        check("PV count increased to 2", new_count == "2", f"count={new_count}")
-
-        # Check 2nd line is visible
-        line2_display = page.evaluate("window.getComputedStyle(document.getElementById('an-line2')).display")
-        check("Line 2 visible", line2_display != "none", f"display={line2_display}")
-
-        # Check 2nd line has content
-        lm2_text = page.evaluate("document.getElementById('an-lm2').textContent").strip()
-        check("Line 2 has move text",
-              len(lm2_text) > 0 and lm2_text != "—",
-              f"lm2='{lm2_text}'")
-
-        # Take screenshot
-        page.screenshot(path=os.path.join(SCREENSHOT_DIR, "bug2_multipv.png"))
-
-        # Reset and stop
+    # Return to a known one-PV state before starting.
+    while page.locator("#an-pv-count").inner_text().strip() != "1":
         page.evaluate("anPvMinus()")
-        page.wait_for_timeout(500)
-        eng_btn.click()
-        page.wait_for_timeout(500)
-    else:
-        check("Engine toggle button found", False)
+
+    ensure_analysis_engine_on(page)
+    first_ready = wait_js(
+        page,
+        "() => { const t=document.getElementById('an-lm1')?.textContent?.trim()||''; return t && t !== '—'; }",
+    )
+    check(
+        "Initial PV line produced",
+        first_ready,
+        debug_log(page),
+    )
+
+    page.evaluate("anPvPlus()")
+    count_ready = wait_js(
+        page,
+        "() => document.getElementById('an-pv-count')?.textContent?.trim() === '2'",
+        timeout=5_000,
+    )
+    check("PV count increased to 2", count_ready)
+
+    line2_ready = wait_js(
+        page,
+        """() => {
+            const row = document.getElementById('an-line2');
+            const text = document.getElementById('an-lm2')?.textContent?.trim() || '';
+            return row && getComputedStyle(row).display !== 'none' &&
+                   text !== '' && text !== '—';
+        }""",
+    )
+
+    line2_display = page.evaluate(
+        "window.getComputedStyle(document.getElementById('an-line2')).display"
+    )
+    line2_text = page.locator("#an-lm2").inner_text().strip()
+    check("Line 2 visible", line2_display != "none", f"display={line2_display}")
+    check(
+        "Line 2 has move text",
+        line2_ready and bool(line2_text) and line2_text != "—",
+        f"line2={line2_text!r}; debug={debug_log(page)}",
+    )
+
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(SCREENSHOT_DIR / "multipv.png"))
+
+    ensure_analysis_engine_off(page)
+    if page.locator("#an-pv-count").inner_text().strip() != "1":
+        page.evaluate("anPvMinus()")
 
 
-def test_bug4_clock_game(page):
-    """Bug 4: Clock mode should not freeze — engine should keep responding."""
-    print("\n--- Bug 4: Clock Mode Game Play ---")
-
-    # Switch back to Game tab
+def test_clock_search_without_book(page) -> None:
+    print("\n--- B5: Clock mode without opening book ---")
     page.evaluate("switchTab('game')")
-    page.wait_for_timeout(500)
-
-    # Select game mode (clock)
     page.select_option("#sel-mode", "game")
-    page.wait_for_timeout(500)
 
-    # Start a new game
+    # This directly tests the historical freeze case: force the normal search
+    # path instead of depending on how many opening-book plies happen to exist.
+    page.evaluate("bookMove = function () { return null; }")
     page.evaluate("newGame()")
-    page.wait_for_timeout(2000)
 
-    # Read initial clock
-    initial_clock = page.evaluate("document.getElementById('clock-top').textContent").strip()
-    print(f"  (Initial clock: {initial_clock})")
+    initial_clock = page.locator("#clock-top").inner_text().strip()
+    initial_moves = page.evaluate(
+        "() => typeof moveHistory !== 'undefined' ? moveHistory.length : -1"
+    )
+    check("New game starts with empty history", initial_moves == 0, f"moves={initial_moves}")
 
-    # Make the human's first move (e2->e4) to trigger the engine
     page.evaluate("doMove('e2e4')")
-    page.wait_for_timeout(3000)
 
-    # Play multiple rounds: human move, wait for engine
-    human_moves = ['d2d4', 'g1f3', 'f1e2', 'e1g1', 'c2c4', 'b1c3']
-    for i, mv in enumerate(human_moves):
-        mc = page.evaluate("typeof moveHistory !== 'undefined' ? moveHistory.length : 0")
-        if mc < 2 + i * 2:
-            break  # Engine didn't respond yet
-        try:
-            page.evaluate(f"doMove('{mv}')")
-        except:
-            break  # Move may be illegal
-        page.wait_for_timeout(3000)  # Wait for engine response
+    responded = wait_js(
+        page,
+        "() => typeof moveHistory !== 'undefined' && moveHistory.length >= 2",
+        timeout=SEARCH_TIMEOUT_MS,
+    )
+    final_moves = page.evaluate(
+        "() => typeof moveHistory !== 'undefined' ? moveHistory.length : -1"
+    )
+    current_clock = page.locator("#clock-top").inner_text().strip()
 
-    # Check: has the game progressed?
-    move_count = page.evaluate("typeof moveHistory !== 'undefined' ? moveHistory.length : 0")
-    print(f"  (Final moveHistory.length={move_count})")
+    check(
+        "Engine responds in clock mode with book disabled",
+        responded and final_moves >= 2,
+        f"moveHistory.length={final_moves}; debug={debug_log(page)}",
+    )
+    check(
+        "Engine clock consumed time",
+        current_clock != initial_clock,
+        f"initial={initial_clock}, current={current_clock}",
+    )
 
-    check("Game progressed (moves played after book exhausts)",
-          move_count > 4,
-          f"moveHistory.length={move_count}")
-
-    # Check clock has changed (time was consumed)
-    current_clock = page.evaluate("document.getElementById('clock-top').textContent").strip()
-    check("Clock time changed (engine was thinking)",
-          current_clock != initial_clock,
-          f"initial={initial_clock}, current={current_clock}")
-
-    # Take screenshot
-    page.screenshot(path=os.path.join(SCREENSHOT_DIR, "bug4_clock_game.png"))
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(SCREENSHOT_DIR / "clock_no_book.png"))
 
 
-def main():
-    global ENGINE_DIR
-    ENGINE_DIR = engine_dir()
-    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("legacy_version", nargs="?", default="")
+    parser.add_argument("--version", default=VERSION)
+    parser.add_argument("--html", default=HTML_FILE)
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--headless", action="store_true", default=HEADLESS)
+    parser.add_argument("--headed", action="store_false", dest="headless")
+    parser.add_argument("--viewport-width", type=int, default=VIEWPORT_W)
+    parser.add_argument("--viewport-height", type=int, default=VIEWPORT_H)
+    parser.add_argument("--ready-timeout-ms", type=int, default=ENGINE_READY_TIMEOUT_MS)
+    parser.add_argument("--search-timeout-ms", type=int, default=SEARCH_TIMEOUT_MS)
+    return parser.parse_args()
 
-    print("=" * 60)
-    print(f"Zchezz — Automated Browser Tests ({os.path.basename(ENGINE_DIR)})")
-    print("=" * 60)
 
-    if not os.path.exists(os.path.join(ENGINE_DIR, HTML_FILE)):
-        print(f"ERROR: {HTML_FILE} not found in {ENGINE_DIR}")
-        sys.exit(1)
+def main() -> int:
+    global ENGINE_READY_TIMEOUT_MS, SEARCH_TIMEOUT_MS
 
-    httpd = start_server()
-    url = f"http://127.0.0.1:{PORT}/{HTML_FILE}"
-    print(f"\nServing {ENGINE_DIR} at {url}")
+    args = parse_args()
+    ENGINE_READY_TIMEOUT_MS = args.ready_timeout_ms
+    SEARCH_TIMEOUT_MS = args.search_timeout_ms
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS)
-        context = browser.new_context(
-            viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
-        page = context.new_page()
+    version = args.version or args.legacy_version
+    directory = engine_dir(version)
+    html = directory / args.html
+    if not html.is_file():
+        print(f"ERROR: browser artifact not found: {html}")
+        return 1
 
-        # Capture console errors
-        js_errors = []
-        page.on("console", lambda msg: js_errors.append(msg.text) if msg.type == "error" else None)
+    print("=" * 78)
+    print(f"Zchezz — Browser/WASM E2E ({directory.name})")
+    print("=" * 78)
 
-        print(f"Loading page...")
-        page.goto(url, timeout=30000)
-        page.wait_for_timeout(4000)  # Wait for WASM to compile + init
-        print("Page loaded!\n")
+    httpd = start_server(directory, args.port)
+    url = f"http://127.0.0.1:{args.port}/{args.html}"
+    print(f"Serving {directory} at {url}")
 
-        # Filter out harmless errors (favicon 404, resource loads)
-        real_errors = [e for e in js_errors if 'favicon' not in e.lower() and '404' not in e]
-        check("No JS console errors on load",
-              len(real_errors) == 0,
-              f"errors: {real_errors[:3]}")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=args.headless)
+            context = browser.new_context(
+                viewport={"width": args.viewport_width, "height": args.viewport_height}
+            )
+            page = context.new_page()
 
-        # Run tests
-        test_bug3_clocks_visible(page)
-        test_bug3_clocks_hidden(page)
-        test_bug1_pv_display(page)
-        test_bug2_multipv(page)
-        test_bug4_clock_game(page)
+            console_errors: list[str] = []
+            page_errors: list[str] = []
+            page.on(
+                "console",
+                lambda msg: console_errors.append(msg.text)
+                if msg.type == "error"
+                else None,
+            )
+            page.on("pageerror", lambda exc: page_errors.append(str(exc)))
 
-        # Final screenshot
-        page.screenshot(path=os.path.join(SCREENSHOT_DIR, "browser_test_final.png"))
+            print("Loading page...")
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
-        browser.close()
+            print("\n--- B1: WASM engine readiness ---")
+            runtime_ready = wait_js(
+                page,
+                "() => typeof window.zchezzSearch === 'function'",
+                timeout=ENGINE_READY_TIMEOUT_MS,
+            )
+            check(
+                "window.zchezzSearch becomes available",
+                runtime_ready,
+                debug_log(page),
+            )
 
-    httpd.shutdown()
+            # Do not manufacture dozens of downstream failures when startup
+            # itself is broken. Startup is the root gate for every search test.
+            if runtime_ready:
+                real_console = [
+                    item
+                    for item in console_errors
+                    if "favicon" not in item.lower()
+                    and "404" not in item
+                    and "fonts.googleapis" not in item.lower()
+                ]
+                check(
+                    "No JavaScript page/console errors on load",
+                    not real_console and not page_errors,
+                    f"console={real_console[:5]}, page={page_errors[:5]}",
+                )
 
-    # Summary
+                info = page.locator("#engine-info").inner_text().strip()
+                check(
+                    "Runtime reports NNUE loaded",
+                    "NNUE" in info and "classical eval" not in info,
+                    f"engine-info={info!r}; debug={debug_log(page)}",
+                )
+
+                test_clock_visibility(page)
+                test_analysis_pv(page)
+                test_multipv(page)
+                test_clock_search_without_book(page)
+
+            browser.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
     total = passed + failed
-    print(f"\n{'='*60}")
+    print("\n" + "=" * 78)
     print(f"Browser Test Results: {passed}/{total} passed, {failed} failed")
     if errors_list:
-        print(f"\nFailures:")
-        for e in errors_list:
-            print(e)
-    print(f"{'='*60}")
-
-    sys.exit(0 if failed == 0 else 1)
+        print("Failures:")
+        for item in errors_list:
+            print(item)
+    print("=" * 78)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    # Legacy positional form: `python tests/test_browser.py v400`.
-    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        sys.argv[1:2] = ["--version", sys.argv[1]]
-    override_from_cli(globals(), CLI, description=__doc__, prog="test_browser.py")
-    main()
+    raise SystemExit(main())

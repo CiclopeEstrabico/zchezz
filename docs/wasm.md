@@ -10,30 +10,46 @@ The canonical browser UI source is:
 engine/build/zchezz_wasm.html
 ```
 
-Do not duplicate this template into every engine version. v314 and v401
-historically contain the same template blob; migration is performed by:
+Do not duplicate this template into every engine version. Generated JS, WASM,
+and the final bundle remain version-specific.
 
-```bash
-python tools/promote_wasm_template.py
+## Browser/WASM API boundary
+
+The browser worker calls exported C functions through Emscripten. This boundary
+is a binary ABI and must be tested as such.
+
+The v403 `SearchParams` layout in wasm32 is 44 bytes:
+
+| Offset | Field | wasm32 size |
+|---:|---|---:|
+| 0 | `max_depth` | 4 |
+| 4 | `start_depth` | 4 |
+| 8 | `time_limit_ms` | 4 |
+| 12 | `node_limit` (`long`) | 4 |
+| 16 | `multi_pv` | 4 |
+| 20 | `threads` | 4 |
+| 24 | `stop` pointer | 4 |
+| 28 | `search_state` pointer | 4 |
+| 32 | `info_cb` pointer | 4 |
+| 36 | `tt` pointer | 4 |
+| 40 | `mpv_share_budget` | 4 |
+
+Browser code must allocate the full 44 bytes. Pointer/function-pointer fields
+not supplied by JS are explicitly zeroed. `search_best_sret` still sanitizes
+these fields defensively, but that is not a substitute for allocating the
+correct struct size.
+
+Run:
+
+```bat
+python tools\repair_wasm_searchparams.py
+python tools\repair_wasm_searchparams.py --check
 ```
 
-The tool verifies the historical Git blob before copying it. The resulting
-`engine/build/zchezz_wasm.html` must be committed so clean CI checkouts have it.
+`tests/test_wasm_wiring.py` prevents this ABI from silently regressing.
 
-Generated outputs remain version-specific:
-
-```text
-engine/c/zchezz_v403/zchezz_wasm.js
-engine/c/zchezz_v403/zchezz_wasm.wasm
-engine/c/zchezz_v403/zchezz_bundle.html
-```
-
-## WASM API contract
-
-WebAssembly defines `NO_TABLEBASES` and `NO_BOOK` for native file I/O.
-
-The browser worker calls `nnue_reset_global`, so the Makefile exports
-`_nnue_reset_global`. `tests/test_wasm_wiring.py` protects this boundary.
+The browser worker uses `nnue_reset_global`, so the Emscripten export list must
+contain `_nnue_reset_global`.
 
 ## Canonical web profile
 
@@ -41,13 +57,34 @@ The browser worker calls `nnue_reset_global`, so the Makefile exports
 python tests/run_tests.py web --version v403 --baseline v402 --keep-going
 ```
 
-Order:
+The sequence is:
 
-1. compile JS/WASM with Emscripten;
+1. compile JS/WASM;
 2. bundle the shared template with version-specific JS/WASM/NNUE;
-3. static bundle checks;
-4. embedded opening-book legality checks;
+3. static bundle validation;
+4. opening-book legality validation;
 5. Playwright browser E2E against `zchezz_bundle.html`.
+
+## E2E timing policy
+
+Browser correctness tests must not use short fixed sleeps as performance
+thresholds.
+
+The application can intentionally spend up to about 10 seconds on one browser
+search. Therefore the E2E suite waits for observable state transitions:
+
+- `window.zchezzSearch` becomes available;
+- analysis PV/score becomes non-empty;
+- MultiPV line 2 becomes non-empty;
+- game history gains the engine reply.
+
+The default E2E condition timeout is 30 seconds. This timeout detects a hang;
+it is not an NPS benchmark.
+
+The clock-mode regression test disables the opening-book lookup inside the test
+page before the move. This directly exercises the engine-search path that used
+to freeze after the book was exhausted, without depending on the current book
+contents.
 
 ## Windows
 
@@ -63,10 +100,7 @@ Later runs:
 engine\build\build_wasm.bat v403
 ```
 
-The setup script uses the official emsdk, installs Python web dependencies,
-installs Playwright Chromium, verifies the template, and runs the web profile.
-
 ## CI
 
-GitHub Actions provisions emsdk and Playwright and runs the same `web` profile.
-A missing shared template is a repository defect, not a successful skip.
+GitHub Actions provisions Emscripten and Playwright and runs the same canonical
+`web` profile.
