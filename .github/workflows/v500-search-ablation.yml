@@ -2,145 +2,163 @@ name: v500-search-ablation
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-search-ablation.yml"
 
 permissions:
   contents: read
 
 jobs:
-  search-ablation:
+  ablation:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [fut314, noqsee, const314, legacyprune]
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
       ARCH_FLAGS: -mavx2
       STATIC_FLAG: ""
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install opening generator
+      - name: Install opening dependency
         run: python -m pip install --disable-pip-version-check python-chess
 
-      - name: Build v314 baseline and arena
+      - name: Create deterministic paired openings
         run: |
-          make -C engine/build ENGINE=v314 native
-          make -C engine/build ENGINE=v500 native
-          make -C engine/build ENGINE=v500 arena
-
-      - name: Create search ablation candidates
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re, shutil
-
-          src = Path('engine/c/zchezz_v500')
-
-          def clone(name):
-              dst = Path('engine/c') / f'zchezz_{name}'
-              if dst.exists(): shutil.rmtree(dst)
-              shutil.copytree(src, dst)
-              return dst
-
-          def set_define(text, macro, value):
-              pat = rf'(#define\s+{re.escape(macro)}\s+)([^\s]+)'
-              out, n = re.subn(pat, rf'\g<1>{value}', text, count=1)
-              if n != 1: raise SystemExit(f'missing macro {macro}')
-              return out
-
-          dst = clone('v500_qseeoff')
-          p = dst/'search.c'; t = p.read_text(encoding='utf-8')
-          anchor = 'if (!in_check && !is_pv && legal_count > 0 && depth <= 3 &&\n                    !is_killer &&'
-          if anchor not in t: raise SystemExit('quiet SEE anchor missing')
-          t = t.replace(anchor, 'if (0 && !in_check && !is_pv && legal_count > 0 && depth <= 3 &&\n                    !is_killer &&', 1)
-          p.write_text(t, encoding='utf-8')
-
-          variants = {
-              'v500_fut314': {
-                  'TUNE_FUT_MULT_DEFAULT':'150',
-                  'TUNE_FUT_IMPROVING_ADJ_DEFAULT':'50',
-              },
-              'v500_rfp314': {
-                  'TUNE_RFP_MULT_DEFAULT':'90',
-                  'TUNE_RFP_IMPROVING_BONUS_DEFAULT':'50',
-              },
-              'v500_nmp314': {
-                  'TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT':'200',
-              },
-              'v500_prob314': {
-                  'TUNE_PROBCUT_MARGIN_DEFAULT':'200',
-              },
-              'v500_tune314': {
-                  'TUNE_RAZOR_MARGIN_DEFAULT':'200',
-                  'TUNE_RFP_MULT_DEFAULT':'90',
-                  'TUNE_RFP_IMPROVING_BONUS_DEFAULT':'50',
-                  'TUNE_NMP_BASE_DEFAULT':'3',
-                  'TUNE_NMP_DEPTH_DIV_DEFAULT':'3',
-                  'TUNE_NMP_MAX_R_DEFAULT':'6',
-                  'TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT':'200',
-                  'TUNE_PROBCUT_MARGIN_DEFAULT':'200',
-                  'TUNE_LMR_DIVISOR_DEFAULT':'1.5',
-                  'TUNE_FUT_MULT_DEFAULT':'150',
-                  'TUNE_FUT_IMPROVING_ADJ_DEFAULT':'50',
-                  'TUNE_ASP_DELTA_INIT_DEFAULT':'20',
-                  'TUNE_ASP_DELTA_MAX_DEFAULT':'500',
-              },
-          }
-          for name, changes in variants.items():
-              dst = clone(name)
-              p = dst/'search.c'; t = p.read_text(encoding='utf-8')
-              for macro, value in changes.items():
-                  t = set_define(t, macro, value)
-              p.write_text(t, encoding='utf-8')
-          PY
-          for e in v500_qseeoff v500_fut314 v500_rfp314 v500_nmp314 v500_prob314 v500_tune314; do
-            make -C engine/build ENGINE=$e native
-          done
-
-      - name: Generate deterministic paired openings
-        run: |
-          mkdir -p artifacts/v500-search
+          mkdir -p artifacts/search-ablation/${{ matrix.variant }}
           python - <<'PY'
           import random, chess
           from pathlib import Path
-          rng = random.Random(500314)
+          rng=random.Random(5314)
           rows=[]; seen=set()
-          while len(rows) < 192:
+          while len(rows)<192:
               b=chess.Board(); ok=True
               for _ in range(rng.randint(8,18)):
                   moves=list(b.legal_moves)
                   if not moves: ok=False; break
                   quiet=[m for m in moves if not b.is_capture(m)]
-                  b.push(rng.choice(quiet if quiet and rng.random()<0.78 else moves))
+                  b.push(rng.choice(quiet if quiet and rng.random()<0.75 else moves))
                   if b.is_game_over(claim_draw=True): ok=False; break
               if not ok: continue
               key=' '.join(b.fen().split()[:4])
-              if key not in seen: seen.add(key); rows.append(key)
-          Path('artifacts/v500-search/openings.epd').write_text('\n'.join(rows)+'\n',encoding='utf-8')
+              if key not in seen:
+                  seen.add(key); rows.append(key)
+          Path('artifacts/search-ablation/openings.epd').write_text('\n'.join(rows)+'\n')
           PY
 
-      - name: Fixed-node ablations vs v314
+      - name: Materialize search variant
+        env:
+          VARIANT: ${{ matrix.variant }}
         run: |
-          set -euo pipefail
-          for e in v500 v500_qseeoff v500_fut314 v500_rfp314 v500_nmp314 v500_prob314 v500_tune314; do
-            echo "===== $e vs v314 ====="
-            python tests/run_arena.py \
-              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_${e}/zchezz.exe" \
-              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-              --games 96 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
-              --openings artifacts/v500-search/openings.epd --opening-plies 0 \
-              --seed 500314 --tt-mb 16 \
-              --json "artifacts/v500-search/${e}_10kn.json" \
-              --pgn "artifacts/v500-search/${e}_10kn.pgn"
-          done
+          rm -rf "engine/c/zchezz_${VARIANT}"
+          cp -a engine/c/zchezz_v500 "engine/c/zchezz_${VARIANT}"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          v=os.environ['VARIANT']
+          p=Path(f'engine/c/zchezz_{v}/search.c')
+          s=p.read_text()
+
+          def rep(old,new):
+              global s
+              n=s.count(old)
+              assert n==1, f'{v}: expected exactly one occurrence of {old!r}, got {n}'
+              s=s.replace(old,new)
+
+          # Restore the pruning/reduction SCALARS used by v3.14.
+          if v in ('fut314','const314','legacyprune'):
+              rep('#define TUNE_FUT_MULT_DEFAULT                 91',
+                  '#define TUNE_FUT_MULT_DEFAULT                150')
+              rep('#define TUNE_FUT_IMPROVING_ADJ_DEFAULT          76',
+                  '#define TUNE_FUT_IMPROVING_ADJ_DEFAULT          50')
+
+          if v in ('const314','legacyprune'):
+              rep('#define TUNE_RFP_MULT_DEFAULT                  105',
+                  '#define TUNE_RFP_MULT_DEFAULT                   90')
+              rep('#define TUNE_RFP_IMPROVING_BONUS_DEFAULT       24',
+                  '#define TUNE_RFP_IMPROVING_BONUS_DEFAULT       50')
+              rep('#define TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT 134',
+                  '#define TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT 200')
+              rep('#define TUNE_PROBCUT_MARGIN_DEFAULT           215',
+                  '#define TUNE_PROBCUT_MARGIN_DEFAULT           200')
+              # razor=200, nmp base/div/max=3/3/6, LMR divisor=1.5 and
+              # aspiration 20/500 already match v3.14.
+
+          # v4.02 added shallow SEE pruning for QUIET moves. v3.14 had none.
+          if v in ('noqsee','legacyprune'):
+              old='''if (!in_check && !is_pv && legal_count > 0 && depth <= 3 &&\n                    !is_killer &&'''
+              new='''if (0 && !in_check && !is_pv && legal_count > 0 && depth <= 3 &&\n                    !is_killer &&'''
+              rep(old,new)
+
+          p.write_text(s)
+          print(f'patched {p} for {v}')
+          PY
+
+      - name: Build baseline, variant and arena
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE="$VARIANT" native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Fixed-node A/B vs current v5
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_${VARIANT}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/search-ablation/openings.epd --opening-plies 0 \
+            --seed 53140 --tt-mb 16 \
+            --json "artifacts/search-ablation/${VARIANT}/${VARIANT}_vs_v500_nodes.json" \
+            --pgn "artifacts/search-ablation/${VARIANT}/${VARIANT}_vs_v500_nodes.pgn"
+
+      - name: Fixed-time A/B vs current v5
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_${VARIANT}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/search-ablation/openings.epd --opening-plies 0 \
+            --seed 53141 --tt-mb 16 \
+            --json "artifacts/search-ablation/${VARIANT}/${VARIANT}_vs_v500_time.json" \
+            --pgn "artifacts/search-ablation/${VARIANT}/${VARIANT}_vs_v500_time.pgn"
+
+      - name: Print result
+        if: always()
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          v=os.environ['VARIANT']
+          root=Path('artifacts/search-ablation')/v
+          for mode in ('nodes','time'):
+              p=root/f'{v}_vs_v500_{mode}.json'
+              if not p.exists():
+                  print(mode, 'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{v} {mode}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
 
       - name: Upload ablation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v500-search-ablation
-          path: artifacts/v500-search/
+          name: search-ablation-${{ matrix.variant }}
+          path: artifacts/search-ablation/${{ matrix.variant }}/
           if-no-files-found: warn
+          retention-days: 30
