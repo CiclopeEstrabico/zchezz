@@ -1,0 +1,80 @@
+name: v321-final-parallel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v321-search-strength]
+    paths:
+      - '.github/workflows/v321-final-parallel.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  confirm:
+    name: parallel-${{ matrix.variant }}-${{ matrix.tc }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [strong_no_qs, strong_bundle, strong_plus_prefetch]
+        tc: [20ms, 100ms]
+    env:
+      STATIC_FLAG: ''
+      VARIANT: ${{ matrix.variant }}
+      TC: ${{ matrix.tc }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Prepare and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v321base
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v321cand
+          python tools/v321_apply_final_bundle.py "$VARIANT" --root engine/c/zchezz_v321cand
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321base clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321cand clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
+          mkdir -p "artifacts/v321-parallel/$VARIANT-$TC"
+      - name: Generate openings
+        shell: bash
+        run: |
+          python - <<'PY'
+          import random, chess
+          from pathlib import Path
+          rng=random.Random(3219001); rows=[]; seen=set()
+          while len(rows)<512:
+              b=chess.Board(); ok=True
+              for _ in range(rng.randint(8,20)):
+                  moves=list(b.legal_moves)
+                  if not moves: ok=False; break
+                  quiet=[m for m in moves if not b.is_capture(m)]
+                  b.push(rng.choice(quiet if quiet and rng.random()<0.75 else moves))
+                  if b.is_game_over(claim_draw=True): ok=False; break
+              if not ok: continue
+              k=' '.join(b.fen().split()[:4])
+              if k not in seen: seen.add(k); rows.append(k)
+          Path('openings_v321_final.epd').write_text('\n'.join(rows)+'\n')
+          PY
+      - name: Timed confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$TC" = 20ms ]; then GAMES=1024; MS=20; else GAMES=256; MS=100; fi
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321cand/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321base/zchezz.exe" \
+            --games "$GAMES" --threads 4 --movetime "$MS" --max-plies 240 \
+            --openings openings_v321_final.epd --opening-plies 0 --seed 3219001 --tt-mb 16 \
+            --json "artifacts/v321-parallel/$VARIANT-$TC/result.json" \
+            --pgn "artifacts/v321-parallel/$VARIANT-$TC/games.pgn"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v321-parallel-${{ matrix.variant }}-${{ matrix.tc }}
+          path: artifacts/v321-parallel/${{ matrix.variant }}-${{ matrix.tc }}/
+          if-no-files-found: error
