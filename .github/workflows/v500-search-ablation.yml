@@ -1,8 +1,6 @@
 name: v500-search-ablation
 
 on:
-  push:
-    branches: ["v500-strength"]
   workflow_dispatch:
 
 permissions:
@@ -53,7 +51,6 @@ jobs:
               if n != 1: raise SystemExit(f'missing macro {macro}')
               return out
 
-          # A: remove v4.02 shallow quiet SEE pruning only.
           dst = clone('v500_qseeoff')
           p = dst/'search.c'; t = p.read_text(encoding='utf-8')
           anchor = 'if (!in_check && !is_pv && legal_count > 0 && depth <= 3 &&\n                    !is_killer &&'
@@ -62,7 +59,6 @@ jobs:
           p.write_text(t, encoding='utf-8')
 
           variants = {
-              # One family at a time restored to v3.14 values.
               'v500_fut314': {
                   'TUNE_FUT_MULT_DEFAULT':'150',
                   'TUNE_FUT_IMPROVING_ADJ_DEFAULT':'50',
@@ -77,7 +73,6 @@ jobs:
               'v500_prob314': {
                   'TUNE_PROBCUT_MARGIN_DEFAULT':'200',
               },
-              # Full v3.14 tuning profile, keeping v4 control flow/TT/etc.
               'v500_tune314': {
                   'TUNE_RAZOR_MARGIN_DEFAULT':'200',
                   'TUNE_RFP_MULT_DEFAULT':'90',
