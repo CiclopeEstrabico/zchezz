@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-set "ENGINE=v403"
+set "ENGINE=v322"
 if not "%~1"=="" set "ENGINE=%~1"
 
 cd /d "%~dp0\..\.."
@@ -33,5 +33,5 @@ if errorlevel 1 (
 )
 
 echo [4/4] Running canonical web profile...
-python tests\run_tests.py web --version %ENGINE% --baseline v402 --keep-going
+python tests\run_tests.py web --version %ENGINE% --baseline v314 --keep-going
 exit /b %errorlevel%
