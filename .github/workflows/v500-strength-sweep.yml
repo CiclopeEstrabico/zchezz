@@ -1,0 +1,138 @@
+name: v500-strength-sweep
+
+on:
+  push:
+    branches: ["v500-strength"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scale-sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install opening generator
+        run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Build baselines and arena
+        run: |
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v403 native
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Create score-scale candidates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          scales = [75, 90, 100, 110, 125, 140, 160]
+          needle = "float cp = (float)l3_sum * OutScale + L3B * 320.0f;"
+          for pct in scales:
+              name = f"v500_s{pct:03d}"
+              dst = Path("engine/c") / f"zchezz_{name}"
+              if dst.exists():
+                  shutil.rmtree(dst)
+              shutil.copytree("engine/c/zchezz_v500", dst)
+              p = dst / "nnue.c"
+              txt = p.read_text(encoding="utf-8")
+              if needle not in txt:
+                  raise SystemExit(f"scale patch anchor missing in {p}")
+              factor = pct / 100.0
+              txt = txt.replace(
+                  needle,
+                  f"float cp = ((float)l3_sum * OutScale + L3B * 320.0f) * {factor:.2f}f;"
+              )
+              p.write_text(txt, encoding="utf-8")
+          PY
+          for pct in 075 090 100 110 125 140 160; do
+            make -C engine/build ENGINE=v500_s${pct} native
+          done
+
+      - name: Generate deterministic paired openings
+        run: |
+          mkdir -p artifacts/v500
+          python - <<'PY'
+          import hashlib, random
+          import chess
+          from pathlib import Path
+
+          rng = random.Random(5002026)
+          out = Path('artifacts/v500/openings.epd')
+          seen = set(); rows = []
+          while len(rows) < 160:
+              b = chess.Board()
+              target = rng.randint(8, 16)
+              ok = True
+              for _ in range(target):
+                  moves = list(b.legal_moves)
+                  if not moves:
+                      ok = False; break
+                  quiet = [m for m in moves if not b.is_capture(m)]
+                  pool = quiet if quiet and rng.random() < 0.78 else moves
+                  b.push(rng.choice(pool))
+                  if b.is_game_over(claim_draw=True):
+                      ok = False; break
+              if not ok:
+                  continue
+              key = ' '.join(b.fen().split()[:4])
+              if key in seen:
+                  continue
+              seen.add(key); rows.append(key)
+          out.write_text('\n'.join(rows) + '\n', encoding='utf-8')
+          print('openings', len(rows), 'sha256', hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+
+      - name: Baseline v403 vs v314 at 10k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v403/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
+            --openings artifacts/v500/openings.epd --opening-plies 0 \
+            --seed 5002026 --tt-mb 16 \
+            --json artifacts/v500/baseline_v403_v314_10kn.json \
+            --pgn artifacts/v500/baseline_v403_v314_10kn.pgn
+
+      - name: Sweep score scale vs v314 at 10k nodes
+        run: |
+          set -euo pipefail
+          for pct in 075 090 100 110 125 140 160; do
+            echo "===== SCORE SCALE ${pct}% ====="
+            python tests/run_arena.py \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_s${pct}/zchezz.exe" \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+              --games 96 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
+              --openings artifacts/v500/openings.epd --opening-plies 0 \
+              --seed 5002026 --tt-mb 16 \
+              --json artifacts/v500/scale_${pct}_10kn.json \
+              --pgn artifacts/v500/scale_${pct}_10kn.pgn
+          done
+
+      - name: Bench scale-neutral baseline
+        run: |
+          engine/c/zchezz_v314/zchezz.exe bench 10 | tee artifacts/v500/bench_v314.txt
+          engine/c/zchezz_v403/zchezz.exe bench 10 | tee artifacts/v500/bench_v403.txt
+          engine/c/zchezz_v500_s100/zchezz.exe bench 10 | tee artifacts/v500/bench_v500_s100.txt
+
+      - name: Upload sweep evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v500-strength-sweep
+          path: artifacts/v500/
+          if-no-files-found: warn
