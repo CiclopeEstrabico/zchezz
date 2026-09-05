@@ -41,11 +41,13 @@ jobs:
             cmp "engine/c/zchezz_v321base/$f" "engine/c/zchezz_v321cand/$f"
           done
 
-      - name: Build release baseline
+      - name: Build AVX2 baseline
         shell: bash
         run: |
           set -euo pipefail
-          ARCH_FLAGS="-mavxvnni -mavx2" make -C engine/build ENGINE=v321base clean native
+          # Hosted runner CPU does not expose AVX-VNNI. AVX2 keeps the A/B fair
+          # and isolates LTO/PGO; release VNNI remains a separate deployment flag.
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321base clean native
           engine/c/zchezz_v321base/zchezz.exe bench 11 | tee "artifacts/v321-buildopts/$VARIANT/bench_base.txt"
 
       - name: Build candidate
@@ -53,15 +55,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$VARIANT" = lto ]; then
-            ARCH_FLAGS="-mavxvnni -mavx2 -flto" make -C engine/build ENGINE=v321cand clean native
+            ARCH_FLAGS="-mavx2 -flto" make -C engine/build ENGINE=v321cand clean native
           else
             rm -rf /tmp/zchezz-v321-pgo && mkdir -p /tmp/zchezz-v321-pgo
-            ARCH_FLAGS="-mavxvnni -mavx2 -flto -fprofile-generate=/tmp/zchezz-v321-pgo" \
+            ARCH_FLAGS="-mavx2 -flto -fprofile-generate=/tmp/zchezz-v321-pgo" \
               make -C engine/build ENGINE=v321cand clean native
             engine/c/zchezz_v321cand/zchezz.exe bench 8  >/dev/null
             engine/c/zchezz_v321cand/zchezz.exe bench 10 >/dev/null
             engine/c/zchezz_v321cand/zchezz.exe bench 12 >/dev/null
-            ARCH_FLAGS="-mavxvnni -mavx2 -flto -fprofile-use=/tmp/zchezz-v321-pgo -fprofile-correction" \
+            ARCH_FLAGS="-mavx2 -flto -fprofile-use=/tmp/zchezz-v321-pgo -fprofile-correction" \
               make -C engine/build ENGINE=v321cand clean native
           fi
           engine/c/zchezz_v321cand/zchezz.exe bench 11 | tee "artifacts/v321-buildopts/$VARIANT/bench_candidate.txt"
