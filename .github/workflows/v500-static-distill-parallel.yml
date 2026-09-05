@@ -1,0 +1,164 @@
+name: v500-static-distill-parallel
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-static-distill-parallel.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train-gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: identity
+            source: static500
+            teacher: v500
+            engine_code: 500
+            lr: "1e-5"
+            epochs: 6
+          - name: teacher_lr1e5
+            source: static314
+            teacher: v314
+            engine_code: 314
+            lr: "1e-5"
+            epochs: 12
+          - name: teacher_lr3e5
+            source: static314
+            teacher: v314
+            engine_code: 314
+            lr: "3e-5"
+            epochs: 12
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+      NAME: ${{ matrix.name }}
+      SOURCE: ${{ matrix.source }}
+      TEACHER: ${{ matrix.teacher }}
+      ENGINE_CODE: ${{ matrix.engine_code }}
+      LR: ${{ matrix.lr }}
+      EPOCHS: ${{ matrix.epochs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v500-strength
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+      - name: Relabel all 1.411M positions
+        run: |
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=$ENGINE_CODE \
+            -Iengine/c/zchezz_$TEACHER -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_$TEACHER/nnue.c -lm -o relabel
+          mkdir -p "data/$SOURCE" "artifacts/parallel/$NAME" checkpoints
+          for G in 00 01 02 03 04 05 06 07 08 09; do
+            ./relabel \
+              --input "data/v500_selfplay/gen${G}/selfplay_000.bin" \
+              --output "data/$SOURCE/${G}.bin" \
+              --nnue "engine/c/zchezz_$TEACHER/nnue_weights.bin"
+          done
+          python train/import_nnu4.py \
+            --src engine/c/zchezz_v500/nnue_weights.bin \
+            --dst checkpoints/bootstrap.pt
+      - name: Train
+        run: |
+          python - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0,'train')
+          import train_nnue as tn
+          name=os.environ['NAME']; source=os.environ['SOURCE']
+          out=Path('checkpoints')/name; out.mkdir(parents=True,exist_ok=True)
+          ns=tn.build_arg_parser().parse_args([])
+          ns.ckpt_dir=str(out)
+          ns.dataset_name=f'v500_parallel_{name}'
+          ns.epochs=int(os.environ['EPOCHS'])
+          ns.batch_size=8192
+          ns.max_positions_chunk=1_100_000
+          ns.lr=1e-3
+          ns.transfer_lr=float(os.environ['LR'])
+          ns.weight_decay=0.0
+          ns.workers=4
+          ns.device='cpu'
+          ns.val_every=1
+          ns.resample_each_epoch=False
+          ns.encode_cache=False
+          ns.show_config=False
+          ns.checkpoint_source='checkpoints/bootstrap.pt'
+          ns.seed=560000+len(name)
+          ns.sources=[tn.SourceSpec(kind='bin',path=f'data/{source}/*.bin',k=0.0,
+                                    train_pct=1.0,val_frac=0.02,name=name)]
+          tn.train(ns)
+          PY
+      - name: Export and build
+        run: |
+          CKPT=$(ls -t checkpoints/$NAME/*.pt | head -1)
+          python train/export_nnu4.py --ckpt "$CKPT" --dst "artifacts/parallel/$NAME/nnue_weights.bin"
+          rm -rf "engine/c/zchezz_v500_$NAME"
+          cp -a engine/c/zchezz_v500 "engine/c/zchezz_v500_$NAME"
+          cp "artifacts/parallel/$NAME/nnue_weights.bin" "engine/c/zchezz_v500_$NAME/nnue_weights.bin"
+          make -C engine/build "ENGINE=v500_$NAME" native
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v500 arena
+          python - <<'PY'
+          import os,sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/f'artifacts/parallel/{os.environ["NAME"]}/openings.epd',561731,384)
+          PY
+      - name: Gate vs current v5 at 50k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_$NAME/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/parallel/$NAME/openings.epd" --opening-plies 0 \
+            --seed 562000 --tt-mb 16 \
+            --json "artifacts/parallel/$NAME/vs_v500_nodes.json" \
+            --pgn "artifacts/parallel/$NAME/vs_v500_nodes.pgn"
+      - name: Gate vs current v5 at 100ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_$NAME/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 128 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings "artifacts/parallel/$NAME/openings.epd" --opening-plies 0 \
+            --seed 562001 --tt-mb 16 \
+            --json "artifacts/parallel/$NAME/vs_v500_time.json" \
+            --pgn "artifacts/parallel/$NAME/vs_v500_time.pgn"
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root=Path('artifacts/parallel')/os.environ['NAME']
+          for p in root.glob('vs_v500_*.json'):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-static-${{ matrix.name }}
+          path: artifacts/parallel/${{ matrix.name }}/
+          retention-days: 30
