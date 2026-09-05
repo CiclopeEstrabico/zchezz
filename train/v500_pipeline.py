@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
 """Zchezz v5.00 full-accumulator training loop.
 
-This is the v5-specific orchestration layer. It intentionally does NOT use
-LC0 as the main source and does NOT reintroduce the 31 hand-made features.
-The loop is:
+v5.00 deliberately keeps the HalfKP/full-accumulator representation and
+keeps the 31 legacy hand-made features OUT.  The training loop separates
+where positions come from from who supplies the value target:
 
   1. Generate positions with zchezz_v500 native self-play.
   2. Re-label a sampled set with the stronger v3.14 engine.
-  3. Train HalfKP/full-accumulator on teacher cp + real result.
-  4. Export NNU4 candidate weights.
-  5. Gate the candidate against v3.14 before promotion.
-
-Why teacher distillation here?
-The v4.03 experiments showed that simply adding more LC0 outcome data did
-not increase Elo. v3.14 is already the concrete strength target we need to
-recover, so it is a useful teacher: v5 sees positions from its OWN search
-distribution while learning the value surface of the stronger engine.
-Real results remain a separate signal and are blended only at training time.
+  3. Train on teacher cp + the real game result.
+  4. Replay recent generations so the net does not forget old regimes.
+  5. Export an NNU4 candidate.
+  6. Gate the candidate against v3.14 at fixed nodes and fixed time.
 
 Default result blend by generation:
     g0: 0.15 result + 0.85 v3.14 teacher
@@ -24,10 +18,8 @@ Default result blend by generation:
     g2: 0.25 result + 0.75 v3.14 teacher
     g3+:0.30 result + 0.70 v3.14 teacher
 
-The blend is deliberately modest: pure teacher imitation cannot exceed the
-teacher easily, but pure TD(1) was noisy in the LC0 experiments. Later
-generations add more outcome signal while keeping the stronger teacher as
-an anchor.
+The pipeline never auto-promotes a candidate weight file.  A candidate must
+survive Elo gates first.
 
 Commands:
     python train/v500_pipeline.py plan --generation 0
@@ -37,16 +29,13 @@ Commands:
     python train/v500_pipeline.py export --generation 0
     python train/v500_pipeline.py gate --generation 0
     python train/v500_pipeline.py cycle --generation 0
-
-The pipeline never auto-promotes a candidate weight file. A candidate must
-win its Elo gate first; promotion remains an explicit action.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -57,15 +46,18 @@ TRAIN_DIR = ROOT / "train"
 ENGINE = "v500"
 BASELINE = "v314"
 ENGINE_DIR = ROOT / "engine/c/zchezz_v500"
-BASELINE_DIR = ROOT / "engine/c/zchezz_v314"
 BUILD_DIR = ROOT / "engine/build"
 SELFPLAY_ROOT = ROOT / "data/v500_selfplay"
 TEACHER_ROOT = ROOT / "data/v500_teacher_v314"
 CKPT_ROOT = ROOT / "checkpoints/v500"
 ARTIFACT_ROOT = ROOT / "artifacts/v500-training"
-OPENING_FOLDER = ROOT / "openings/lines"
 
-# Generation defaults. These are quality-oriented, not CI-smoke values.
+# Optional local opening corpus.  It is intentionally not required because
+# the repo does not track the user's large opening collection.
+OPENING_FOLDER = ROOT / "openings/lines"
+OPENING_EXTS = {".epd", ".pgn"}
+
+# Generation defaults: quality-oriented, not CI-smoke values.
 GAMES = 20_000
 SELFPLAY_SHARDS = 4
 CONCURRENCY = max(1, (os.cpu_count() or 4) - 1)
@@ -73,7 +65,7 @@ MOVETIME_MS = 50
 MULTIPV = 4
 TEMPERATURE = 0.80
 TEMP_PLIES = 16
-TEMP_FINAL = 0.0          # exact argmax after the diverse opening phase
+TEMP_FINAL = 0.0
 TEMP_ARGMAX_EPS = 0.0
 MAX_PLIES = 320
 TT_MB = 16.0
@@ -85,6 +77,7 @@ TEACHER_NODES = 10_000
 TEACHER_MAX_ROWS = 100_000
 TEACHER_WORKERS = max(1, min(8, (os.cpu_count() or 4) // 2))
 TEACHER_SHARD_ROWS = 10_000
+TEACHER_TIMEOUT = 30.0
 
 EPOCHS = 24
 BATCH_SIZE = 65_536
@@ -97,6 +90,7 @@ REPLAY_GENERATIONS = 3
 GATE_GAMES = 256
 GATE_MOVETIME_MS = 100
 GATE_NODES = 50_000
+GATE_OPENINGS = 384
 
 
 def result_blend(generation: int) -> float:
@@ -111,7 +105,7 @@ def _make_program() -> str:
 
 
 def run(cmd: list[str], *, cwd: Path | None = None) -> None:
-    print("+", " ".join(str(x) for x in cmd))
+    print("+", " ".join(str(x) for x in cmd), flush=True)
     subprocess.run([str(x) for x in cmd], cwd=str(cwd) if cwd else None, check=True)
 
 
@@ -138,12 +132,74 @@ def latest_checkpoint(path: Path) -> Path:
     return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def build_selfplay() -> Path:
-    """Build the native generator against zchezz_v500.
+def _opening_corpus_available() -> bool:
+    if not OPENING_FOLDER.is_dir():
+        return False
+    try:
+        return any(p.is_file() and p.suffix.lower() in OPENING_EXTS
+                   for p in OPENING_FOLDER.rglob("*"))
+    except OSError:
+        return False
 
-    SAMPLE_ENGINE_VERSION is passed explicitly because sample.h is shared by
-    all historical engine directories; provenance must say 5.00 for v5 data.
+
+def _selfplay_opening_args(args: argparse.Namespace) -> list[str]:
+    """Use the local corpus when present, otherwise deterministic random plies.
+
+    Native selfplay accepts opening-mode book|random|all.  `all` is the
+    intended book/random mixture; the old literal `book+random` was invalid.
     """
+    if _opening_corpus_available():
+        return [
+            "--openings", str(OPENING_FOLDER),
+            "--opening-mode", "all",
+            "--book-portion", str(args.book_portion),
+            "--random-plies", str(args.random_plies),
+            "--same-opening-twice",
+        ]
+    print(f"[v500] opening corpus not found at {OPENING_FOLDER}; using random plies", flush=True)
+    return [
+        "--opening-mode", "random",
+        "--random-plies", str(args.random_plies),
+        "--same-opening-twice",
+    ]
+
+
+def _make_gate_openings(path: Path, seed: int, count: int = GATE_OPENINGS) -> Path:
+    """Create deterministic legal EPD starts so gates never depend on local files."""
+    import chess
+
+    rng = random.Random(seed)
+    rows: list[str] = []
+    seen: set[str] = set()
+    while len(rows) < count:
+        board = chess.Board()
+        ok = True
+        for _ in range(rng.randint(8, 18)):
+            moves = list(board.legal_moves)
+            if not moves:
+                ok = False
+                break
+            quiet = [m for m in moves if not board.is_capture(m)]
+            pool = quiet if quiet and rng.random() < 0.75 else moves
+            board.push(rng.choice(pool))
+            if board.is_game_over(claim_draw=True):
+                ok = False
+                break
+        if not ok:
+            continue
+        key = " ".join(board.fen().split()[:4])
+        if key not in seen:
+            seen.add(key)
+            rows.append(key)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    print(f"[v500] generated {len(rows)} deterministic gate openings: {path}")
+    return path
+
+
+def build_selfplay() -> Path:
+    """Build native selfplay against zchezz_v500 with v5 provenance."""
     make = _make_program()
     run([
         make, "-C", str(BUILD_DIR), "ENGINE=v500",
@@ -170,6 +226,7 @@ def generate(args: argparse.Namespace) -> None:
     out_dir = gen_dir(args.generation)
     out_dir.mkdir(parents=True, exist_ok=True)
     games_per_shard = (args.games + args.shards - 1) // args.shards
+    opening_args = _selfplay_opening_args(args)
 
     remaining = args.games
     for shard in range(args.shards):
@@ -193,11 +250,7 @@ def generate(args: argparse.Namespace) -> None:
             "--tt-mb", str(args.tt_mb),
             "--nnue", str(ENGINE_DIR / "nnue_weights.bin"),
             "--out", str(dst),
-            "--openings", str(OPENING_FOLDER),
-            "--opening-mode", "book+random",
-            "--random-plies", str(args.random_plies),
-            "--book-portion", str(args.book_portion),
-            "--same-opening-twice",
+            *opening_args,
         ]
         run(cmd, cwd=ROOT)
         remaining -= n
@@ -217,6 +270,7 @@ def label(args: argparse.Namespace) -> None:
         "--max-rows", str(args.teacher_rows),
         "--workers", str(args.teacher_workers),
         "--shard-rows", str(args.teacher_shard_rows),
+        "--timeout", str(args.teacher_timeout),
         "--seed", str(args.seed + 314),
         "--generation", str(args.generation),
     ], cwd=ROOT)
@@ -225,10 +279,9 @@ def label(args: argparse.Namespace) -> None:
 def train_generation(args: argparse.Namespace) -> None:
     """Call the canonical trainer with explicit SourceSpec objects.
 
-    This intentionally bypasses train_nnue.py's --source string parser:
-    SourceSpec has a `lam` field, but the current parser fails to propagate
-    a supplied lam and would silently fall back to 0.0. Constructing the
-    objects here makes the v5 result/teacher blend unambiguous.
+    The current generic `--source` string parser does not propagate `lam`.
+    v5 therefore creates SourceSpec directly so teacher/result weighting can
+    never silently fall back to lambda=0.
     """
     if str(TRAIN_DIR) not in sys.path:
         sys.path.insert(0, str(TRAIN_DIR))
@@ -249,12 +302,16 @@ def train_generation(args: argparse.Namespace) -> None:
     ns.encode_cache = True
     ns.show_config = False
 
-    if args.generation > 0 and ckpt_dir(args.generation - 1).exists():
-        ns.checkpoint_source = str(ckpt_dir(args.generation - 1))
+    prev = ckpt_dir(args.generation - 1)
+    if args.generation > 0 and prev.exists() and list(prev.glob("*.pt")):
+        ns.checkpoint_source = str(prev)
     else:
         ns.checkpoint_source = "new"
 
     lam = result_blend(args.generation) if args.result_blend is None else args.result_blend
+    if not 0.0 <= lam <= 1.0:
+        raise SystemExit(f"--result-blend must be in [0,1], got {lam}")
+
     ns.sources = []
     oldest = max(0, args.generation - args.replay_generations + 1)
     for g in range(args.generation, oldest - 1, -1):
@@ -278,8 +335,8 @@ def train_generation(args: argparse.Namespace) -> None:
 
     ckpt_dir(args.generation).mkdir(parents=True, exist_ok=True)
     print(f"[v500] training generation={args.generation} result_blend={lam:.2f} sources={len(ns.sources)}")
-    for s in ns.sources:
-        print(f"[v500]   {s.name}: pct={s.train_pct:.2f} lam={s.lam:.2f} path={s.path}")
+    for source in ns.sources:
+        print(f"[v500]   {source.name}: pct={source.train_pct:.2f} lam={source.lam:.2f} path={source.path}")
     tn.train(ns)
 
 
@@ -317,24 +374,29 @@ def gate(args: argparse.Namespace) -> None:
 
         out = artifact_dir(args.generation)
         out.mkdir(parents=True, exist_ok=True)
+        openings = _make_gate_openings(out / "gate_openings.epd", args.seed + 731)
         common = [
             sys.executable, str(ROOT / "tests/run_arena.py"),
             "--player", f"uci:{candidate}",
             "--player", f"uci:{baseline}",
             "--threads", str(args.gate_threads),
             "--max-plies", "300",
-            "--openings", str(OPENING_FOLDER),
+            "--openings", str(openings),
             "--opening-plies", "0",
             "--tt-mb", "16",
         ]
         run(common + [
-            "--games", str(args.gate_games), "--movetime", "0", "--nodes", str(args.gate_nodes),
+            "--games", str(args.gate_games),
+            "--movetime", "0",
+            "--nodes", str(args.gate_nodes),
             "--seed", str(args.seed + 900),
             "--json", str(out / "candidate_vs_v314_nodes.json"),
             "--pgn", str(out / "candidate_vs_v314_nodes.pgn"),
         ], cwd=ROOT)
         run(common + [
-            "--games", str(args.gate_games), "--movetime", str(args.gate_movetime), "--nodes", "0",
+            "--games", str(args.gate_games),
+            "--movetime", str(args.gate_movetime),
+            "--nodes", "0",
             "--seed", str(args.seed + 901),
             "--json", str(out / "candidate_vs_v314_time.json"),
             "--pgn", str(out / "candidate_vs_v314_time.pgn"),
@@ -346,11 +408,13 @@ def gate(args: argparse.Namespace) -> None:
 
 def show_plan(args: argparse.Namespace) -> None:
     lam = result_blend(args.generation) if args.result_blend is None else args.result_blend
+    opening_desc = "97% local book + 3% random" if _opening_corpus_available() else "random plies (no tracked corpus)"
     print("Zchezz v5.00 training plan")
     print(f"  generation       : {args.generation}")
-    print(f"  architecture     : HalfKP-4Bucket, full accumulator, current H2=32")
-    print(f"  manual features  : 0 (the 31 legacy features stay out)")
+    print("  architecture     : HalfKP-4Bucket, full accumulator, current H2=32")
+    print("  manual features  : 0 (the 31 legacy features stay out)")
     print(f"  selfplay         : {args.games:,} games, {args.movetime} ms/move, T={args.temperature} for {args.temp_plies} plies then argmax")
+    print(f"  openings         : {opening_desc}")
     print(f"  teacher          : v3.14 @ {args.teacher_nodes:,} nodes, sample {args.teacher_rows:,} positions")
     print(f"  target           : {lam:.2f} result + {1.0-lam:.2f} teacher WDL")
     print(f"  replay           : current + up to {args.replay_generations-1} previous generations")
@@ -379,6 +443,7 @@ def add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--teacher-rows", type=int, default=TEACHER_MAX_ROWS)
     p.add_argument("--teacher-workers", type=int, default=TEACHER_WORKERS)
     p.add_argument("--teacher-shard-rows", type=int, default=TEACHER_SHARD_ROWS)
+    p.add_argument("--teacher-timeout", type=float, default=TEACHER_TIMEOUT)
     p.add_argument("--epochs", type=int, default=EPOCHS)
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     p.add_argument("--lr", type=float, default=LR)
