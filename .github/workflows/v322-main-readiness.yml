@@ -1,0 +1,120 @@
+name: v322-main-readiness
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [v322-nps-strength]
+
+permissions:
+  contents: write
+
+jobs:
+  infrastructure:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      STATIC_FLAG: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python smoke-test dependencies
+        run: python -m pip install --disable-pip-version-check python-chess numpy pandas pyarrow torch
+
+      - name: Materialize v3.22 infrastructure defaults
+        run: python tools/v322_retarget_infrastructure.py
+
+      - name: Python syntax and active-engine contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            utils/repo_paths.py \
+            tests/run_arena.py tests/run_selfplay.py tests/run_selfplay_native.py \
+            tests/run_tournament.py tests/run_tournament_quick.py tests/run_tests.py \
+            train/model_nnu3.py train/encoding_nnu3.py train/train_nnu3.py train/export_nnu3.py
+          python - <<'PY'
+          from utils.repo_paths import active_version, engine_dir
+          assert active_version() == 'v322', active_version()
+          assert engine_dir().name == 'zchezz_v322'
+          print('active engine:', active_version(), engine_dir())
+          PY
+
+      - name: NNU3 encoder, train and export smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python train/encoding_nnu3.py
+          python train/train_nnu3.py --self-test
+          mkdir -p checkpoints/v322-smoke artifacts/nnu3-smoke
+          python - <<'PY'
+          import sys, torch
+          sys.path.insert(0, 'train')
+          from model_nnu3 import NNUE, architecture_dict
+          model = NNUE()
+          torch.save({
+              'format': 'zchezz_nnu3_checkpoint_v1',
+              'arch': architecture_dict(),
+              'dataset_name': 'ci-smoke',
+              'epoch': 1,
+              'lr': 1e-3,
+              'model': model.state_dict(),
+          }, 'checkpoints/v322-smoke/smoke.pt')
+          PY
+          python train/export_nnu3.py \
+            --checkpoint checkpoints/v322-smoke/smoke.pt \
+            --output artifacts/nnu3-smoke/nnue_weights.bin
+          test "$(stat -c%s artifacts/nnu3-smoke/nnue_weights.bin)" = 426864
+
+      - name: Build v3.22 and load exported NNU3
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH_FLAGS='-mavx2' make -C engine/build ENGINE=v322 clean native
+          {
+            printf 'uci\n'
+            printf 'setoption name NNUE value %s/artifacts/nnu3-smoke/nnue_weights.bin\n' "$GITHUB_WORKSPACE"
+            printf 'isready\nquit\n'
+          } | engine/c/zchezz_v322/zchezz.exe 2>&1 | tee artifacts/nnu3-smoke/uci-load.txt
+          grep -q 'id name Zchezz 3.22' artifacts/nnu3-smoke/uci-load.txt
+          grep -q '\[NNUE\] Loaded:' artifacts/nnu3-smoke/uci-load.txt
+          grep -q 'readyok' artifacts/nnu3-smoke/uci-load.txt
+
+      - name: Build shared native tool host and smoke wrappers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH_FLAGS='-mavx2' make -C engine/build arena
+          ARCH_FLAGS='-mavx2' make -C engine/build selfplay
+          python tests/run_arena.py --help >/dev/null
+          python tests/run_selfplay.py --help >/dev/null
+          python tests/run_tournament.py --help >/dev/null
+          python tests/run_tournament_quick.py --help >/dev/null || true
+          # The retarget operation is configuration-only: engine source/weights
+          # must remain untouched.
+          git diff --exit-code -- engine/c/zchezz_v322
+
+      - name: Commit materialized configuration to validation branch
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            tests/run_arena.py tests/run_selfplay.py tests/run_selfplay_native.py \
+            tests/run_tournament.py tests/run_tournament_quick.py tests/run_tests.py \
+            engine/build/build_termux.sh
+          if git diff --cached --quiet; then
+            echo 'No materialized retarget changes.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(v322): materialize inherited infrastructure defaults'
+          git push origin HEAD:${{ github.head_ref }}
