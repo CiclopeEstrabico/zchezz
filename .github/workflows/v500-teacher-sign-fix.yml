@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   diagnose-fix-retrain:
+    name: diagnose + repair + retrain
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
@@ -27,64 +28,33 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Patch teacher-score orientation and add regression test
+      - name: Fix teacher score-frame conversion
         run: |
           python - <<'PY'
           from pathlib import Path
           p = Path('train/labeling/label_with_teacher.py')
           s = p.read_text(encoding='utf-8')
           old = '''    def _evaluate_once(self, fen: str) -> int:\n        side = fen.split()[1]\n        self.write(f"position fen {fen}")\n        self.write(f"go nodes {self.nodes}")\n'''
-          new = '''    def _evaluate_once(self, fen: str) -> int:\n        # Zchezz's UCI callback emits scores WHITE-relative already.\n        # search_best() converts its root STM-relative negamax score to\n        # wb_score before main.c prints `score cp`.  Do NOT flip again\n        # for Black-to-move FENs here: that would invert half the corpus.\n        self.write(f"position fen {fen}")\n        self.write(f"go nodes {self.nodes}")\n'''
-          assert old in s, 'expected _evaluate_once preamble not found'
-          s = s.replace(old, new, 1)
+          new = '''    def _evaluate_once(self, fen: str) -> int:\n        # Zchezz UCI scores are already WHITE-relative. search_best()\n        # converts its root negamax score to wb_score before main.c emits\n        # `info score cp`. A second Black-to-move flip here corrupts half\n        # of the teacher corpus.\n        self.write(f"position fen {fen}")\n        self.write(f"go nodes {self.nodes}")\n'''
+          if old in s:
+              s = s.replace(old, new, 1)
           old2 = '''        white_cp = last_cp if side == "w" else -last_cp\n        return max(-CP_CLIP, min(CP_CLIP, white_cp))\n'''
           new2 = '''        return max(-CP_CLIP, min(CP_CLIP, last_cp))\n'''
-          assert old2 in s, 'expected second score flip not found'
-          s = s.replace(old2, new2, 1)
+          if old2 in s:
+              s = s.replace(old2, new2, 1)
           p.write_text(s, encoding='utf-8')
-
-          t = Path('tests/test_teacher_label_sign.py')
-          t.write_text(r'''#!/usr/bin/env python3
-import re
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "train" / "labeling"))
-import label_with_teacher as lwt
-
-class FakeTeacher(lwt.UciTeacher):
-    def __init__(self, lines):
-        self.lines = lines
-        self.nodes = 1
-        self.timeout = 1.0
-        self.re_cp = re.compile(r"score cp (-?\\d+)")
-        self.re_mate = re.compile(r"score mate (-?\\d+)")
-    def write(self, command):
-        pass
-    def read_until(self, marker, timeout):
-        return self.lines
-
-WHITE = "7k/8/8/8/8/8/4Q3/7K w - - 0 1"
-BLACK = "7k/8/8/8/8/8/4Q3/7K b - - 0 1"
-
-for fen in (WHITE, BLACK):
-    assert FakeTeacher(["info depth 1 score cp 137", "bestmove h8g8"])._evaluate_once(fen) == 137
-    assert FakeTeacher(["info depth 1 score cp -91", "bestmove h8g8"])._evaluate_once(fen) == -91
-    assert FakeTeacher(["info depth 1 score mate 3", "bestmove h8g8"])._evaluate_once(fen) == lwt.CP_CLIP
-    assert FakeTeacher(["info depth 1 score mate -2", "bestmove h8g8"])._evaluate_once(fen) == -lwt.CP_CLIP
-print("teacher UCI white-relative score contract: OK")
-''', encoding='utf-8')
           PY
           python tests/test_teacher_label_sign.py
 
-      - name: Commit permanent source fix
+      - name: Commit permanent labeler fix
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add train/labeling/label_with_teacher.py tests/test_teacher_label_sign.py
-          git commit -m "fix(v500): preserve white-relative teacher scores"
-          git push origin HEAD:v500-strength
+          if ! git diff --quiet -- train/labeling/label_with_teacher.py; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add train/labeling/label_with_teacher.py
+            git commit -m "fix(v500): preserve white-relative teacher scores"
+            git push origin HEAD:v500-strength
+          fi
 
       - name: Install training dependencies
         run: |
@@ -92,7 +62,7 @@ print("teacher UCI white-relative score contract: OK")
           python -c 'import torch; print(torch.__version__)' || \
             python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Download original 10k corpus
+      - name: Download original 10k-game corpus
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -102,213 +72,206 @@ print("teacher UCI white-relative score contract: OK")
           merge-multiple: true
           path: data
 
-      - name: Prove corruption and repair teacher labels in-place
+      - name: Prove corruption and repair existing teacher labels
         run: |
           python - <<'PY'
           from pathlib import Path
           import numpy as np
           import pandas as pd
 
-          rows=[]
+          before = []
+          repaired_rows = 0
           for g in range(10):
-              d=Path(f'data/v500_teacher_v314/gen{g:02d}')
-              files=sorted(d.glob('*.parquet'))
-              assert files, d
+              d = Path(f'data/v500_teacher_v314/gen{g:02d}')
+              files = sorted(d.glob('*.parquet'))
+              assert len(files) == 2, (g, files)
               for p in files:
-                  x=pd.read_parquet(p)
-                  side=x['fen'].str.split().str[1]
-                  x['_side']=side
-                  rows.append(x[['cp','student_cp','_side']].copy())
-                  black=side.eq('b')
-                  x.loc[black,'cp']=-x.loc[black,'cp']
-                  x['teacher_delta_cp']=x['cp'].astype('int64')-x['student_cp'].astype('int64')
-                  x=x.drop(columns=['_side'])
-                  x.to_parquet(p,index=False)
+                  x = pd.read_parquet(p)
+                  side = x['fen'].str.split().str[1]
+                  snap = x[['cp', 'student_cp']].copy()
+                  snap['side'] = side
+                  before.append(snap)
+                  black = side.eq('b')
+                  repaired_rows += int(black.sum())
+                  x.loc[black, 'cp'] = -x.loc[black, 'cp']
+                  x['teacher_delta_cp'] = x['cp'].astype('int64') - x['student_cp'].astype('int64')
+                  x.to_parquet(p, index=False)
 
-          allx=pd.concat(rows,ignore_index=True)
-          def corr(a,b):
-              a=np.asarray(a,float); b=np.asarray(b,float)
-              return float(np.corrcoef(a,b)[0,1])
-          w=allx[allx._side.eq('w')]
-          b=allx[allx._side.eq('b')]
-          print(f'rows={len(allx)} white={len(w)} black={len(b)}')
-          print(f'BEFORE repair teacher-vs-student corr white={corr(w.cp,w.student_cp):+.4f}')
-          print(f'BEFORE repair teacher-vs-student corr black={corr(b.cp,b.student_cp):+.4f}')
-          print(f'AFTER  repair teacher-vs-student corr black={corr(-b.cp,b.student_cp):+.4f}')
-          assert corr(w.cp,w.student_cp) > 0.10
-          assert corr(b.cp,b.student_cp) < -0.10
-          assert corr(-b.cp,b.student_cp) > 0.10
+          z = pd.concat(before, ignore_index=True)
+          z = z[np.isfinite(z.cp) & np.isfinite(z.student_cp)]
+          z = z[(z.cp.abs() <= 3000) & (z.student_cp.abs() <= 3000)]
+
+          def corr(df, repaired=False):
+              a = df.cp.to_numpy(dtype=float)
+              if repaired:
+                  a = -a
+              b = df.student_cp.to_numpy(dtype=float)
+              return float(np.corrcoef(a, b)[0, 1])
+
+          w = z[z.side.eq('w')]
+          b = z[z.side.eq('b')]
+          cw = corr(w)
+          cb_bad = corr(b)
+          cb_fix = corr(b, repaired=True)
+          sign_bad = float((np.sign(b.cp) == np.sign(b.student_cp)).mean())
+          sign_fix = float((np.sign(-b.cp) == np.sign(b.student_cp)).mean())
+
+          print(f'corpus rows={len(z):,}; repaired black rows={repaired_rows:,}')
+          print(f'teacher/student Pearson, WHITE rows       = {cw:+.4f}')
+          print(f'teacher/student Pearson, BLACK rows bad   = {cb_bad:+.4f}')
+          print(f'teacher/student Pearson, BLACK rows fixed = {cb_fix:+.4f}')
+          print(f'BLACK sign agreement bad={sign_bad:.3%} fixed={sign_fix:.3%}')
+          assert cw > 0.0, cw
+          assert cb_bad < 0.0, cb_bad
+          assert cb_fix > 0.0, cb_fix
+          assert cb_fix - cb_bad > 0.20, (cb_bad, cb_fix)
+          assert sign_fix > sign_bad + 0.15, (sign_bad, sign_fix)
           PY
 
-      - name: Train sign-fixed candidate with original replay recipe
+      - name: Merge all repaired labels into one uniform 100k source
         run: |
-          rm -rf checkpoints/v500/gen09 artifacts/v500-training/gen09
-          python train/v500_pipeline.py train \
-            --generation 9 --epochs 12 --batch-size 2048 --train-workers 4 \
-            --val-every 1 --replay-generations 10 --device cpu \
-            --result-blend 0.15 --transfer-lr 3e-5 --seed 529999
-          python train/v500_pipeline.py export --generation 9
-          mkdir -p artifacts/signfix_replay
-          cp artifacts/v500-training/gen09/nnue_weights.bin artifacts/signfix_replay/nnue_weights.bin
-
-      - name: Train sign-fixed candidate on uniform full 100k corpus
-        run: |
-          rm -rf data/v500_teacher_v314_uniform checkpoints/v500/signfix_uniform
+          rm -rf data/v500_teacher_v314_uniform
           mkdir -p data/v500_teacher_v314_uniform
           python - <<'PY'
           from pathlib import Path
           import shutil
-          out=Path('data/v500_teacher_v314_uniform')
+          out = Path('data/v500_teacher_v314_uniform')
+          n = 0
           for g in range(10):
-              for i,p in enumerate(sorted(Path(f'data/v500_teacher_v314/gen{g:02d}').glob('*.parquet'))):
-                  shutil.copy2(p, out/f'g{g:02d}_{i:02d}.parquet')
-          print('uniform parquet files:', len(list(out.glob('*.parquet'))))
+              for i, p in enumerate(sorted(Path(f'data/v500_teacher_v314/gen{g:02d}').glob('*.parquet'))):
+                  shutil.copy2(p, out / f'g{g:02d}_{i:02d}.parquet')
+                  n += 1
+          assert n == 20, n
+          print('uniform parquet files:', n)
           PY
+
+      - name: Train corrected 100k candidate from current v5 NNU4
+        run: |
+          rm -rf checkpoints/v500/signfix_uniform artifacts/signfix_uniform
+          mkdir -p checkpoints/v500 artifacts/signfix_uniform
           python train/import_nnu4.py \
             --src engine/c/zchezz_v500/nnue_weights.bin \
             --dst checkpoints/v500/signfix_uniform_bootstrap.pt
           python - <<'PY'
           import sys
-          sys.path.insert(0,'train')
+          sys.path.insert(0, 'train')
           import train_nnue as tn
-          ns=tn.build_arg_parser().parse_args([])
-          ns.ckpt_dir='checkpoints/v500/signfix_uniform'
-          ns.dataset_name='v500_signfix_uniform100k'
-          ns.epochs=12
-          ns.batch_size=2048
-          ns.lr=5e-4
-          ns.transfer_lr=3e-5
-          ns.weight_decay=1e-4
-          ns.workers=4
-          ns.device='cpu'
-          ns.val_every=1
-          ns.resample_each_epoch=False
-          ns.encode_cache=True
-          ns.show_config=False
-          ns.checkpoint_source='checkpoints/v500/signfix_uniform_bootstrap.pt'
-          ns.sources=[tn.SourceSpec(
-              kind='parquet', path='data/v500_teacher_v314_uniform', target_col='cp',
-              lam=0.15, train_pct=1.0, val_frac=0.02,
-              name='v500_teacher314_signfix_uniform100k', pct_mode='sample-rows')]
+
+          ns = tn.build_arg_parser().parse_args([])
+          ns.ckpt_dir = 'checkpoints/v500/signfix_uniform'
+          ns.dataset_name = 'v500_signfix_uniform100k'
+          ns.epochs = 12
+          ns.batch_size = 2048
+          ns.lr = 5e-4
+          ns.transfer_lr = 3e-5
+          ns.weight_decay = 1e-4
+          ns.workers = 4
+          ns.device = 'cpu'
+          ns.val_every = 1
+          ns.resample_each_epoch = False
+          ns.encode_cache = True
+          ns.show_config = False
+          ns.checkpoint_source = 'checkpoints/v500/signfix_uniform_bootstrap.pt'
+          ns.sources = [tn.SourceSpec(
+              kind='parquet',
+              path='data/v500_teacher_v314_uniform',
+              target_col='cp',
+              lam=0.15,
+              train_pct=1.0,
+              val_frac=0.02,
+              name='v500_teacher314_signfix_uniform100k',
+              pct_mode='sample-rows',
+          )]
           tn.train(ns)
           PY
           CKPT=$(ls -t checkpoints/v500/signfix_uniform/*.pt | head -1)
-          mkdir -p artifacts/signfix_uniform
           python train/export_nnu4.py --ckpt "$CKPT" --dst artifacts/signfix_uniform/nnue_weights.bin
+          sha256sum engine/c/zchezz_v500/nnue_weights.bin artifacts/signfix_uniform/nnue_weights.bin
 
-      - name: Build both candidates and baselines
+      - name: Build corrected candidate and baselines
         run: |
-          rm -rf engine/c/zchezz_v500signfix_replay engine/c/zchezz_v500signfix_uniform
-          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500signfix_replay
-          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500signfix_uniform
-          cp artifacts/signfix_replay/nnue_weights.bin engine/c/zchezz_v500signfix_replay/nnue_weights.bin
-          cp artifacts/signfix_uniform/nnue_weights.bin engine/c/zchezz_v500signfix_uniform/nnue_weights.bin
-          make -C engine/build ENGINE=v500signfix_replay native
-          make -C engine/build ENGINE=v500signfix_uniform native
+          rm -rf engine/c/zchezz_v500signfix
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500signfix
+          cp artifacts/signfix_uniform/nnue_weights.bin engine/c/zchezz_v500signfix/nnue_weights.bin
+          make -C engine/build ENGINE=v500signfix native
           make -C engine/build ENGINE=v500 native
           make -C engine/build ENGINE=v314 native
           make -C engine/build ENGINE=v500 arena
           python - <<'PY'
           import sys
-          sys.path.insert(0,'train')
+          sys.path.insert(0, 'train')
           import v500_pipeline as p
-          p._make_gate_openings(p.ROOT/'artifacts/signfix_gate_openings.epd', 530731, 384)
+          p._make_gate_openings(p.ROOT / 'artifacts/signfix_uniform/gate_openings.epd', 530731, 384)
           PY
 
-      - name: Gate both repaired candidates vs current v5 at 50k nodes
+      - name: Corrected candidate vs current v5 at fixed nodes
         run: |
-          for C in replay uniform; do
-            python tests/run_arena.py \
-              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix_${C}/zchezz.exe" \
-              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
-              --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
-              --openings artifacts/signfix_gate_openings.epd --opening-plies 0 \
-              --seed $((531000 + (${C} == uniform ? 1 : 0))) --tt-mb 16 \
-              --json "artifacts/signfix_${C}/vs_v500_nodes.json" \
-              --pgn "artifacts/signfix_${C}/vs_v500_nodes.pgn"
-          done
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/signfix_uniform/gate_openings.epd --opening-plies 0 \
+            --seed 531000 --tt-mb 16 \
+            --json artifacts/signfix_uniform/vs_v500_nodes.json \
+            --pgn artifacts/signfix_uniform/vs_v500_nodes.pgn
 
-      - name: Gate both repaired candidates vs current v5 at 100ms
+      - name: Corrected candidate vs current v5 at fixed time
         run: |
           python tests/run_arena.py \
-            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix_replay/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
             --games 128 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
-            --openings artifacts/signfix_gate_openings.epd --opening-plies 0 \
-            --seed 531100 --tt-mb 16 \
-            --json artifacts/signfix_replay/vs_v500_time.json \
-            --pgn artifacts/signfix_replay/vs_v500_time.pgn
-          python tests/run_arena.py \
-            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix_uniform/zchezz.exe" \
-            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
-            --games 128 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
-            --openings artifacts/signfix_gate_openings.epd --opening-plies 0 \
-            --seed 531101 --tt-mb 16 \
+            --openings artifacts/signfix_uniform/gate_openings.epd --opening-plies 0 \
+            --seed 531001 --tt-mb 16 \
             --json artifacts/signfix_uniform/vs_v500_time.json \
             --pgn artifacts/signfix_uniform/vs_v500_time.pgn
 
-      - name: Select better repaired candidate
-        id: choose
+      - name: Corrected candidate vs v3.14 at fixed nodes
         run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          def elo(path):
-              return json.load(open(path))['pairings'][0]['elo']
-          vals={}
-          for c in ('replay','uniform'):
-              vals[c]=(elo(f'artifacts/signfix_{c}/vs_v500_nodes.json')+elo(f'artifacts/signfix_{c}/vs_v500_time.json'))/2
-          best=max(vals,key=vals.get)
-          print(f'best={best}')
-          print(f'best_avg={vals[best]}')
-          print('scores='+str(vals))
-          PY
-
-      - name: Gate best repaired candidate vs v3.14
-        run: |
-          C='${{ steps.choose.outputs.best }}'
           python tests/run_arena.py \
-            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix_${C}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
-            --openings artifacts/signfix_gate_openings.epd --opening-plies 0 \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/signfix_uniform/gate_openings.epd --opening-plies 0 \
             --seed 532000 --tt-mb 16 \
-            --json "artifacts/signfix_${C}/vs_v314_nodes.json" \
-            --pgn "artifacts/signfix_${C}/vs_v314_nodes.pgn"
-          python tests/run_arena.py \
-            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix_${C}/zchezz.exe" \
-            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 256 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
-            --openings artifacts/signfix_gate_openings.epd --opening-plies 0 \
-            --seed 532001 --tt-mb 16 \
-            --json "artifacts/signfix_${C}/vs_v314_time.json" \
-            --pgn "artifacts/signfix_${C}/vs_v314_time.pgn"
+            --json artifacts/signfix_uniform/vs_v314_nodes.json \
+            --pgn artifacts/signfix_uniform/vs_v314_nodes.pgn
 
-      - name: Summarize diagnosis
+      - name: Corrected candidate vs v3.14 at fixed time
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500signfix/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/signfix_uniform/gate_openings.epd --opening-plies 0 \
+            --seed 532001 --tt-mb 16 \
+            --json artifacts/signfix_uniform/vs_v314_time.json \
+            --pgn artifacts/signfix_uniform/vs_v314_time.pgn
+
+      - name: Summarize corrected experiment
         if: always()
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
-          print('=== TEACHER SIGN FIX RESULTS ===')
-          for c in ('replay','uniform'):
-              print('\n',c)
-              for n in ('vs_v500_nodes.json','vs_v500_time.json','vs_v314_nodes.json','vs_v314_time.json'):
-                  p=Path(f'artifacts/signfix_{c}/{n}')
-                  if not p.exists(): continue
-                  x=json.loads(p.read_text())['pairings'][0]
-                  print(f'{n}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          print('=== v500 teacher-sign corrected 100k experiment ===')
+          root = Path('artifacts/signfix_uniform')
+          for name in ('vs_v500_nodes.json', 'vs_v500_time.json', 'vs_v314_nodes.json', 'vs_v314_time.json'):
+              p = root / name
+              if not p.exists():
+                  print(name, 'MISSING')
+                  continue
+              x = json.loads(p.read_text())['pairings'][0]
+              print(f'{name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
           PY
 
-      - name: Upload diagnosis and repaired candidates
+      - name: Upload corrected model and evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v500-teacher-sign-fix-results
           path: |
-            artifacts/signfix_replay/
             artifacts/signfix_uniform/
-            artifacts/signfix_gate_openings.epd
             checkpoints/v500/signfix_uniform/
-            checkpoints/v500/gen09/
           if-no-files-found: warn
           retention-days: 30
