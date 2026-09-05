@@ -87,7 +87,7 @@ jobs:
         with:
           pattern: nnue10k-data-*
           merge-multiple: true
-          path: .
+          path: data
 
       - name: Verify corpus
         run: |
