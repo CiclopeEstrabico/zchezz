@@ -1,0 +1,71 @@
+name: v322-final-gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v322-nps-strength]
+    paths: ['.github/workflows/v322-final-gate.yml']
+
+permissions: {contents: read}
+
+jobs:
+  final-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env: {STATIC_FLAG: ''}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Prepare candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v322base
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v322cand
+          python tools/v322_apply_hotpath2.py feature_state_cache16 --root engine/c/zchezz_v322cand
+          python tools/v322_tune_quiet_see.py d4x60 --root engine/c/zchezz_v322cand
+          mkdir -p artifacts/v322-final
+          diff -ur engine/c/zchezz_v322base engine/c/zchezz_v322cand > artifacts/v322-final/patch.diff || true
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322base clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322cand clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
+      - name: Repeated bench
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5 6 7 8 9; do
+            engine/c/zchezz_v322base/zchezz.exe bench 11 | tee -a artifacts/v322-final/bench_base.txt
+            engine/c/zchezz_v322cand/zchezz.exe bench 11 | tee -a artifacts/v322-final/bench_candidate.txt
+          done
+      - name: Generate openings
+        shell: bash
+        run: |
+          python - <<'PY'
+          import random,chess
+          from pathlib import Path
+          r=random.Random(3222606); rows=[]; seen=set()
+          while len(rows)<256:
+            b=chess.Board(); ok=True
+            for _ in range(r.randint(8,20)):
+              ms=list(b.legal_moves)
+              if not ms: ok=False; break
+              q=[m for m in ms if not b.is_capture(m)]
+              b.push(r.choice(q if q and r.random()<.76 else ms))
+              if b.is_game_over(claim_draw=True): ok=False; break
+            if ok:
+              k=' '.join(b.fen().split()[:4])
+              if k not in seen: seen.add(k); rows.append(k)
+          Path('o.epd').write_text('\n'.join(rows)+'\n')
+          PY
+      - name: Fixed-node Elo
+        shell: bash
+        run: |
+          python tests/run_arena.py --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322cand/zchezz.exe" --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322base/zchezz.exe" --games 512 --threads 4 --movetime 0 --nodes 20000 --max-plies 220 --openings o.epd --opening-plies 0 --seed 3222606 --tt-mb 16 --json artifacts/v322-final/fixed.json --pgn artifacts/v322-final/fixed.pgn
+      - name: Timed Elo
+        shell: bash
+        run: |
+          python tests/run_arena.py --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322cand/zchezz.exe" --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322base/zchezz.exe" --games 1024 --threads 4 --movetime 20 --max-plies 240 --openings o.epd --opening-plies 0 --seed 3222606 --tt-mb 16 --json artifacts/v322-final/timed.json --pgn artifacts/v322-final/timed.pgn
+      - uses: actions/upload-artifact@v4
+        with: {name: v322-final-gate, path: artifacts/v322-final/, if-no-files-found: error}
