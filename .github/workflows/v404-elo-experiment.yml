@@ -90,8 +90,8 @@ jobs:
       - name: Fixed-node H2H gate (10k nodes/move)
         run: |
           python tests/run_arena.py \
-            --player uci:engine/c/zchezz_v404/zchezz.exe \
-            --player uci:engine/c/zchezz_v314/zchezz.exe \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v404/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
             --games 256 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
@@ -101,8 +101,8 @@ jobs:
       - name: Fixed-node H2H gate (50k nodes/move)
         run: |
           python tests/run_arena.py \
-            --player uci:engine/c/zchezz_v404/zchezz.exe \
-            --player uci:engine/c/zchezz_v314/zchezz.exe \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v404/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
             --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
@@ -112,8 +112,8 @@ jobs:
       - name: Short wall-clock confirmation (20 ms/move)
         run: |
           python tests/run_arena.py \
-            --player uci:engine/c/zchezz_v404/zchezz.exe \
-            --player uci:engine/c/zchezz_v314/zchezz.exe \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v404/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
             --games 64 --threads 4 --movetime 20 --max-plies 220 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
