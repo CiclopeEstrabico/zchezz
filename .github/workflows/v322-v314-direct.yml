@@ -19,14 +19,16 @@ jobs:
         with: {python-version: '3.12'}
       - run: python -m pip install --disable-pip-version-check python-chess
 
-      - name: Build v3.22, v3.14 and arena
+      - name: Build v3.22, v3.14 and arena host
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts/v322-v314-direct
           ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322 clean native
           ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v314 clean native
-          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322 arena
+          # arena.c's in-process net path uses the NNU4 NnueNet API. Build the
+          # shared arena with the v403 host; v322/v314 enter as UCI players.
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
 
       - name: UCI identity and repeated bench
         shell: bash
