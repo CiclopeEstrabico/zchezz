@@ -198,7 +198,7 @@ jobs:
             --player uci:engine/c/zchezz_v322/zchezz.exe \
             --player uci:engine/c/zchezz_v314/zchezz.exe \
             --games 4 --threads 1 --movetime 0 --nodes 1000 \
-            --max-plies 16 --seed 322 --tt-mb 4 \
+            --max-plies 16 --openings '' --seed 322 --tt-mb 4 \
             --json artifacts/smoke-arena/result.json \
             --pgn artifacts/smoke-arena/games.pgn
           test -s artifacts/smoke-arena/result.json
