@@ -1,0 +1,139 @@
+name: v321-elo-round3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v321-search-strength]
+    paths:
+      - 'engine/c/zchezz_v321/**'
+      - 'tools/v321_apply_round3.py'
+      - '.github/workflows/v321-elo-round3.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: round3-${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - qsee_relaxed
+          - qsee_strict
+          - main_see_relaxed
+          - main_see_strict
+          - lmp_stricter
+          - lmp_looser
+          - history_stricter
+          - history_looser
+    env:
+      STATIC_FLAG: ''
+      VARIANT: ${{ matrix.variant }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install opening generator dependency
+        run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Create isolated baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v321base
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v321cand
+          python tools/v321_apply_round3.py "$VARIANT" --root engine/c/zchezz_v321cand
+          diff -u engine/c/zchezz_v321base/search.c engine/c/zchezz_v321cand/search.c > "/tmp/$VARIANT.diff" || true
+          test -s "/tmp/$VARIANT.diff"
+
+      - name: Build baseline and candidate identically
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321base clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321cand clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
+          mkdir -p "artifacts/v321-round3/$VARIANT"
+          cp "/tmp/$VARIANT.diff" "artifacts/v321-round3/$VARIANT/patch.diff"
+          engine/c/zchezz_v321base/zchezz.exe bench 11 | tee "artifacts/v321-round3/$VARIANT/bench_base.txt"
+          engine/c/zchezz_v321cand/zchezz.exe bench 11 | tee "artifacts/v321-round3/$VARIANT/bench_candidate.txt"
+
+      - name: UCI sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'uci\nisready\nposition startpos\ngo nodes 20000\n' | timeout 30s engine/c/zchezz_v321cand/zchezz.exe > /tmp/cand_uci.txt
+          grep -q 'bestmove ' /tmp/cand_uci.txt
+
+      - name: Generate deterministic paired opening pool
+        shell: bash
+        run: |
+          python - <<'PY'
+          import random
+          from pathlib import Path
+          import chess
+          rng = random.Random(3213026)
+          out = Path('openings_v321_r3.epd')
+          seen, rows = set(), []
+          while len(rows) < 256:
+              b = chess.Board()
+              ok = True
+              for _ in range(rng.randint(8, 18)):
+                  moves = list(b.legal_moves)
+                  if not moves:
+                      ok = False
+                      break
+                  quiet = [m for m in moves if not b.is_capture(m)]
+                  pool = quiet if quiet and rng.random() < 0.78 else moves
+                  b.push(rng.choice(pool))
+                  if b.is_game_over(claim_draw=True):
+                      ok = False
+                      break
+              if not ok:
+                  continue
+              key = ' '.join(b.fen().split()[:4])
+              if key not in seen:
+                  seen.add(key)
+                  rows.append(key)
+          out.write_text('\n'.join(rows) + '\n', encoding='utf-8')
+          print(f'openings={len(rows)}')
+          PY
+
+      - name: Fixed-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321cand/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321base/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 20000 --max-plies 220 \
+            --openings openings_v321_r3.epd --opening-plies 0 \
+            --seed 3213026 --tt-mb 16 \
+            --json "artifacts/v321-round3/$VARIANT/fixed_20kn.json" \
+            --pgn "artifacts/v321-round3/$VARIANT/fixed_20kn.pgn"
+
+      - name: Timed Elo screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321cand/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321base/zchezz.exe" \
+            --games 512 --threads 4 --movetime 20 --max-plies 240 \
+            --openings openings_v321_r3.epd --opening-plies 0 \
+            --seed 3213026 --tt-mb 16 \
+            --json "artifacts/v321-round3/$VARIANT/timed_20ms.json" \
+            --pgn "artifacts/v321-round3/$VARIANT/timed_20ms.pgn"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: v321-round3-${{ matrix.variant }}-elo-evidence
+          path: artifacts/v321-round3/${{ matrix.variant }}/
+          if-no-files-found: error
