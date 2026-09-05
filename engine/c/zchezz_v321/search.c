@@ -590,13 +590,19 @@ static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
 
         if (sc > qs_best) { qs_best = sc; best_move_qs = moves[i]; }
         if (sc >= beta) {
+            if (!ss->time_up) tt_store(b->hash, qs_best, 0, TT_LOWER, &best_move_qs, ply, stand);
             return beta;
         }
         if (sc > alpha) alpha = sc;
     }
 
-    /* Don't store non-cutoff qsearch results — they pollute the TT
-     * with depth-0 entries that displace more valuable deeper entries */
+    /* Cache searched-capture improvements, but never pure stand-pat entries. */
+    if (qs_best > stand && !ss->time_up) {
+        int from_move = best_move_qs.from || best_move_qs.to;
+        tt_store(b->hash, qs_best, 0,
+                 (from_move && qs_best > qs_orig_alpha) ? TT_EXACT : TT_UPPER,
+                 from_move ? &best_move_qs : NULL, ply, stand);
+    }
 
     return alpha;
 }
@@ -874,7 +880,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
          * Add +1 if static_eval is much above beta (eval margin bonus). */
         int R = 3 + depth / 3;
         if (R > 6) R = 6;
-        if (static_eval - beta > 200) R += 1;
+        if (static_eval - beta > 134) R += 1;
         /* Make null move */
         uint64_t save_hash = b->hash;
         int8_t   save_ep   = b->ep;
@@ -961,7 +967,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      * search with bad ordering, reduce depth by 1.  The shallow search
      * will populate the TT with a move for next time.  Conditions:
      *   depth >= 4, not in check, reduced depth still >= 2 */
-    if (!pv_move.from && !pv_move.to && depth>=4 && !in_check && depth-1>=2) depth--;
+    if (!pv_move.from && !pv_move.to && depth>=3 && !in_check && depth-1>=2) depth--;
 
     /* ── Singular Extension ──────────────────────────────────────
      * At deep nodes (depth >= 7) where the TT move is clearly best,
@@ -1005,7 +1011,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
     const Move *pv_ptr = (pv_move.from||pv_move.to) ? &pv_move : NULL;
 
     /* LMP limits */
-    static const int lmp_limit[8] = {0,10,18,26,36,48,62,78};
+    static const int lmp_limit[8] = {0,12,22,32,44,58,74,94};
     int fut_adj = improving ? 0 : 50;
     static const int fut_base[9] = {0,150,300,450,600,750,900,1050,1200};
 
@@ -1542,7 +1548,7 @@ void search_init(void) {
      * reduce to depth 0 — that would skip to qsearch prematurely). */
     for (int d = 1; d < LMR_D; d++)
         for (int m = 1; m < LMR_M; m++) {
-            double v = log((double)d) * log((double)m) / 1.5;
+            double v = log((double)d) * log((double)m) / 1.35;
             int r = (int)v;
             if (r < 1) r = 1;
             if (r > d-1) r = d-1;

@@ -254,6 +254,8 @@ static inline void _acc_add_piece(int16_t *accW, int16_t *accB, uint8_t p, int s
     const int16_t *wRow = _nnL1WT + (coW*64 + pt*64 + pySq) * NN_L1_OUT;
     const int16_t *bRow = _nnL1WT + (coB*64 + pt*64 + sq  ) * NN_L1_OUT;
 #ifdef __AVX2__
+    _mm_prefetch((const char*)wRow, _MM_HINT_T0);
+    _mm_prefetch((const char*)bRow, _MM_HINT_T0);
     for (int o = 0; o < NN_L1_OUT; o += 16) {
         __m256i aw = _mm256_load_si256 ((const __m256i*)(accW + o));
         __m256i ab = _mm256_load_si256 ((const __m256i*)(accB + o));
@@ -286,6 +288,8 @@ static inline void _acc_sub_piece(int16_t *accW, int16_t *accB, uint8_t p, int s
     const int16_t *wRow = _nnL1WT + (coW*64 + pt*64 + pySq) * NN_L1_OUT;
     const int16_t *bRow = _nnL1WT + (coB*64 + pt*64 + sq  ) * NN_L1_OUT;
 #ifdef __AVX2__
+    _mm_prefetch((const char*)wRow, _MM_HINT_T0);
+    _mm_prefetch((const char*)bRow, _MM_HINT_T0);
     for (int o = 0; o < NN_L1_OUT; o += 16) {
         __m256i aw = _mm256_load_si256 ((const __m256i*)(accW + o));
         __m256i ab = _mm256_load_si256 ((const __m256i*)(accB + o));

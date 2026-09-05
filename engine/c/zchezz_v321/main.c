@@ -1,4 +1,4 @@
-/* main.c — Zchezz v3.20 UCI engine
+/* main.c — Zchezz v3.21 UCI engine
  *
  * Full UCI protocol implementation with Syzygy tablebase + Polyglot book support.
  *
@@ -87,7 +87,7 @@ static int z_strncasecmp(const char *a, const char *b, size_t n) {
 #endif
 
 #define ENGINE_NAME    "Zchezz"
-#define ENGINE_VERSION "3.20"
+#define ENGINE_VERSION "3.21"
 #define ENGINE_AUTHOR  "Gustavo Zambrano"
 
 /* ── Global game state ─────────────────────────────────────────── */

@@ -344,19 +344,19 @@ int board_is_attacked(const Board *b, int sq, int by) {
     uint64_t sq_bb = (uint64_t)1 << sq;
 
     if (by == COL_W) {
-        /* White pawn attacks: bitboard shift (Phase 2) */
-        if (bpawn_attacks_bb(sq_bb) & b->bb[0]) return 1;  /* sq attacked by WP */
-        if (NATK[sq] & b->bb[1])  return 1;   /* white knight */
-        if (bish_attacks(sq,occ) & (b->bb[2]|b->bb[4])) return 1;  /* WB|WQ */
-        if (rook_attacks(sq,occ) & (b->bb[3]|b->bb[4])) return 1;  /* WR|WQ */
-        if (KATK[sq] & b->bb[5])  return 1;   /* white king */
+        if (bpawn_attacks_bb(sq_bb) & b->bb[0]) return 1;
+        if (NATK[sq] & b->bb[1]) return 1;
+        if (KATK[sq] & b->bb[5]) return 1;
+        uint64_t bq = b->bb[2] | b->bb[4], rq = b->bb[3] | b->bb[4];
+        if (bq && (bish_attacks(sq,occ) & bq)) return 1;
+        if (rq && (rook_attacks(sq,occ) & rq)) return 1;
     } else {
-        /* Black pawn attacks: bitboard shift (Phase 2) */
-        if (wpawn_attacks_bb(sq_bb) & b->bb[6]) return 1;  /* sq attacked by BP */
-        if (NATK[sq] & b->bb[7])  return 1;
-        if (bish_attacks(sq,occ) & (b->bb[8]|b->bb[10])) return 1; /* BB|BQ */
-        if (rook_attacks(sq,occ) & (b->bb[9]|b->bb[10])) return 1; /* BR|BQ */
+        if (wpawn_attacks_bb(sq_bb) & b->bb[6]) return 1;
+        if (NATK[sq] & b->bb[7]) return 1;
         if (KATK[sq] & b->bb[11]) return 1;
+        uint64_t bq = b->bb[8] | b->bb[10], rq = b->bb[9] | b->bb[10];
+        if (bq && (bish_attacks(sq,occ) & bq)) return 1;
+        if (rq && (rook_attacks(sq,occ) & rq)) return 1;
     }
     return 0;
 }
