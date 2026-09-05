@@ -1,0 +1,57 @@
+name: v321-materialize-final
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v321-search-strength]
+    paths:
+      - '.github/workflows/v321-materialize-final.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      STATIC_FLAG: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Materialize confirmed v3.21 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/finalize_v321.py strong_plus_prefetch
+          grep -q '#define ENGINE_VERSION "3.21"' engine/c/zchezz_v321/main.c
+          grep -q 'static_eval - beta > 134' engine/c/zchezz_v321/search.c
+          grep -q 'log((double)d) \* log((double)m) / 1.35' engine/c/zchezz_v321/search.c
+          grep -q 'static const int lmp_limit\[8\] = {0,12,22,32,44,58,74,94};' engine/c/zchezz_v321/search.c
+          grep -q 'depth>=3' engine/c/zchezz_v321/search.c
+          grep -q 'TT_LOWER' engine/c/zchezz_v321/search.c
+          grep -q '_mm_prefetch((const char\*)wRow' engine/c/zchezz_v321/nnue.c
+      - name: Build and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321 clean native
+          engine/c/zchezz_v321/zchezz.exe bench 11 | tee /tmp/v321-bench.txt
+          grep -q 'Total nodes' /tmp/v321-bench.txt
+          printf 'uci\nisready\nquit\n' | engine/c/zchezz_v321/zchezz.exe | tee /tmp/v321-uci.txt
+          grep -q 'uciok' /tmp/v321-uci.txt
+          grep -q 'readyok' /tmp/v321-uci.txt
+      - name: Commit final v3.21 engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add engine/c/zchezz_v321
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit' >&2
+            exit 1
+          fi
+          git commit -m 'v3.21: materialize confirmed search-strength bundle'
+          git push origin HEAD:v321-search-strength
