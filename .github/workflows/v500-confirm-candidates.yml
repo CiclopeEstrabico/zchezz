@@ -1,0 +1,163 @@
+name: v500-confirm-candidates
+
+on:
+  push:
+    branches: ["v500-strength"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install opening generator
+        run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Build baselines and arena
+        run: |
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Create candidate engines
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, shutil
+
+          src = Path('engine/c/zchezz_v500')
+
+          def clone(name):
+              dst = Path('engine/c') / f'zchezz_{name}'
+              if dst.exists(): shutil.rmtree(dst)
+              shutil.copytree(src, dst)
+              return dst
+
+          def scale(dst, factor):
+              p = dst/'nnue.c'
+              t = p.read_text(encoding='utf-8')
+              needle = 'float cp = (float)l3_sum * OutScale + L3B * 320.0f;'
+              if needle not in t: raise SystemExit('NNUE scale anchor missing')
+              t = t.replace(needle, f'float cp = ((float)l3_sum * OutScale + L3B * 320.0f) * {factor:.3f}f;', 1)
+              p.write_text(t, encoding='utf-8')
+
+          def set_macro(dst, macro, value):
+              p=dst/'search.c'; t=p.read_text(encoding='utf-8')
+              pat=rf'(#define\s+{re.escape(macro)}\s+)([^\s]+)'
+              t,n=re.subn(pat,rf'\g<1>{value}',t,count=1)
+              if n != 1: raise SystemExit(f'macro missing: {macro}')
+              p.write_text(t,encoding='utf-8')
+
+          for name,factor in [('v500_s125',1.25),('v500_s135',1.35),('v500_s140',1.40)]:
+              d=clone(name); scale(d,factor)
+
+          d=clone('v500_rfp')
+          set_macro(d,'TUNE_RFP_MULT_DEFAULT','90')
+          set_macro(d,'TUNE_RFP_IMPROVING_BONUS_DEFAULT','50')
+
+          d=clone('v500_s135_rfp')
+          scale(d,1.35)
+          set_macro(d,'TUNE_RFP_MULT_DEFAULT','90')
+          set_macro(d,'TUNE_RFP_IMPROVING_BONUS_DEFAULT','50')
+
+          d=clone('v500_net402')
+          old=Path('engine/c/zchezz_v402/nnue_weights.bin')
+          if not old.exists(): raise SystemExit('v402 weights not found')
+          shutil.copy2(old,d/'nnue_weights.bin')
+          PY
+          for e in v500_s125 v500_s135 v500_s140 v500_rfp v500_s135_rfp v500_net402; do
+            make -C engine/build ENGINE=$e native
+          done
+
+      - name: Generate deterministic paired openings
+        run: |
+          mkdir -p artifacts/v500-confirm
+          python - <<'PY'
+          import hashlib, random, chess
+          from pathlib import Path
+          rng=random.Random(5009001)
+          rows=[]; seen=set()
+          while len(rows)<320:
+              b=chess.Board(); ok=True
+              for _ in range(rng.randint(8,16)):
+                  moves=list(b.legal_moves)
+                  if not moves: ok=False; break
+                  quiet=[m for m in moves if not b.is_capture(m)]
+                  pool=quiet if quiet and rng.random()<0.75 else moves
+                  b.push(rng.choice(pool))
+                  if b.is_game_over(claim_draw=True): ok=False; break
+              if not ok: continue
+              key=' '.join(b.fen().split()[:4])
+              if key not in seen:
+                  seen.add(key); rows.append(key)
+          out=Path('artifacts/v500-confirm/openings.epd')
+          out.write_text('\n'.join(rows)+'\n',encoding='utf-8')
+          print('openings',len(rows),'sha256',hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+
+      - name: Direct candidate gates vs v500 at 10k nodes
+        run: |
+          set -euo pipefail
+          for e in v500_s125 v500_s135 v500_s140 v500_rfp v500_s135_rfp v500_net402; do
+            echo "===== $e vs v500 ====="
+            python tests/run_arena.py \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_${e}/zchezz.exe" \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+              --games 256 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
+              --openings artifacts/v500-confirm/openings.epd --opening-plies 0 \
+              --seed 5009001 --tt-mb 16 \
+              --json "artifacts/v500-confirm/${e}_vs_v500_10kn.json" \
+              --pgn "artifacts/v500-confirm/${e}_vs_v500_10kn.pgn"
+          done
+
+      - name: Deeper fixed-node gates vs v314
+        run: |
+          set -euo pipefail
+          for e in v500 v500_s135 v500_s135_rfp v500_net402; do
+            echo "===== $e vs v314 at 50k nodes ====="
+            python tests/run_arena.py \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_${e}/zchezz.exe" \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+              --games 192 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
+              --openings artifacts/v500-confirm/openings.epd --opening-plies 0 \
+              --seed 5009002 --tt-mb 16 \
+              --json "artifacts/v500-confirm/${e}_vs_v314_50kn.json" \
+              --pgn "artifacts/v500-confirm/${e}_vs_v314_50kn.pgn"
+          done
+
+      - name: Fixed-time gates vs v314
+        run: |
+          set -euo pipefail
+          for e in v500 v500_s135 v500_s135_rfp v500_net402; do
+            echo "===== $e vs v314 at 50ms ====="
+            python tests/run_arena.py \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_${e}/zchezz.exe" \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+              --games 160 --threads 4 --movetime 50 --nodes 0 --max-plies 260 \
+              --openings artifacts/v500-confirm/openings.epd --opening-plies 0 \
+              --seed 5009003 --tt-mb 16 \
+              --json "artifacts/v500-confirm/${e}_vs_v314_50ms.json" \
+              --pgn "artifacts/v500-confirm/${e}_vs_v314_50ms.pgn"
+          done
+
+      - name: Upload confirmation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v500-confirm-candidates
+          path: artifacts/v500-confirm/
+          if-no-files-found: warn
