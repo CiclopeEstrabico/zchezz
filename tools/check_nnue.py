@@ -55,7 +55,7 @@ def inspect(path: Path) -> dict[str, object]:
     elif magic == b"NNU4":
         _validate_nnu4(data, dims)
     else:
-        raise ValueError(f"unsupported NNUE magic {magic!r}; expected NNU3 or NNU4")
+        raise ValueError(f"bad magic {magic!r}; expected NNU3 or NNU4")
     return {
         "path": str(path),
         "format": magic.decode("ascii"),
