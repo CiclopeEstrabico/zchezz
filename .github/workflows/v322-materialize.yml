@@ -42,6 +42,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add engine/c/zchezz_v322
-          git diff --cached --check
           git commit -m 'v3.22: add quiet SEE pruning and feature-state cache'
           git push origin HEAD:v322-nps-strength
