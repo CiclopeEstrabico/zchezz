@@ -1,0 +1,134 @@
+name: v321-elo-buildopts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v321-search-strength]
+    paths:
+      - '.github/workflows/v321-elo-buildopts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  buildopt:
+    name: buildopt-${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [lto, pgo_lto]
+    env:
+      STATIC_FLAG: ''
+      VARIANT: ${{ matrix.variant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install opening generator dependency
+        run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Clone identical source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v321base
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v321cand
+          mkdir -p "artifacts/v321-buildopts/$VARIANT"
+          for f in main.c board.c board.h search.c search.h nnue.c nnue.h nnue_weights.bin book.c book.h poly_keys.h stdendian.h syzygy.c syzygy.h tbconfig.h; do
+            cmp "engine/c/zchezz_v321base/$f" "engine/c/zchezz_v321cand/$f"
+          done
+
+      - name: Build release baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH_FLAGS="-mavxvnni -mavx2" make -C engine/build ENGINE=v321base clean native
+          engine/c/zchezz_v321base/zchezz.exe bench 11 | tee "artifacts/v321-buildopts/$VARIANT/bench_base.txt"
+
+      - name: Build candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$VARIANT" = lto ]; then
+            ARCH_FLAGS="-mavxvnni -mavx2 -flto" make -C engine/build ENGINE=v321cand clean native
+          else
+            rm -rf /tmp/zchezz-v321-pgo && mkdir -p /tmp/zchezz-v321-pgo
+            ARCH_FLAGS="-mavxvnni -mavx2 -flto -fprofile-generate=/tmp/zchezz-v321-pgo" \
+              make -C engine/build ENGINE=v321cand clean native
+            engine/c/zchezz_v321cand/zchezz.exe bench 8  >/dev/null
+            engine/c/zchezz_v321cand/zchezz.exe bench 10 >/dev/null
+            engine/c/zchezz_v321cand/zchezz.exe bench 12 >/dev/null
+            ARCH_FLAGS="-mavxvnni -mavx2 -flto -fprofile-use=/tmp/zchezz-v321-pgo -fprofile-correction" \
+              make -C engine/build ENGINE=v321cand clean native
+          fi
+          engine/c/zchezz_v321cand/zchezz.exe bench 11 | tee "artifacts/v321-buildopts/$VARIANT/bench_candidate.txt"
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
+
+      - name: Generate deterministic paired openings
+        shell: bash
+        run: |
+          python - <<'PY'
+          import random
+          from pathlib import Path
+          import chess
+          rng=random.Random(3215026); seen=set(); rows=[]
+          while len(rows)<256:
+              b=chess.Board(); ok=True
+              for _ in range(rng.randint(8,18)):
+                  moves=list(b.legal_moves)
+                  if not moves: ok=False; break
+                  quiet=[m for m in moves if not b.is_capture(m)]
+                  b.push(rng.choice(quiet if quiet and rng.random()<0.78 else moves))
+                  if b.is_game_over(claim_draw=True): ok=False; break
+              if not ok: continue
+              k=' '.join(b.fen().split()[:4])
+              if k not in seen: seen.add(k); rows.append(k)
+          Path('openings_v321_build.epd').write_text('\n'.join(rows)+'\n')
+          PY
+
+      - name: Fixed-node identity gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321cand/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321base/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 20000 --max-plies 220 \
+            --openings openings_v321_build.epd --opening-plies 0 --seed 3215026 --tt-mb 16 \
+            --json "artifacts/v321-buildopts/$VARIANT/fixed_20kn.json" \
+            --pgn "artifacts/v321-buildopts/$VARIANT/fixed_20kn.pgn"
+
+      - name: Timed Elo 20 ms
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321cand/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321base/zchezz.exe" \
+            --games 1024 --threads 4 --movetime 20 --max-plies 240 \
+            --openings openings_v321_build.epd --opening-plies 0 --seed 3215026 --tt-mb 16 \
+            --json "artifacts/v321-buildopts/$VARIANT/timed_20ms.json" \
+            --pgn "artifacts/v321-buildopts/$VARIANT/timed_20ms.pgn"
+
+      - name: Timed confirmation 100 ms for PGO
+        if: matrix.variant == 'pgo_lto'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321cand/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v321base/zchezz.exe" \
+            --games 256 --threads 4 --movetime 100 --max-plies 240 \
+            --openings openings_v321_build.epd --opening-plies 0 --seed 3215026 --tt-mb 16 \
+            --json "artifacts/v321-buildopts/$VARIANT/timed_100ms.json" \
+            --pgn "artifacts/v321-buildopts/$VARIANT/timed_100ms.pgn"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: v321-buildopt-${{ matrix.variant }}-elo-evidence
+          path: artifacts/v321-buildopts/${{ matrix.variant }}/
+          if-no-files-found: error
