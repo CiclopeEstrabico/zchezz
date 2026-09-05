@@ -24,7 +24,8 @@ subprocess.run([
 ], check=True)
 
 main = root / "main.c"
-s = main.read_text(encoding="utf-8")n = s.count('#define ENGINE_VERSION "3.20"')
+s = main.read_text(encoding="utf-8")
+n = s.count('#define ENGINE_VERSION "3.20"')
 if n != 1:
     raise SystemExit(f"expected one v3.20 ENGINE_VERSION, got {n}")
 s = s.replace('#define ENGINE_VERSION "3.20"', '#define ENGINE_VERSION "3.21"', 1)
