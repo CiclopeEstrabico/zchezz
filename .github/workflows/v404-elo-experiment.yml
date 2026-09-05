@@ -69,8 +69,6 @@ jobs:
                   if not moves:
                       ok = False
                       break
-                  # Mildly prefer non-captures in the first few plies so the pool
-                  # contains opening-like positions rather than tactical wreckage.
                   quiet = [m for m in moves if not b.is_capture(m)]
                   choice_pool = quiet if quiet and rng.random() < 0.78 else moves
                   b.push(rng.choice(choice_pool))
@@ -89,27 +87,38 @@ jobs:
           print(f'openings={len(rows)} sha256={digest}')
           PY
 
-      - name: Fast paired H2H gate (20 ms/move)
+      - name: Fixed-node H2H gate (10k nodes/move)
         run: |
           python tests/run_arena.py \
             --player uci:engine/c/zchezz_v404/zchezz.exe \
             --player uci:engine/c/zchezz_v314/zchezz.exe \
-            --games 384 --threads 4 --movetime 20 --max-plies 260 \
+            --games 256 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
-            --json artifacts/v404/h2h_20ms.json \
-            --pgn artifacts/v404/h2h_20ms.pgn
+            --json artifacts/v404/h2h_10kn.json \
+            --pgn artifacts/v404/h2h_10kn.pgn
 
-      - name: Medium paired H2H gate (100 ms/move)
+      - name: Fixed-node H2H gate (50k nodes/move)
         run: |
           python tests/run_arena.py \
             --player uci:engine/c/zchezz_v404/zchezz.exe \
             --player uci:engine/c/zchezz_v314/zchezz.exe \
-            --games 192 --threads 4 --movetime 100 --max-plies 260 \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
-            --json artifacts/v404/h2h_100ms.json \
-            --pgn artifacts/v404/h2h_100ms.pgn
+            --json artifacts/v404/h2h_50kn.json \
+            --pgn artifacts/v404/h2h_50kn.pgn
+
+      - name: Short wall-clock confirmation (20 ms/move)
+        run: |
+          python tests/run_arena.py \
+            --player uci:engine/c/zchezz_v404/zchezz.exe \
+            --player uci:engine/c/zchezz_v314/zchezz.exe \
+            --games 64 --threads 4 --movetime 20 --max-plies 220 \
+            --openings artifacts/v404/openings.epd --opening-plies 0 \
+            --seed 4042026 --tt-mb 16 \
+            --json artifacts/v404/h2h_20ms_short.json \
+            --pgn artifacts/v404/h2h_20ms_short.pgn
 
       - name: Upload experiment evidence
         if: always()
