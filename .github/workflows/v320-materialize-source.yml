@@ -1,0 +1,34 @@
+name: v320-materialize-source
+
+on:
+  push:
+    branches: ["v320-search-strength"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply narrow v3.20 source upgrade
+        run: python tools/apply_v320_source_upgrade.py
+
+      - name: Commit materialized source
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- engine/c/zchezz_v320; then
+            echo "source already materialized"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add engine/c/zchezz_v320
+          git commit -m "v3.20: materialize AVX-VNNI evaluation path"
+          git push origin HEAD:v320-search-strength
