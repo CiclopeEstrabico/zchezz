@@ -1,0 +1,105 @@
+name: v500-v314-fair-node-baseline
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-v314-fair-node-baseline.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fair-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Create v3.14 with a true total-node limit
+        run: |
+          rm -rf engine/c/zchezz_v314nodefix
+          cp -a engine/c/zchezz_v314 engine/c/zchezz_v314nodefix
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('engine/c/zchezz_v314nodefix/search.c')
+          s=p.read_text()
+          old='if (ss->nodes >= ss->node_limit) { ss->time_up = 1; return 0; }'
+          n=s.count(old)
+          print('node-limit checks replaced:', n)
+          assert n >= 2, n
+          s=s.replace(old, 'if (ss->nodes_total >= ss->node_limit) { ss->time_up = 1; return 0; }')
+          p.write_text(s)
+          PY
+
+      - name: Build engines and openings
+        run: |
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v314nodefix native
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v500 arena
+          mkdir -p artifacts/fair_node
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/fair_node/openings.epd', 580731, 384)
+          PY
+
+      - name: Quantify old v3.14 node-limit advantage
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314nodefix/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/fair_node/openings.epd --opening-plies 0 \
+            --seed 581000 --tt-mb 16 \
+            --json artifacts/fair_node/v314_old_vs_fixed_nodes.json \
+            --pgn artifacts/fair_node/v314_old_vs_fixed_nodes.pgn
+
+      - name: Fair v5 vs v3.14 fixed-node baseline
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314nodefix/zchezz.exe" \
+            --games 384 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/fair_node/openings.epd --opening-plies 0 \
+            --seed 581100 --tt-mb 16 \
+            --json artifacts/fair_node/v500_vs_v314fixed_nodes.json \
+            --pgn artifacts/fair_node/v500_vs_v314fixed_nodes.pgn
+
+      - name: Confirm time baseline unaffected
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314nodefix/zchezz.exe" \
+            --games 256 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/fair_node/openings.epd --opening-plies 0 \
+            --seed 581200 --tt-mb 16 \
+            --json artifacts/fair_node/v500_vs_v314fixed_time.json \
+            --pgn artifacts/fair_node/v500_vs_v314fixed_time.pgn
+
+      - name: Report
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in Path('artifacts/fair_node').glob('*.json'):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-v314-fair-node-baseline
+          path: artifacts/fair_node/
+          retention-days: 30
