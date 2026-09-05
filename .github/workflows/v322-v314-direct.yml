@@ -1,0 +1,113 @@
+name: v322-v314-direct
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v322-nps-strength]
+    paths: ['.github/workflows/v322-v314-direct.yml']
+
+permissions: {contents: read}
+
+jobs:
+  direct-h2h:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env: {STATIC_FLAG: ''}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Build v3.22, v3.14 and arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/v322-v314-direct
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322 clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v314 clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322 arena
+
+      - name: UCI identity and repeated bench
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'uci\nquit\n' | engine/c/zchezz_v322/zchezz.exe
+            printf 'uci\nquit\n' | engine/c/zchezz_v314/zchezz.exe
+          } | tee artifacts/v322-v314-direct/uci.txt
+          for i in 1 2 3 4 5 6 7 8 9; do
+            engine/c/zchezz_v322/zchezz.exe bench 11 | tee -a artifacts/v322-v314-direct/bench_v322.txt
+            engine/c/zchezz_v314/zchezz.exe bench 11 | tee -a artifacts/v322-v314-direct/bench_v314.txt
+          done
+
+      - name: Generate paired opening pool
+        shell: bash
+        run: |
+          python - <<'PY'
+          import random, chess
+          from pathlib import Path
+          r = random.Random(3223142026)
+          rows, seen = [], set()
+          while len(rows) < 256:
+              b = chess.Board()
+              ok = True
+              for _ in range(r.randint(8, 20)):
+                  moves = list(b.legal_moves)
+                  if not moves:
+                      ok = False
+                      break
+                  quiet = [m for m in moves if not b.is_capture(m)]
+                  b.push(r.choice(quiet if quiet and r.random() < .76 else moves))
+                  if b.is_game_over(claim_draw=True):
+                      ok = False
+                      break
+              if ok:
+                  key = ' '.join(b.fen().split()[:4])
+                  if key not in seen:
+                      seen.add(key)
+                      rows.append(key)
+          Path('v322_v314.epd').write_text('\n'.join(rows) + '\n')
+          PY
+
+      - name: Fixed-node 20k
+        shell: bash
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 512 --threads 4 --movetime 0 --nodes 20000 \
+            --max-plies 220 --openings v322_v314.epd --opening-plies 0 \
+            --seed 3223142026 --tt-mb 16 \
+            --json artifacts/v322-v314-direct/fixed20k.json \
+            --pgn artifacts/v322-v314-direct/fixed20k.pgn
+
+      - name: Timed 20 ms
+        shell: bash
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 1024 --threads 4 --movetime 20 \
+            --max-plies 240 --openings v322_v314.epd --opening-plies 0 \
+            --seed 3223142026 --tt-mb 16 \
+            --json artifacts/v322-v314-direct/timed20.json \
+            --pgn artifacts/v322-v314-direct/timed20.pgn
+
+      - name: Timed 100 ms
+        shell: bash
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 512 --threads 4 --movetime 100 \
+            --max-plies 240 --openings v322_v314.epd --opening-plies 0 \
+            --seed 3223142026 --tt-mb 16 \
+            --json artifacts/v322-v314-direct/timed100.json \
+            --pgn artifacts/v322-v314-direct/timed100.pgn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v322-v314-direct
+          path: artifacts/v322-v314-direct/
+          if-no-files-found: error
