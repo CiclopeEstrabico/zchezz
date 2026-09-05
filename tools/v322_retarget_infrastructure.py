@@ -54,6 +54,12 @@ replace("tests/run_arena.py", 'os.path.join("..", "c", "zchezz_v402", "nnue.c")'
 replace("tests/run_arena.py", '["make", "ENGINE=v402", "arena"]', '["make", "ENGINE=v403", "arena"]')
 replace("tests/run_arena.py", '["mingw32-make", "ENGINE=v402", "arena"]', '["mingw32-make", "ENGINE=v403", "arena"]')
 replace("tests/run_arena.py", "net:<path.nnu4>", "net:<weights-file>", required=False)
+replace("tests/run_arena.py", r'RESULTS_DIR              = r"tests\arena_results"',
+        'RESULTS_DIR              = "tests/arena_results"')
+replace("tests/run_arena.py", r'OPENING_FOLDER           = r"openings\lines"',
+        'OPENING_FOLDER           = "openings/lines"')
+replace("tests/run_arena.py", "own engine/c/zchezz_v400/ (the current v4.00 dev folder",
+        "own engine/c/zchezz_v322/ (the active v3.22 folder", required=False)
 
 # Persistent UCI self-play is architecture-neutral and becomes the v322 default.
 replace("tests/run_selfplay.py", r"engine\c\zchezz_v401\zchezz.exe", "engine/c/zchezz_v322/zchezz.exe")
@@ -63,14 +69,23 @@ replace("tests/run_selfplay.py", "self.path      = os.path.abspath(path)",
 replace("tests/run_selfplay.py",
         '    subprocess.run(["powershell", "-Command", cmd], capture_output=True)',
         '    if os.name == "nt":\n        subprocess.run(["powershell", "-Command", cmd], capture_output=True)')
+replace("tests/run_selfplay.py", r'RESULTS_DIR         = r"tests\selfplay_results"',
+        'RESULTS_DIR         = "tests/selfplay_results"')
+replace("tests/run_selfplay.py", r'OPENING_FOLDER      = r"openings\lines"',
+        'OPENING_FOLDER      = "openings/lines"')
 
 # Full tournament defaults to v322 vs the stable v314 reference. Normalize
-# Windows-style paths before abspath so the same config works on Linux CI.
+# inherited Windows-style paths so the same config works on Linux CI.
 replace("tests/run_tournament.py", r"engine\c\zchezz_v402\zchezz.exe", "engine/c/zchezz_v322/zchezz.exe")
 replace("tests/run_tournament.py", "Zchezz-v401", "Zchezz-v322")
 replace("tests/run_tournament.py", r"engine\c\zchezz_v314\zchezz.exe", "engine/c/zchezz_v314/zchezz.exe")
 replace("tests/run_tournament.py", "self.path     = os.path.abspath(path)",
         'self.path     = os.path.abspath(path.replace("\\\\", os.sep))')
+replace("tests/run_tournament.py", r'OPENING_FOLDER       = r"openings\lines"',
+        'OPENING_FOLDER       = "openings/lines"')
+replace("tests/run_tournament.py", r'RESULTS_DIR          = r"tests\complete_results"',
+        'RESULTS_DIR          = "tests/complete_results"')
+replace("tests/run_tournament.py", "currently\n  v4.00 vs v3.14", "currently\n  v3.22 vs v3.14", required=False)
 
 # Quick regression preset: current candidate versus long-lived v3.14 baseline.
 replace("tests/run_tournament_quick.py", r"engine\c\zchezz_v401\zchezz.exe", "engine/c/zchezz_v322/zchezz.exe")
@@ -79,6 +94,10 @@ replace("tests/run_tournament_quick.py", r"engine\c\zchezz_v400\zchezz.exe", "en
 replace("tests/run_tournament_quick.py", '"label":    "v400-1T"', '"label":    "v314-1T"')
 replace("tests/run_tournament_quick.py", "self.path     = os.path.abspath(path)",
         'self.path     = os.path.abspath(path.replace("\\\\", os.sep))')
+replace("tests/run_tournament_quick.py", r'OPENING_FOLDER       = r"openings\lines"',
+        'OPENING_FOLDER       = "openings/lines"')
+replace("tests/run_tournament_quick.py", r'RESULTS_DIR          = r"tests\quick_results"',
+        'RESULTS_DIR          = "tests/quick_results"')
 replace("tests/run_tournament_quick.py", "Default: v4.00 (engine under test) vs v3.14 (previous stable baseline)",
         "Default: v3.22 (engine under test) vs v3.14 (long-lived stable baseline)")
 replace("tests/run_tournament_quick.py", "The two engine folders under engine/c/ are v4.00 and v3.14, which is the\npair this preset compares.",
@@ -103,12 +122,13 @@ replace("engine/build/build_termux.sh", 'VERSION="${1:-v401}"', 'VERSION="${1:-v
 replace("tests/run_tests.py", "    latest_version,\n", "    active_version,\n")
 replace("tests/run_tests.py", "version = args.version or latest_version()", "version = args.version or active_version()")
 
-# Guardrails: stale candidate defaults must not survive. v403 references are
-# permitted only in native NNU4 tool-host wiring.
+# Guardrails: stale candidate/default paths must not survive. v403 references
+# are permitted only in native NNU4 tool-host wiring.
 checks = {
-    "tests/run_selfplay.py": [r"engine\c\zchezz_v401\zchezz.exe", "Zchezz-v401"],
-    "tests/run_tournament.py": [r"engine\c\zchezz_v402\zchezz.exe", "Zchezz-v401"],
-    "tests/run_tournament_quick.py": [r"engine\c\zchezz_v401\zchezz.exe", r"engine\c\zchezz_v400\zchezz.exe"],
+    "tests/run_arena.py": [r'OPENING_FOLDER           = r"openings\lines"'],
+    "tests/run_selfplay.py": [r"engine\c\zchezz_v401\zchezz.exe", "Zchezz-v401", r'OPENING_FOLDER      = r"openings\lines"'],
+    "tests/run_tournament.py": [r"engine\c\zchezz_v402\zchezz.exe", "Zchezz-v401", r'OPENING_FOLDER       = r"openings\lines"'],
+    "tests/run_tournament_quick.py": [r"engine\c\zchezz_v401\zchezz.exe", r"engine\c\zchezz_v400\zchezz.exe", r'OPENING_FOLDER       = r"openings\lines"'],
     "engine/build/build_termux.sh": ['VERSION="${1:-v401}"'],
 }
 for path, needles in checks.items():
@@ -119,8 +139,9 @@ for path, needles in checks.items():
 
 arena = (ROOT / "tests/run_arena.py").read_text(encoding="utf-8")
 for needle in ("ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, \"engine\", \"c\", \"zchezz_v322\")",
-               '["make", "ENGINE=v403", "arena"]'):
+               '["make", "ENGINE=v403", "arena"]',
+               'OPENING_FOLDER           = "openings/lines"'):
     if needle not in arena:
-        raise SystemExit(f"tests/run_arena.py: expected architecture routing missing: {needle}")
+        raise SystemExit(f"tests/run_arena.py: expected architecture/path routing missing: {needle}")
 
 print("v3.22 infrastructure retarget complete")
