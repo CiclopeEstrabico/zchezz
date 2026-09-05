@@ -1,0 +1,183 @@
+name: v500-nnue-10k
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-nnue-10k.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  generate-label:
+    name: selfplay+teacher shard ${{ matrix.generation }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        generation: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install data dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+
+      - name: Generate 1,000 v5 self-play games
+        run: |
+          GEN=${{ matrix.generation }}
+          SEED=$((510000 + GEN * 10000))
+          python train/v500_pipeline.py generate \
+            --generation "$GEN" --games 1000 --shards 1 --threads 4 \
+            --movetime 25 --multipv 4 --temperature 0.80 --temp-plies 16 \
+            --max-plies 300 --seed "$SEED"
+
+      - name: Label 10,000 positions with v3.14 teacher
+        run: |
+          GEN=${{ matrix.generation }}
+          SEED=$((510000 + GEN * 10000))
+          python train/v500_pipeline.py label \
+            --generation "$GEN" --teacher-nodes 5000 --teacher-rows 10000 \
+            --teacher-workers 4 --teacher-shard-rows 5000 \
+            --teacher-timeout 30 --seed "$SEED"
+
+      - name: Upload shard data
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnue10k-data-${{ matrix.generation }}
+          path: |
+            data/v500_selfplay/gen0${{ matrix.generation }}/
+            data/v500_teacher_v314/gen0${{ matrix.generation }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  train-gate:
+    name: train + 4-way gate
+    needs: generate-label
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download all 10 self-play/teacher shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: .
+
+      - name: Verify corpus
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for g in range(10):
+              s=Path(f'data/v500_selfplay/gen{g:02d}')
+              t=Path(f'data/v500_teacher_v314/gen{g:02d}')
+              assert s.exists(), f'missing {s}'
+              assert t.exists(), f'missing {t}'
+              print(g, 'selfplay_files=', len(list(s.rglob('*'))), 'teacher_files=', len(list(t.rglob('*'))))
+          PY
+
+      - name: Train on all ten generations from current NNU4 warm start
+        run: |
+          python train/v500_pipeline.py train \
+            --generation 9 --epochs 12 --batch-size 2048 --train-workers 4 \
+            --val-every 1 --replay-generations 10 --device cpu \
+            --result-blend 0.15 --transfer-lr 3e-5 --seed 519999
+
+      - name: Export 10k-game candidate
+        run: python train/v500_pipeline.py export --generation 9
+
+      - name: Gate candidate against v3.14
+        run: |
+          python train/v500_pipeline.py gate \
+            --generation 9 --gate-games 256 --gate-nodes 50000 \
+            --gate-movetime 100 --gate-threads 4 --seed 520000
+
+      - name: Build candidate and current v5
+        run: |
+          rm -rf engine/c/zchezz_v500nnue10k
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500nnue10k
+          cp artifacts/v500-training/gen09/nnue_weights.bin engine/c/zchezz_v500nnue10k/nnue_weights.bin
+          make -C engine/build ENGINE=v500nnue10k native
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Candidate vs current v5 at fixed nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500nnue10k/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/v500-training/gen09/gate_openings.epd --opening-plies 0 \
+            --seed 521000 --tt-mb 16 \
+            --json artifacts/v500-training/gen09/candidate_vs_v500_nodes.json \
+            --pgn artifacts/v500-training/gen09/candidate_vs_v500_nodes.pgn
+
+      - name: Candidate vs current v5 at fixed time
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500nnue10k/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 256 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/v500-training/gen09/gate_openings.epd --opening-plies 0 \
+            --seed 521001 --tt-mb 16 \
+            --json artifacts/v500-training/gen09/candidate_vs_v500_time.json \
+            --pgn artifacts/v500-training/gen09/candidate_vs_v500_time.pgn
+
+      - name: Summarize all gates
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('artifacts/v500-training/gen09')
+          print('=== v500 NNUE 10k experiment ===')
+          for name in [
+              'candidate_vs_v314_nodes.json',
+              'candidate_vs_v314_time.json',
+              'candidate_vs_v500_nodes.json',
+              'candidate_vs_v500_time.json',
+          ]:
+              p=root/name
+              if not p.exists():
+                  print(name, 'MISSING')
+                  continue
+              d=json.loads(p.read_text())
+              x=d['pairings'][0]
+              print(f"{name}: W/D/L={x['w']}/{x['d']}/{x['l']} Elo={x['elo']:+.2f} +/-{x['ci95']:.2f}")
+          PY
+
+      - name: Upload trained NNUE and complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v500-nnue-10k-result
+          path: |
+            artifacts/v500-training/gen09/
+            checkpoints/v500/gen09/
+          if-no-files-found: warn
+          retention-days: 30
