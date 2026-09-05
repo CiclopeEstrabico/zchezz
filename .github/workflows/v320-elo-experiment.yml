@@ -26,16 +26,18 @@ jobs:
       - name: Install opening generator dependency
         run: python -m pip install --disable-pip-version-check python-chess
 
-      - name: Verify v3.20 lineage and VNNI source
+      - name: Verify v3.20 lineage and accepted upgrades
         run: |
           set -euo pipefail
           test -d engine/c/zchezz_v320
           grep -q 'ENGINE_VERSION "3.20"' engine/c/zchezz_v320/main.c
           grep -q '__AVXVNNI__' engine/c/zchezz_v320/nnue.c
+          grep -q 'TT generation stays stable for the whole game' engine/c/zchezz_v320/search.c
+          grep -q 'never take a TT score cutoff at ply 0' engine/c/zchezz_v320/search.c
+          grep -q 'do not poison a persistent TT with aborted-search bounds' engine/c/zchezz_v320/search.c
           cmp engine/c/zchezz_v314/nnue_weights.bin engine/c/zchezz_v320/nnue_weights.bin
-          cmp engine/c/zchezz_v314/search.c engine/c/zchezz_v320/search.c
-          cmp engine/c/zchezz_v314/search.h engine/c/zchezz_v320/search.h
-          echo "v3.20 keeps v3.14 search policy and weights; only evaluated source/build upgrades are active"
+          cmp engine/c/zchezz_v314/nnue.h engine/c/zchezz_v320/nnue.h
+          echo "v3.20 keeps the v3.14 NNUE/weights and adds isolated search/runtime upgrades"
 
       - name: Build stock v3.14 baseline
         run: |
@@ -43,19 +45,19 @@ jobs:
           mkdir -p artifacts/v320
           engine/c/zchezz_v314/zchezz.exe bench 11 | tee artifacts/v320/bench_v314_stock.txt
 
-      - name: Train PGO profile and build v3.20 with VNNI+LTO
+      - name: Train PGO profile and build portable v3.20 AVX2+LTO
         run: |
           set -euo pipefail
           rm -rf /tmp/zchezz-pgo
           mkdir -p /tmp/zchezz-pgo
-          ARCH_FLAGS="-mavx2 -mavxvnni -march=native -mtune=native -flto -fprofile-generate=/tmp/zchezz-pgo" \
+          ARCH_FLAGS="-mavx2 -march=native -mtune=native -flto -fprofile-generate=/tmp/zchezz-pgo" \
             make -C engine/build ENGINE=v320 clean native
           engine/c/zchezz_v320/zchezz.exe bench 8  >/dev/null
           engine/c/zchezz_v320/zchezz.exe bench 10 >/dev/null
           engine/c/zchezz_v320/zchezz.exe bench 12 >/dev/null
-          ARCH_FLAGS="-mavx2 -mavxvnni -march=native -mtune=native -flto -fprofile-use=/tmp/zchezz-pgo -fprofile-correction -fomit-frame-pointer" \
+          ARCH_FLAGS="-mavx2 -march=native -mtune=native -flto -fprofile-use=/tmp/zchezz-pgo -fprofile-correction -fomit-frame-pointer" \
             make -C engine/build ENGINE=v320 clean native
-          engine/c/zchezz_v320/zchezz.exe bench 11 | tee artifacts/v320/bench_v320_vnni_pgo.txt
+          engine/c/zchezz_v320/zchezz.exe bench 11 | tee artifacts/v320/bench_v320_pgo.txt
 
       - name: Build shared arena
         run: ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
@@ -99,12 +101,12 @@ jobs:
           print(f'openings={len(rows)} sha256={hashlib.sha256(out.read_bytes()).hexdigest()}')
           PY
 
-      - name: Fixed-node policy/eval divergence probe
+      - name: Fixed-node search-strength probe
         run: |
           python tests/run_arena.py \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v320/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 128 --threads 4 --movetime 0 --nodes 20000 --max-plies 220 \
+            --games 256 --threads 4 --movetime 0 --nodes 20000 --max-plies 220 \
             --openings artifacts/v320/openings.epd --opening-plies 0 \
             --seed 3202026 --tt-mb 16 \
             --json artifacts/v320/fixed_20kn.json \
@@ -126,7 +128,7 @@ jobs:
           python tests/run_arena.py \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v320/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 192 --threads 4 --movetime 100 --max-plies 240 \
+            --games 256 --threads 4 --movetime 100 --max-plies 240 \
             --openings artifacts/v320/openings.epd --opening-plies 0 \
             --seed 3202026 --tt-mb 16 \
             --json artifacts/v320/h2h_100ms.json \
