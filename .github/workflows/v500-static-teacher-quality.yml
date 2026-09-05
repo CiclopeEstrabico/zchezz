@@ -1,0 +1,97 @@
+name: v500-static-teacher-quality
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-static-teacher-quality.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v500-strength
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check numpy
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+      - name: Relabel corpus with both static evaluators
+        run: |
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=500 \
+            -Iengine/c/zchezz_v500 -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_v500/nnue.c -lm -o r500
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=314 \
+            -Iengine/c/zchezz_v314 -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_v314/nnue.c -lm -o r314
+          mkdir -p data/q500 data/q314 artifacts/static_teacher_quality
+          for G in 00 01 02 03 04 05 06 07 08 09; do
+            IN="data/v500_selfplay/gen${G}/selfplay_000.bin"
+            ./r500 --input "$IN" --output "data/q500/$G.bin" --nnue engine/c/zchezz_v500/nnue_weights.bin
+            ./r314 --input "$IN" --output "data/q314/$G.bin" --nnue engine/c/zchezz_v314/nnue_weights.bin
+          done
+      - name: Compare prediction of real game outcomes
+        run: |
+          python - <<'PY' | tee artifacts/static_teacher_quality/report.txt
+          import glob, json, sys
+          import numpy as np
+          sys.path.insert(0,'train')
+          import dataset
+
+          a=dataset.MultiShardSelfplay(sorted(glob.glob('data/q500/*.bin')))
+          b=dataset.MultiShardSelfplay(sorted(glob.glob('data/q314/*.bin')))
+          assert len(a)==len(b)==1411054
+          chunk=200000
+          sums={k:0.0 for k in ('bce500','bce314','brier500','brier314','abs500','abs314')}
+          n=0
+          better314=better500=tie=0
+          corr_parts=[]
+          for lo in range(0,len(a),chunk):
+              idx=np.arange(lo,min(lo+chunk,len(a)),dtype=np.int64)
+              r5=a.get_batch(idx); r3=b.get_batch(idx)
+              assert np.array_equal(r5['board'],r3['board']) and np.array_equal(r5['game_result'],r3['game_result'])
+              y=(r5['game_result'].astype(np.float64)+1.0)/2.0
+              p5=1.0/(1.0+np.exp(-r5['eval_cp'].astype(np.float64)/320.0))
+              p3=1.0/(1.0+np.exp(-r3['eval_cp'].astype(np.float64)/320.0))
+              eps=1e-12
+              sums['bce500'] += float((-y*np.log(np.clip(p5,eps,1))-(1-y)*np.log(np.clip(1-p5,eps,1))).sum())
+              sums['bce314'] += float((-y*np.log(np.clip(p3,eps,1))-(1-y)*np.log(np.clip(1-p3,eps,1))).sum())
+              e5=(p5-y)**2; e3=(p3-y)**2
+              sums['brier500'] += float(e5.sum()); sums['brier314'] += float(e3.sum())
+              sums['abs500'] += float(np.abs(p5-y).sum()); sums['abs314'] += float(np.abs(p3-y).sum())
+              better314 += int((e3<e5).sum()); better500 += int((e5<e3).sum()); tie += int((e5==e3).sum())
+              corr_parts.append((r5['eval_cp'].astype(np.float64),r3['eval_cp'].astype(np.float64)))
+              n += len(idx)
+          cp5=np.concatenate([x[0] for x in corr_parts]); cp3=np.concatenate([x[1] for x in corr_parts])
+          out={
+              'positions':n,
+              'v500':{'bce':sums['bce500']/n,'brier':sums['brier500']/n,'mae_prob':sums['abs500']/n},
+              'v314':{'bce':sums['bce314']/n,'brier':sums['brier314']/n,'mae_prob':sums['abs314']/n},
+              'teacher_cp_correlation':float(np.corrcoef(cp5,cp3)[0,1]),
+              'v314_lower_squared_error_fraction':better314/n,
+              'v500_lower_squared_error_fraction':better500/n,
+              'tie_fraction':tie/n,
+              'cp_disagreement_mae':float(np.mean(np.abs(cp3-cp5))),
+          }
+          print(json.dumps(out,indent=2))
+          open('artifacts/static_teacher_quality/report.json','w').write(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-static-teacher-quality
+          path: artifacts/static_teacher_quality/
+          retention-days: 30
