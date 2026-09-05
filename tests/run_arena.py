@@ -38,7 +38,7 @@ no anchor syntax to forward.
 
 ── PLAYER REFERENCE SYNTAX ─────────────────────────────────────────
 
-  net:<path.nnu4>       passed straight through to arena.exe unchanged.
+  net:<weights-file>       passed straight through to arena.exe unchanged.
   uci:<path>            passed straight through to arena.exe unchanged
                          (already-built .exe — including Stockfish).
   ref:<gitref>          a git ref (branch, tag, or commit sha) OR the
@@ -51,7 +51,7 @@ no anchor syntax to forward.
 ── BUILD RESOLUTION ────────────────────────────────────────────────
 
   ref == "HEAD" (case-insensitive): built IN PLACE, in this checkout's
-  own engine/c/zchezz_v400/ (the current v4.00 dev folder — see
+  own engine/c/zchezz_v322/ (the active v3.22 folder — see
   ENGINE_DIR_FOR_HEAD below), no git worktree involved. This is the
   common "test my current uncommitted work" case — a worktree can only
   check out a COMMITTED ref, so a dirty working tree has to be built
@@ -166,7 +166,7 @@ import argparse
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(REPO_ROOT, ".arena_build_cache")
-ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v402")
+ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v322")
 BUILD_DIR = os.path.join(REPO_ROOT, "engine", "build")
 TOOLS_DIR = os.path.join(REPO_ROOT, "engine", "c", "tools")
 # arena.exe is a SHARED tool binary, built in engine/build/ (NOT inside
@@ -212,9 +212,9 @@ DEFAULT_UCI_TIMEOUT_MS   = 15000    # max wait for a uci: player's "bestmove" li
 SAVE_PGN                 = True    # save games to standard PGN file in RESULTS_DIR
 SAVE_EPD                 = False   # EPD requires eval_cp from net: players; off for uci: runs
 SAVE_BIN                 = False   # BIN requires eval_cp from in-process net: players; off for uci: runs
-RESULTS_DIR              = r"tests\arena_results"
+RESULTS_DIR              = "tests/arena_results"
 
-OPENING_FOLDER           = r"openings\lines"  # walked recursively for opening files
+OPENING_FOLDER           = "openings/lines"  # walked recursively for opening files
 DEFAULT_JSON_PATH        = ""       # "" = no --json output
 DEFAULT_PGN_PATH         = ""       # explicit PGN override path (if empty and SAVE_PGN=True, uses RESULTS_DIR)
 DEFAULT_BIN_PATH         = ""       # explicit BIN override path (if empty and SAVE_BIN=True, uses RESULTS_DIR)
@@ -229,8 +229,8 @@ DEFAULT_GAUNTLET_SPEC    = ""       # "" = round-robin (no gauntlet candidate)
 # any --player on the CLI overrides this list in its entirety (see main()).
 # Same net:/uci:/ref: syntax as the CLI flag.
 DEFAULT_PLAYERS: list[str] = [
-    r"uci:engine\c\zchezz_v402\zchezz.exe",
-    r"uci:engine\c\zchezz_v402\zchezz.exe",
+    r"uci:engine/c/zchezz_v322/zchezz.exe",
+    r"uci:engine/c/zchezz_v322/zchezz.exe",
 ]
 
 # Mirrors CLAUDE.md's "Build Instructions -> Native (Windows/Linux)"
@@ -239,7 +239,7 @@ DEFAULT_PLAYERS: list[str] = [
 # own docs say a release build uses — no drift between "how a human
 # builds v3.14" and "how this script builds v3.14".
 BUILD_CMD_TEMPLATE = [
-    "gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavxvnni", "-mavx2",
+    "gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavx2",
     "-I.", "-Wno-unused-variable", "-Wno-unused-but-set-variable",
     "-Wno-maybe-uninitialized", "-Wno-misleading-indentation",
     "-Wno-sign-compare", "-Wno-unused-function", "-Wno-parentheses",
@@ -413,17 +413,17 @@ def resolve_player_spec(spec):
 # matching how the Makefile itself invokes gcc (ENGINE=v400 baked in here
 # since this fallback only serves resolve_head()'s HEAD-in-place case).
 ARENA_BUILD_CMD_TEMPLATE = [
-    "gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavxvnni", "-mavx2",
-    "-I" + os.path.join("..", "c", "zchezz_v402"), "-DNO_TABLEBASES", "-DNO_BOOK",
+    "gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavx2",
+    "-I" + os.path.join("..", "c", "zchezz_v403"), "-DNO_TABLEBASES", "-DNO_BOOK",
     "-Wno-unused-variable", "-Wno-unused-but-set-variable",
     "-Wno-maybe-uninitialized", "-Wno-misleading-indentation",
     "-Wno-sign-compare", "-Wno-unused-function", "-Wno-parentheses",
     "-o", "arena.exe",
     os.path.join("..", "c", "tools", "arena.c"),
     os.path.join("..", "c", "tools", "opening_pool.c"),
-    os.path.join("..", "c", "zchezz_v402", "board.c"),
-    os.path.join("..", "c", "zchezz_v402", "search.c"),
-    os.path.join("..", "c", "zchezz_v402", "nnue.c"),
+    os.path.join("..", "c", "zchezz_v403", "board.c"),
+    os.path.join("..", "c", "zchezz_v403", "search.c"),
+    os.path.join("..", "c", "zchezz_v403", "nnue.c"),
     "-static", "-lm", "-pthread",
 ]
 
@@ -435,7 +435,7 @@ def ensure_arena_built():
             return True
         log("arena.exe is older than engine/c/tools/arena.c — rebuilding")
 
-    for make_cmd in (["make", "ENGINE=v402", "arena"], ["mingw32-make", "ENGINE=v402", "arena"]):
+    for make_cmd in (["make", "ENGINE=v403", "arena"], ["mingw32-make", "ENGINE=v403", "arena"]):
         try:
             r = run(make_cmd, cwd=BUILD_DIR)
         except FileNotFoundError:

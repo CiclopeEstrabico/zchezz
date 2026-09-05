@@ -40,7 +40,7 @@ MODES OF OPERATION (all controlled by the config block):
   run_tournament_quick.py — same engine as this file (literally: it is a
   clean copy with only the config block edited), preset for one scenario:
   a fast 200-game H2H sanity check between two specific builds (currently
-  v4.00 vs v3.14). Use it instead of hand-editing this file's config block
+  v3.22 vs v3.14). Use it instead of hand-editing this file's config block
   for that one recurring check.
 
   run_arena.py (engine/c/tools/arena.c, native) — the FAST, SPRT-driven
@@ -173,15 +173,15 @@ MOVETIME_MS             = 200    # ms per move (Phase 9-2: ELO calibration 200ms
 # and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v402\zchezz.exe",
-        "label":    "Zchezz-v401",
+        "path":     r"engine/c/zchezz_v322/zchezz.exe",
+        "label":    "Zchezz-v322",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
         "options":  {"SyzygyPath": r"C:\Zchezz\tablebases"},
     },
     {
-        "path":     r"engine\c\zchezz_v314\zchezz.exe",
+        "path":     r"engine/c/zchezz_v314/zchezz.exe",
         "label":    "Zchezz-v314",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
@@ -225,7 +225,7 @@ MOVE_TIMEOUT_S         = 38.0   # seconds to wait for a move before timeout loss
 REPORT_PERFORMANCE_METRICS = True  # show NPS, time/move etc. in reports
 
 # ── Opening Book ──────────────────────────────────────────────────────────────
-OPENING_FOLDER       = r"openings\lines"  # folder with .epd and/or .pgn files
+OPENING_FOLDER       = "openings/lines"  # folder with .epd and/or .pgn files
 
 # Filter: load ONLY these files from OPENING_FOLDER. Empty list = load ALL.
 # Example: ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
@@ -268,7 +268,7 @@ SAVE_BIN_LABEL       = ""     # exact match against an engine's "label" (see
                                # Typically your own candidate build's label, so
                                # you get single-evaluator training data even
                                # while it plays a full mixed field for ELO.
-RESULTS_DIR          = r"tests\complete_results"
+RESULTS_DIR          = "tests/complete_results"
 COUNTER_EVERY        = 14     # progress line every N games
 # REPORT_LOOPS: full cross-table every N mini-cycles.
 # 1 mini-cycle = all pairs play 1 opening (×2 if COLOR_SWAP).
@@ -511,7 +511,7 @@ def load_all_openings(folder: str, filter_files: list = None) -> OpeningIndex:
 class EngineInstance:
     def __init__(self, path, label, tc_mode="depth", tc_value=8, tc_inc=0,
                  options=None, go_cmd_override=None, elo=None, **_):
-        self.path     = os.path.abspath(path)
+        self.path     = os.path.abspath(path.replace("\\", os.sep))
         self.label    = label
         self.tc_mode  = tc_mode
         self.tc_value = tc_value

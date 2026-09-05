@@ -17,7 +17,7 @@ that overrides it (see the COMMAND LINE block after the config;
 
   python tests/run_tournament_quick.py
 
-Default: v4.00 (engine under test) vs v3.14 (previous stable baseline),
+Default: v3.22 (engine under test) vs v3.14 (long-lived stable baseline),
          200 games (100 openings x 2 colors), 14 workers, 100ms/move,
          PGN + log saved, no EPD, no .bin.
 
@@ -26,8 +26,7 @@ OUTPUT FORMATS: SAVE_PGN / SAVE_EPD / SAVE_BIN are independent and additive
 here) for why .bin, unlike EPD, is restricted to one engine's own moves
 per run (SAVE_BIN_LABEL) rather than recording every mover's eval.
 
-The two engine folders under engine/c/ are v4.00 and v3.14, which is the
-pair this preset compares.
+The default engine pair is v3.22 and v3.14; CLI overrides can select any two builds.
 
 ── RELATION TO OTHER TOOLS — WHEN TO USE WHICH ────────────────────────────
 
@@ -91,7 +90,7 @@ import numpy as np
 from dataset import SAMPLE_DTYPE
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION — v4.01 vs v4.00 sanity check (1T, 100 games)
+#  CONFIGURATION — v3.22 vs v3.14 sanity check (1T)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,19 +98,19 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Time Control ──────────────────────────────────────────────────────────────
 MOVETIME_MS             = 100    # ms per move
 
-# ── v4.01 (trained) vs v4.00 (placeholder weights) sanity check ───────────────
+# ── v3.22 candidate vs v3.14 stable baseline ───────────────────────────────
 MY_ENGINES = [
     {
-        "path":     r"engine\c\zchezz_v401\zchezz.exe",
-        "label":    "v401-1T",
+        "path":     r"engine/c/zchezz_v322/zchezz.exe",
+        "label":    "v322-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
         "options":  {"Threads": "1"},
     },
     {
-        "path":     r"engine\c\zchezz_v400\zchezz.exe",
-        "label":    "v400-1T",
+        "path":     r"engine/c/zchezz_v314/zchezz.exe",
+        "label":    "v314-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,
@@ -134,7 +133,7 @@ MOVE_TIMEOUT_S         = 38.0
 REPORT_PERFORMANCE_METRICS = True
 
 # ── Opening Book ──────────────────────────────────────────────────────────────
-OPENING_FOLDER       = r"openings\lines"
+OPENING_FOLDER       = "openings/lines"
 OPENING_FILES        = ["8moves_v3.pgn", "Blitz_Testing_4moves.pgn"]
 
 # ── Output ────────────────────────────────────────────────────────────────────
@@ -149,7 +148,7 @@ SAVE_BIN             = False  # no training data for quick tests (same
                                # SAVE_BIN_LABEL below if you turn this on)
 SAVE_BIN_LABEL       = ""     # required (non-empty) whenever SAVE_BIN=True —
                                # exact match against an engine "label" above
-RESULTS_DIR          = r"tests\quick_results"
+RESULTS_DIR          = "tests/quick_results"
 COUNTER_EVERY        = 10
 REPORT_LOOPS         = 200    # report at end (200 openings)
 
@@ -374,7 +373,7 @@ def load_all_openings(folder: str, filter_files: list = None) -> OpeningIndex:
 class EngineInstance:
     def __init__(self, path, label, tc_mode="depth", tc_value=8, tc_inc=0,
                  options=None, go_cmd_override=None, elo=None, **_):
-        self.path     = os.path.abspath(path)
+        self.path     = os.path.abspath(path.replace("\\", os.sep))
         self.label    = label
         self.tc_mode  = tc_mode
         self.tc_value = tc_value

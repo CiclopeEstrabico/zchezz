@@ -147,7 +147,8 @@ def kill_leftover_engines():
         'Get-CimInstance Win32_Process -Filter "Name = \'zchezz*\'" | '
         'Invoke-CimMethod -MethodName Terminate'
     )
-    subprocess.run(["powershell", "-Command", cmd], capture_output=True)
+    if os.name == "nt":
+        subprocess.run(["powershell", "-Command", cmd], capture_output=True)
     print("[OK] Processos Anteriores encerrados.")
 
 # ── Engines ("players") — one persistent process per entry, per worker thread ──
@@ -156,15 +157,15 @@ def kill_leftover_engines():
 # UCI engines, still with EPD export — this is NOT limited to 2 engines.
 ENGINES_CFG = [
     {
-        "path":     r"engine\c\zchezz_v401\zchezz.exe",
-        "label":    "Zchezz-v401",
+        "path":     r"engine/c/zchezz_v322/zchezz.exe",
+        "label":    "Zchezz-v322",
         "tc_mode":  "movetime",   # "movetime" | "depth" | "nodes" | "fixedtime"
         "tc_value": 200,          # units depend on tc_mode (ms for movetime)
         "tc_inc":   0             # increment in ms, "fixedtime" mode only
     },
     {
-        "path":     r"engine\c\zchezz_v401\zchezz.exe",
-        "label":    "Zchezz-v401",
+        "path":     r"engine/c/zchezz_v322/zchezz.exe",
+        "label":    "Zchezz-v322",
         "tc_mode":  "movetime",
         "tc_value": 200,
         "tc_inc":   0
@@ -192,7 +193,7 @@ SAVE_OPENING_IN_EPD = True   # include the forced book/random opening plies in t
 SAVE_OPENING_IN_BIN = True  # include forced opening plies in the .bin output (default OFF,
                               # matches selfplay.c's SP_DEFAULT_SAVE_OPENING_SAMPLES=0: those
                               # plies were not chosen by search, so eval_cp is meaningless for them)
-RESULTS_DIR         = r"tests\selfplay_results"  # output directory for .log/.pgn/.epd/.bin — all
+RESULTS_DIR         = "tests/selfplay_results"  # output directory for .log/.pgn/.epd/.bin — all
                                                    # four share this dir and only differ by extension
 
 # ── Opening Book ──────────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ OPENING_MODE        = "book"  # how each game's starting position is chosen:
                               #   "book+random" BOOK_PORTION of games from the book, the rest random
                               # ("all" is accepted as the old name for "book+random")
 BOOK_PORTION        = 0.97    # "book+random" only: fraction of iterations drawn from the book
-OPENING_FOLDER      = r"openings\lines"  # walked recursively for .pgn/.epd files, see header docstring
+OPENING_FOLDER      = "openings/lines"  # walked recursively for .pgn/.epd files, see header docstring
 RANDOM_PLIES        = 6       # plies of random legal moves, for "random" and the random half of "book+random"
 SAME_OPENING_TWICE  = True    # True: color-swap pair reuses the SAME opening; False: advances to the next one
 COLOR_SWAP          = True    # every opening is always played from both sides (not actually optional — see main())
@@ -286,7 +287,7 @@ def log(*args):
 
 class EngineInstance:
     def __init__(self, path: str, label: str, tc_mode="depth", tc_value=7, tc_inc=0):
-        self.path      = os.path.abspath(path)
+        self.path      = os.path.abspath(path.replace("\\", os.sep))
         self.label     = label
         self.tc_mode   = tc_mode
         self.tc_value  = tc_value
