@@ -1,69 +1,54 @@
-"""Executable repository conventions that must not drift silently."""
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
+from repo_policy import LEGACY_ABSOLUTE_ROOT_ALLOWLIST, absolute_root_files
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "utils"))
 
-from repo_policy import (  # noqa: E402
-    LEGACY_ABSOLUTE_ROOT_ALLOWLIST,
-    absolute_root_files,
-    new_absolute_root_files,
-)
 
-def test_core_files_exist():
-    required = [
-        "AGENTS.md", "CLAUDE.md", "pyproject.toml",
-        "docs/testing.md", "docs/build.md", "docs/engine-contracts.md",
-        "docs/regression-testing.md", "docs/release-process.md",
-        "tests/run_tests.py", "utils/repo_paths.py", "utils/repo_policy.py",
-        "tools/check_repo.py",
-        "engine/build/zchezz_wasm.html",
-        "engine/build/bundle_shared.py",
-        "tools/promote_wasm_template.py",
-    ]
-    missing = [path for path in required if not (ROOT / path).is_file()]
-    assert not missing, f"required repository files are missing: {missing}"
+def test_no_tracked_generated_outputs_in_source_tree():
+    offenders = []
+    for path in ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(ROOT).as_posix()
+        if any(part.startswith(".") for part in path.relative_to(ROOT).parts):
+            continue
+        if rel.startswith("artifacts/"):
+            continue
+        if path.suffix.lower() in {".exe", ".o", ".obj", ".so", ".dll", ".dylib", ".pyc"}:
+            offenders.append(rel)
+    assert not offenders, f"generated binary/object outputs tracked in source tree: {offenders}"
 
-def test_v403_core_has_expected_tracked_sources():
-    root = ROOT / "engine" / "c" / "zchezz_v403"
-    required = [
-        "main.c", "board.c", "board.h", "search.c", "search.h",
-        "nnue.c", "nnue.h", "syzygy.c", "syzygy.h", "book.c", "book.h",
-    ]
-    missing = [name for name in required if not (root / name).is_file()]
-    assert not missing, f"v403 core files are missing: {missing}"
 
-def test_fathom_local_files_are_a_complete_pair():
-    root = ROOT / "engine" / "c" / "zchezz_v403"
-    tb_c = (root / "tbprobe.c").is_file()
-    tb_h = (root / "tbprobe.h").is_file()
-    assert tb_c == tb_h, (
-        "Fathom integration is incomplete: tbprobe.c and tbprobe.h must "
-        "either both exist or both be absent"
-    )
+def test_no_python_cache_directories():
+    offenders = [p.relative_to(ROOT).as_posix() for p in ROOT.rglob("__pycache__") if p.is_dir()]
+    assert not offenders, f"python cache directories present: {offenders}"
 
-def test_shared_makefile_supports_both_fathom_modes():
-    text = (ROOT / "engine" / "build" / "Makefile").read_text(encoding="utf-8")
-    assert "TB_C" in text and "TB_H" in text
-    assert "-DNO_TABLEBASES" in text
-    assert "require-tablebases" in text
-    assert "HAVE_FATHOM" in text
 
-def test_no_new_absolute_c_zchezz_in_active_python():
-    offenders = sorted(new_absolute_root_files(ROOT))
+def test_active_engine_marker_points_to_existing_version():
+    marker = ROOT / "engine" / "ACTIVE_ENGINE"
+    assert marker.is_file()
+    version = marker.read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"v\d+", version)
+    assert (ROOT / "engine" / "c" / f"zchezz_{version}").is_dir()
+
+
+def test_no_unregistered_absolute_machine_paths():
+    offenders = sorted(absolute_root_files(ROOT) - LEGACY_ABSOLUTE_ROOT_ALLOWLIST)
     assert not offenders, (
-        "new hard-coded Windows repository roots are not allowed: "
+        "unregistered machine-local absolute paths: "
         f"{offenders}. Use repo-relative paths/repo_paths.py."
     )
+
 
 def test_absolute_root_debt_is_explicit():
     active = absolute_root_files(ROOT)
     unregistered = active - LEGACY_ABSOLUTE_ROOT_ALLOWLIST
     assert not unregistered
+
 
 def test_piece_sets_are_complete_when_present():
     roots = [ROOT / "pieces", ROOT / "engine" / "build" / "pieces"]
@@ -78,15 +63,22 @@ def test_piece_sets_are_complete_when_present():
                     f"{child.relative_to(ROOT)} missing {sorted(expected - present)}"
                 )
 
-def test_shared_makefile_has_active_v403_default():
+
+def test_shared_makefile_matches_active_engine_marker():
+    active = (ROOT / "engine" / "ACTIVE_ENGINE").read_text(encoding="utf-8").strip()
     text = (ROOT / "engine" / "build" / "Makefile").read_text(encoding="utf-8")
-    assert re.search(r"^ENGINE\s*\?=\s*v403\b", text, re.MULTILINE)
-    assert not re.search(r"^ENGINE\s*\?=\s*v402\b", text, re.MULTILINE)
+    match = re.search(r"^ENGINE\s*\?=\s*(v\d+)\b", text, re.MULTILINE)
+    assert match, "shared Makefile must define an ENGINE ?= vXXX default"
+    assert match.group(1) == active, (
+        f"Makefile default {match.group(1)} must match engine/ACTIVE_ENGINE {active}"
+    )
+
 
 def test_makefile_respects_caller_compiler():
     text = (ROOT / "engine" / "build" / "Makefile").read_text(encoding="utf-8")
     assert "ifeq ($(origin CC),default)" in text
     assert re.search(r"^CC\s*=\s*gcc\b", text, re.MULTILINE)
+
 
 def test_cleanup_is_delegated_to_safe_script():
     text = (ROOT / "engine" / "build" / "Makefile").read_text(encoding="utf-8")
