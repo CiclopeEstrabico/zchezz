@@ -5,6 +5,8 @@ on:
   push:
     branches: ["v500-strength"]
     paths:
+      - "train/v500_pipeline.py"
+      - "train/labeling/label_with_teacher.py"
       - ".github/workflows/v500-training-e2e-smoke.yml"
 
 permissions:
