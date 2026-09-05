@@ -821,7 +821,35 @@ int nnue_eval(NnueAccum *na, int stm, const uint8_t *board) {
      * ──────────────────────────────────────────────────────────────── */
     int32_t acc2[NN_L2_OUT] __attribute__((aligned(32)));
 
-#ifdef __AVX2__
+#if defined(__AVXVNNI__)
+    /* v3.20: AVX-VNNI path ported from v4.02.  VPDPBUSD performs
+     * uint8 activations x int8 weights directly into int32 accumulators,
+     * avoiding the maddubs+madd+add sequence and its intermediate int16
+     * saturation.  The AVX2 path below remains the portable fallback. */
+    {
+        for (int o = 0; o < NN_L2_OUT; o += 4) {
+            const int8_t *row0 = _nnL2W + (o+0) * NN_L2_IN;
+            const int8_t *row1 = _nnL2W + (o+1) * NN_L2_IN;
+            const int8_t *row2 = _nnL2W + (o+2) * NN_L2_IN;
+            const int8_t *row3 = _nnL2W + (o+3) * NN_L2_IN;
+            __m256i sum0 = _mm256_setzero_si256();
+            __m256i sum1 = _mm256_setzero_si256();
+            __m256i sum2 = _mm256_setzero_si256();
+            __m256i sum3 = _mm256_setzero_si256();
+            for (int i = 0; i < NN_L2_IN; i += 32) {
+                __m256i a = _mm256_load_si256((const __m256i*)(relu1 + i));
+                sum0 = _mm256_dpbusd_epi32(sum0, a, _mm256_load_si256((const __m256i*)(row0 + i)));
+                sum1 = _mm256_dpbusd_epi32(sum1, a, _mm256_load_si256((const __m256i*)(row1 + i)));
+                sum2 = _mm256_dpbusd_epi32(sum2, a, _mm256_load_si256((const __m256i*)(row2 + i)));
+                sum3 = _mm256_dpbusd_epi32(sum3, a, _mm256_load_si256((const __m256i*)(row3 + i)));
+            }
+            acc2[o+0] = _nnL2B[o+0] + _hsum_epi32(sum0);
+            acc2[o+1] = _nnL2B[o+1] + _hsum_epi32(sum1);
+            acc2[o+2] = _nnL2B[o+2] + _hsum_epi32(sum2);
+            acc2[o+3] = _nnL2B[o+3] + _hsum_epi32(sum3);
+        }
+    }
+#elif defined(__AVX2__)
     {
         __m256i ones = _mm256_set1_epi16(1);
         /* 4-way output unroll: share relu1 loads across 4 weight rows.
@@ -1094,7 +1122,35 @@ int nnue_eval_bb(NnueAccum *na, int stm, const uint8_t *board,
 
     /* Steps 3-6: identical to nnue_eval */
     int32_t acc2[NN_L2_OUT] __attribute__((aligned(32)));
-#ifdef __AVX2__
+#if defined(__AVXVNNI__)
+    /* v3.20: AVX-VNNI path ported from v4.02.  VPDPBUSD performs
+     * uint8 activations x int8 weights directly into int32 accumulators,
+     * avoiding the maddubs+madd+add sequence and its intermediate int16
+     * saturation.  The AVX2 path below remains the portable fallback. */
+    {
+        for (int o = 0; o < NN_L2_OUT; o += 4) {
+            const int8_t *row0 = _nnL2W + (o+0) * NN_L2_IN;
+            const int8_t *row1 = _nnL2W + (o+1) * NN_L2_IN;
+            const int8_t *row2 = _nnL2W + (o+2) * NN_L2_IN;
+            const int8_t *row3 = _nnL2W + (o+3) * NN_L2_IN;
+            __m256i sum0 = _mm256_setzero_si256();
+            __m256i sum1 = _mm256_setzero_si256();
+            __m256i sum2 = _mm256_setzero_si256();
+            __m256i sum3 = _mm256_setzero_si256();
+            for (int i = 0; i < NN_L2_IN; i += 32) {
+                __m256i a = _mm256_load_si256((const __m256i*)(relu1 + i));
+                sum0 = _mm256_dpbusd_epi32(sum0, a, _mm256_load_si256((const __m256i*)(row0 + i)));
+                sum1 = _mm256_dpbusd_epi32(sum1, a, _mm256_load_si256((const __m256i*)(row1 + i)));
+                sum2 = _mm256_dpbusd_epi32(sum2, a, _mm256_load_si256((const __m256i*)(row2 + i)));
+                sum3 = _mm256_dpbusd_epi32(sum3, a, _mm256_load_si256((const __m256i*)(row3 + i)));
+            }
+            acc2[o+0] = _nnL2B[o+0] + _hsum_epi32(sum0);
+            acc2[o+1] = _nnL2B[o+1] + _hsum_epi32(sum1);
+            acc2[o+2] = _nnL2B[o+2] + _hsum_epi32(sum2);
+            acc2[o+3] = _nnL2B[o+3] + _hsum_epi32(sum3);
+        }
+    }
+#elif defined(__AVX2__)
     {
         __m256i ones = _mm256_set1_epi16(1);
         for (int o = 0; o < NN_L2_OUT; o += 4) {
