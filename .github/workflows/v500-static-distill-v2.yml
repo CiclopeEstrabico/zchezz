@@ -1,0 +1,255 @@
+name: v500-static-distill-v2
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-static-distill-v2.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  distill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v500-strength
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Recover 10k-game corpus
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+
+      - name: Relabel 1.4M positions with v5 and v3.14 static eval
+        run: |
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=500 \
+            -Iengine/c/zchezz_v500 -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_v500/nnue.c -lm -o relabel_v500
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=314 \
+            -Iengine/c/zchezz_v314 -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_v314/nnue.c -lm -o relabel_v314
+          mkdir -p data/static500 data/static314 artifacts/static_distill_v2
+          for G in 00 01 02 03 04 05 06 07 08 09; do
+            IN="data/v500_selfplay/gen${G}/selfplay_000.bin"
+            ./relabel_v500 --input "$IN" --output "data/static500/gen${G}.bin" \
+              --nnue engine/c/zchezz_v500/nnue_weights.bin
+            ./relabel_v314 --input "$IN" --output "data/static314/gen${G}.bin" \
+              --nnue engine/c/zchezz_v314/nnue_weights.bin
+          done
+          python - <<'PY' | tee artifacts/static_distill_v2/corpus.txt
+          import glob, sys
+          sys.path.insert(0, 'train')
+          import dataset
+          for d in ('static500','static314'):
+              ds=dataset.MultiShardSelfplay(sorted(glob.glob(f'data/{d}/*.bin')))
+              print(d, len(ds))
+              assert len(ds) == 1411054
+          PY
+
+      - name: Create exact bootstrap checkpoint
+        run: |
+          mkdir -p checkpoints
+          python train/import_nnu4.py \
+            --src engine/c/zchezz_v500/nnue_weights.bin \
+            --dst checkpoints/static_bootstrap.pt
+
+      - name: Train identity and v3.14-static candidates
+        run: |
+          python - <<'PY'
+          import shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, 'train')
+          import train_nnue as tn
+
+          recipes = [
+              # Control: same C net teaches itself. If this loses Elo, stop
+              # trusting the QAT fine-tune path before interpreting teacher runs.
+              ('identity',       'data/static500/*.bin', 1.0e-5, 6),
+              # Actual distillation: pure v3.14 static CP, no result blend,
+              # no weight decay. Two conservative warm-start learning rates.
+              ('teacher_lr1e5', 'data/static314/*.bin', 1.0e-5, 12),
+              ('teacher_lr3e5', 'data/static314/*.bin', 3.0e-5, 12),
+          ]
+          for name, path, lr, epochs in recipes:
+              out=Path('checkpoints')/name
+              shutil.rmtree(out, ignore_errors=True)
+              out.mkdir(parents=True, exist_ok=True)
+              ns=tn.build_arg_parser().parse_args([])
+              ns.ckpt_dir=str(out)
+              ns.dataset_name=f'v500_{name}_static_v2'
+              ns.epochs=epochs
+              ns.batch_size=8192
+              ns.max_positions_chunk=1_100_000
+              ns.lr=1e-3
+              ns.transfer_lr=lr
+              ns.weight_decay=0.0
+              ns.workers=4
+              ns.device='cpu'
+              ns.val_every=1
+              ns.resample_each_epoch=False
+              ns.encode_cache=False
+              ns.show_config=False
+              ns.checkpoint_source='checkpoints/static_bootstrap.pt'
+              ns.seed=550000+len(name)
+              ns.sources=[tn.SourceSpec(
+                  kind='bin', path=path, k=0.0, train_pct=1.0,
+                  val_frac=0.02, name=name)]
+              print(f'=== {name}: lr={lr:g} epochs={epochs} weight_decay=0 ===')
+              tn.train(ns)
+          PY
+
+      - name: Export candidates
+        run: |
+          for C in identity teacher_lr1e5 teacher_lr3e5; do
+            mkdir -p "artifacts/static_distill_v2/$C"
+            CKPT=$(ls -t checkpoints/$C/*.pt | head -1)
+            python train/export_nnu4.py --ckpt "$CKPT" \
+              --dst "artifacts/static_distill_v2/$C/nnue_weights.bin"
+          done
+          sha256sum engine/c/zchezz_v500/nnue_weights.bin \
+            artifacts/static_distill_v2/*/nnue_weights.bin | tee artifacts/static_distill_v2/hashes.txt
+
+      - name: Build candidates and test arena
+        run: |
+          for C in identity teacher_lr1e5 teacher_lr3e5; do
+            rm -rf "engine/c/zchezz_v500_${C}"
+            cp -a engine/c/zchezz_v500 "engine/c/zchezz_v500_${C}"
+            cp "artifacts/static_distill_v2/$C/nnue_weights.bin" \
+              "engine/c/zchezz_v500_${C}/nnue_weights.bin"
+            make -C engine/build "ENGINE=v500_${C}" native
+          done
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v500 arena
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/static_distill_v2/openings.epd', 551731, 384)
+          PY
+
+      - name: Identity control vs current v5
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_identity/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/static_distill_v2/openings.epd --opening-plies 0 \
+            --seed 552000 --tt-mb 16 \
+            --json artifacts/static_distill_v2/identity/vs_v500_nodes.json \
+            --pgn artifacts/static_distill_v2/identity/vs_v500_nodes.pgn
+
+      - name: Teacher candidates vs current v5 at 50k nodes
+        run: |
+          for C in teacher_lr1e5 teacher_lr3e5; do
+            SEED=552100
+            [ "$C" = teacher_lr3e5 ] && SEED=552101
+            python tests/run_arena.py \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_${C}/zchezz.exe" \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+              --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+              --openings artifacts/static_distill_v2/openings.epd --opening-plies 0 \
+              --seed "$SEED" --tt-mb 16 \
+              --json "artifacts/static_distill_v2/$C/vs_v500_nodes.json" \
+              --pgn "artifacts/static_distill_v2/$C/vs_v500_nodes.pgn"
+          done
+
+      - name: Teacher candidates vs current v5 at 100ms
+        run: |
+          for C in teacher_lr1e5 teacher_lr3e5; do
+            SEED=552200
+            [ "$C" = teacher_lr3e5 ] && SEED=552201
+            python tests/run_arena.py \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_${C}/zchezz.exe" \
+              --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+              --games 128 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+              --openings artifacts/static_distill_v2/openings.epd --opening-plies 0 \
+              --seed "$SEED" --tt-mb 16 \
+              --json "artifacts/static_distill_v2/$C/vs_v500_time.json" \
+              --pgn "artifacts/static_distill_v2/$C/vs_v500_time.pgn"
+          done
+
+      - name: Select best candidate
+        id: best
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          scores={}
+          for c in ('teacher_lr1e5','teacher_lr3e5'):
+              vals=[]
+              for mode in ('nodes','time'):
+                  x=json.load(open(f'artifacts/static_distill_v2/{c}/vs_v500_{mode}.json'))['pairings'][0]
+                  vals.append(x['elo'])
+              scores[c]=sum(vals)/len(vals)
+          best=max(scores,key=scores.get)
+          print(f'name={best}')
+          print(f'scores={scores}')
+          PY
+
+      - name: Best candidate vs v3.14 at 50k nodes
+        run: |
+          C='${{ steps.best.outputs.name }}'
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_${C}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/static_distill_v2/openings.epd --opening-plies 0 \
+            --seed 553000 --tt-mb 16 \
+            --json "artifacts/static_distill_v2/$C/vs_v314_nodes.json" \
+            --pgn "artifacts/static_distill_v2/$C/vs_v314_nodes.pgn"
+
+      - name: Best candidate vs v3.14 at 100ms
+        run: |
+          C='${{ steps.best.outputs.name }}'
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_${C}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 256 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/static_distill_v2/openings.epd --opening-plies 0 \
+            --seed 553001 --tt-mb 16 \
+            --json "artifacts/static_distill_v2/$C/vs_v314_time.json" \
+            --pgn "artifacts/static_distill_v2/$C/vs_v314_time.pgn"
+
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for c in ('identity','teacher_lr1e5','teacher_lr3e5'):
+              print('\n===',c,'===')
+              for f in sorted((Path('artifacts/static_distill_v2')/c).glob('*.json')):
+                  x=json.loads(f.read_text())['pairings'][0]
+                  print(f'{f.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v500-static-distill-v2-results
+          path: artifacts/static_distill_v2/
+          retention-days: 30
