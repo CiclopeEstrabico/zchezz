@@ -1,0 +1,59 @@
+name: v500-training-e2e-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-training-e2e-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Generate generation 99 smoke selfplay
+        run: |
+          python train/v500_pipeline.py generate \
+            --generation 99 --games 4 --shards 1 --threads 2 \
+            --movetime 2 --multipv 2 --temperature 0.5 --temp-plies 6 \
+            --max-plies 100 --seed 500999
+
+      - name: Label smoke positions with v3.14
+        run: |
+          python train/v500_pipeline.py label \
+            --generation 99 --teacher-nodes 100 --teacher-rows 32 \
+            --teacher-workers 2 --teacher-shard-rows 16 --seed 500999
+
+      - name: Train one tiny epoch
+        run: |
+          python train/v500_pipeline.py train \
+            --generation 99 --epochs 1 --batch-size 16 --train-workers 2 \
+            --val-every 1 --replay-generations 1 --device cpu --seed 500999
+
+      - name: Export NNU4 and load it in v5 engine
+        run: |
+          python train/v500_pipeline.py export --generation 99
+          test -s artifacts/v500-training/gen99/nnue_weights.bin
+          cp artifacts/v500-training/gen99/nnue_weights.bin engine/c/zchezz_v500/nnue_weights.bin
+          make -C engine/build ENGINE=v500 native
+          engine/c/zchezz_v500/zchezz.exe bench 2 | tee /tmp/v500_e2e_bench.txt
+          grep -q 'Total nodes' /tmp/v500_e2e_bench.txt
