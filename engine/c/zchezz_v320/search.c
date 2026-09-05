@@ -707,7 +707,10 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
     tte_hit = tt_probe(b->hash, ply, &tte);
     if (tte_hit) {
         pv_move = tte.move;
-        if (tte_hit == 1 && tte.depth >= depth && !(ply == 0 && ss->excluded_root_n > 0)) {
+        /* v3.20: never take a TT score cutoff at ply 0. With TT
+         * generations now stable across moves, a previous root entry
+         * can be deep enough to cut immediately and leave no fresh PV. */
+        if (tte_hit == 1 && tte.depth >= depth && ply > 0 && ss->excluded_root_n == 0) {
             if (tte.flag == TT_EXACT) return tte.score;
             if (tte.flag == TT_LOWER && tte.score >= beta) return tte.score;
             if (tte.flag == TT_UPPER && tte.score <= alpha) return tte.score;
@@ -1519,8 +1522,10 @@ cutoff:
 
     /* No legal moves: checkmate (in check) or stalemate (not in check) */
     if (!legal_count) return in_check ? (-19000+ply) : 0;
-    /* Store best result in TT for future visits */
-    if (best_move.from||best_move.to)
+    /* v3.20: do not poison a persistent TT with aborted-search bounds.
+     * Scores propagated while time/stop is unwinding are not valid
+     * bounds and can otherwise survive into subsequent moves. */
+    if ((best_move.from||best_move.to) && !ss->time_up)
         tt_store(b->hash, best, depth, flag, &best_move, ply, raw_eval);
     return best;
 }
@@ -1616,8 +1621,10 @@ SearchResult search_best(Board *b, const SearchParams *p) {
      * p->search_state; main thread uses the default global g_ss. */
     SearchState *ss = p->search_state ? p->search_state : &g_ss;
     SearchResult res = {0};
-    /* Only main thread increments TT generation — helpers share it */
-    if (p->start_depth <= 1) TT_GEN = (TT_GEN+1) & 0xFFFF;
+    /* v3.20: TT generation stays stable for the whole game.
+     * cmd_ucinewgame() is the single generation boundary. This lets
+     * positions reached again on later moves reuse both TT scores and
+     * moves instead of degrading every old hit to move-ordering only. */
     nnue_reset(b->nnue);  /* v3.13: per-thread accumulator reset */
 
     int md = p->max_depth;
