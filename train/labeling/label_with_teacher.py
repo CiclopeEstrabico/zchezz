@@ -211,7 +211,10 @@ class UciTeacher:
             pass
 
     def _evaluate_once(self, fen: str) -> int:
-        side = fen.split()[1]
+        # Zchezz UCI scores are already WHITE-relative. search_best()
+        # converts its root negamax score to wb_score before main.c emits
+        # `info score cp`. A second Black-to-move flip here corrupts half
+        # of the teacher corpus.
         self.write(f"position fen {fen}")
         self.write(f"go nodes {self.nodes}")
         last_cp = 0
@@ -228,8 +231,7 @@ class UciTeacher:
                 have_score = True
         if not have_score:
             last_cp = 0
-        white_cp = last_cp if side == "w" else -last_cp
-        return max(-CP_CLIP, min(CP_CLIP, white_cp))
+        return max(-CP_CLIP, min(CP_CLIP, last_cp))
 
     def evaluate(self, fen: str) -> int:
         last_error: Exception | None = None
