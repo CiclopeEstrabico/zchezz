@@ -2,7 +2,12 @@
 
 # The active release line on this branch. Override with ENGINE=vXXX for
 # historical/regression builds. Keep this aligned with engine/ACTIVE_ENGINE.
-ENGINE     ?= v322
+ENGINE       ?= v322
+# Native arena/selfplay/GA use the per-instance NnueNet API introduced in v4.
+# v3.22's NNU3 engine does not expose that API, so shared native tools retain
+# the current NNU4 host. v3.22 participates through architecture-neutral UCI
+# wrappers (tests/run_arena.py, run_selfplay.py, run_tournament*.py).
+TOOLS_ENGINE ?= v403
 # AVX2 is the portable x86-64 release baseline. AVX-VNNI remains opt-in via
 # ARCH_FLAGS="-mavxvnni -mavx2" on CPUs that actually support it.
 ARCH_FLAGS ?= -mavx2
@@ -15,9 +20,11 @@ CC = gcc
 endif
 
 EDIR    = ../c/zchezz_$(ENGINE)
+TEDIR   = ../c/zchezz_$(TOOLS_ENGINE)
 TOOLDIR = ../c/tools
 
-CFLAGS  = -O3 -ffast-math -D_GNU_SOURCE -std=c11 $(ARCH_FLAGS) -I$(EDIR)
+CFLAGS      = -O3 -ffast-math -D_GNU_SOURCE -std=c11 $(ARCH_FLAGS) -I$(EDIR)
+TOOL_CFLAGS = -O3 -ffast-math -D_GNU_SOURCE -std=c11 $(ARCH_FLAGS) -I$(TEDIR)
 WARNS   = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-maybe-uninitialized \
           -Wno-misleading-indentation -Wno-sign-compare -Wno-unused-function -Wno-parentheses
 EMWARNS = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-uninitialized \
@@ -66,6 +73,7 @@ endif
 
 build-info:
 	@echo ENGINE=$(ENGINE)
+	@echo TOOLS_ENGINE=$(TOOLS_ENGINE)
 	@echo CC=$(CC)
 	@echo ARCH_FLAGS=$(ARCH_FLAGS)
 	@echo HAVE_FATHOM=$(HAVE_FATHOM)
@@ -104,17 +112,20 @@ test-c: ../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c
 		../c/tests/test_engine_invariants.c $(EDIR)/board.c $(EDIR)/nnue.c -lm
 	$(RUN_LOCAL)test_engine_invariants.exe $(EDIR)/nnue_weights.bin
 
-SELFPLAY_SRCS = $(TOOLDIR)/selfplay.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
+SELFPLAY_SRCS = $(TOOLDIR)/selfplay.c $(TOOLDIR)/opening_pool.c $(TEDIR)/board.c $(TEDIR)/search.c $(TEDIR)/nnue.c
 selfplay: $(SELFPLAY_SRCS)
-	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o selfplay.exe $(SELFPLAY_SRCS) $(LDFLAGS)
+	@echo Building selfplay with NNU4 tool host $(TOOLS_ENGINE).
+	$(CC) $(TOOL_CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o selfplay.exe $(SELFPLAY_SRCS) $(LDFLAGS)
 
-ARENA_SRCS = $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
+ARENA_SRCS = $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(TEDIR)/board.c $(TEDIR)/search.c $(TEDIR)/nnue.c
 arena: $(ARENA_SRCS)
-	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o arena.exe $(ARENA_SRCS) $(LDFLAGS)
+	@echo Building arena with NNU4 tool host $(TOOLS_ENGINE).
+	$(CC) $(TOOL_CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -o arena.exe $(ARENA_SRCS) $(LDFLAGS)
 
-GA_TUNE_SRCS = $(TOOLDIR)/ga_tune.c $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(EDIR)/board.c $(EDIR)/search.c $(EDIR)/nnue.c
+GA_TUNE_SRCS = $(TOOLDIR)/ga_tune.c $(TOOLDIR)/arena.c $(TOOLDIR)/opening_pool.c $(TEDIR)/board.c $(TEDIR)/search.c $(TEDIR)/nnue.c
 ga_tune: $(GA_TUNE_SRCS)
-	$(CC) $(CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -DARENA_NO_MAIN -o ga_tune.exe $(GA_TUNE_SRCS) $(LDFLAGS)
+	@echo Building GA tuner with NNU4 tool host $(TOOLS_ENGINE).
+	$(CC) $(TOOL_CFLAGS) $(WARNS) -DNO_TABLEBASES -DNO_BOOK -DARENA_NO_MAIN -o ga_tune.exe $(GA_TUNE_SRCS) $(LDFLAGS)
 
 wasm: $(WASM_SRCS)
 	$(EMCC) $(EMFLAGS) $(EMWARNS) -I$(EDIR) -o $(EDIR)/zchezz_wasm.js $(WASM_SRCS)
