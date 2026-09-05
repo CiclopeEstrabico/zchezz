@@ -1,0 +1,70 @@
+name: v500-training-pipeline-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - "train/v500_pipeline.py"
+      - "train/labeling/label_with_teacher.py"
+      - ".github/workflows/v500-training-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntax-check v5 training scripts
+        run: |
+          python -m py_compile train/v500_pipeline.py train/labeling/label_with_teacher.py
+          python train/v500_pipeline.py plan --generation 0 --games 8 --teacher-rows 16
+
+      - name: Install smoke dependencies
+        run: python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+
+      - name: Build v5 selfplay and v3.14 teacher
+        run: |
+          make -C engine/build ENGINE=v500 'ARCH_FLAGS=-mavx2 -DSAMPLE_ENGINE_VERSION=500' selfplay
+          make -C engine/build ENGINE=v314 native
+
+      - name: Generate tiny v5 selfplay sample
+        run: |
+          mkdir -p /tmp/v500-smoke
+          engine/build/selfplay.exe \
+            --games 4 --threads 2 --movetime 3 --multipv 2 \
+            --temperature 0.6 --temp-plies 8 --temp-final 0 --temp-argmax-eps 0 \
+            --max-plies 120 --seed 500314 --tt-mb 2 \
+            --nnue engine/c/zchezz_v500/nnue_weights.bin \
+            --out /tmp/v500-smoke/selfplay.bin \
+            --openings openings/lines --opening-mode book --same-opening-twice
+
+      - name: Re-label tiny sample with v3.14
+        run: |
+          python train/labeling/label_with_teacher.py \
+            --input '/tmp/v500-smoke/*.bin' \
+            --output /tmp/v500-smoke/teacher \
+            --teacher engine/c/zchezz_v314/zchezz.exe \
+            --nodes 100 --max-rows 16 --workers 2 --shard-rows 8 --generation 0
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+          files=sorted(Path('/tmp/v500-smoke/teacher').glob('*.parquet'))
+          assert files, 'teacher labeler produced no parquet'
+          df=pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+          assert 0 < len(df) <= 16
+          assert {'fen','cp','result','student_cp','teacher_delta_cp','generation'} <= set(df.columns)
+          assert df['result'].between(0.0,1.0).all()
+          print(df.head().to_string(index=False))
+          PY
