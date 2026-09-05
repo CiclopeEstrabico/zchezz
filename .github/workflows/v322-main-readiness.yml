@@ -158,7 +158,7 @@ jobs:
           rm -rf artifacts/smoke-selfplay
           python tests/run_selfplay.py \
             --games 1 --concurrency 1 --max-plies 16 --move-timeout 10 \
-            --report-every 1 --pgn false --epd true --bin false \
+            --report-every 1 --no-pgn --epd --no-bin \
             --results-dir artifacts/smoke-selfplay \
             --opening-mode random --random-plies 2 \
             --engine engine/c/zchezz_v322/zchezz.exe \
@@ -175,13 +175,13 @@ jobs:
           python tests/run_tournament.py \
             --games 0 --games-self-play 1 --movetime 2 --concurrency 1 \
             --max-plies 16 --move-timeout 10 \
-            --pgn false --epd false --bin false \
+            --no-pgn --no-epd --no-bin \
             --results-dir artifacts/smoke-tournament \
             --engine engine/c/zchezz_v322/zchezz.exe \
             --engine-label Zchezz-v322
           python tests/run_tournament_quick.py \
             --games 1 --movetime 2 --concurrency 1 --max-plies 16 --move-timeout 10 \
-            --pgn false --epd false --bin false \
+            --no-pgn --no-epd --no-bin \
             --results-dir artifacts/smoke-tournament-quick \
             --engine-a engine/c/zchezz_v322/zchezz.exe --label-a Zchezz-v322 \
             --engine-b engine/c/zchezz_v314/zchezz.exe --label-b Zchezz-v314 \
