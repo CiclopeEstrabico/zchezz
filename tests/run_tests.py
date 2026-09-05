@@ -26,10 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utils"))
 
 from repo_paths import (  # noqa: E402
+    active_version,
     artifact_dir,
     engine_dir,
     engine_executable,
-    latest_version,
     previous_version,
     wasm_bundle,
     wasm_source,
@@ -261,7 +261,7 @@ def main() -> int:
     parser.add_argument("--keep-going", action="store_true", help="continue after a required failure")
     args = parser.parse_args()
 
-    version = args.version or latest_version()
+    version = args.version or active_version()
     baseline = args.baseline or previous_version(version)
     selected = profiles(version, baseline)[args.profile]
 
