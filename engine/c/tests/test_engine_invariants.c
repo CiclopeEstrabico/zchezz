@@ -1,7 +1,8 @@
 /* Native correctness invariants for the current Zchezz engine API.
  *
  * This harness tests state restoration and representation consistency without
- * going through UCI. It intentionally links board.c and nnue.c directly.
+ * going through UCI. It intentionally links board.c and nnue.c directly and
+ * supports both the NNU3 (v3.x) and NNU4 (v4.x) accumulator APIs.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -104,7 +105,10 @@ static int compare_nnue_full_rebuild(Board *b, const char *context) {
         CHECK(0, "%s: cannot allocate fresh NNUE accumulator", context);
         return 0;
     }
+#ifdef NN_FEAT_IN
+    /* NNU4 accumulators bind explicitly to a weight-set instance. */
     fresh->net = g_nnue_net;
+#endif
     fresh->acc_dirty = 1;
     nnue_rebuild(fresh, b->b);
     int rebuilt = nnue_eval(fresh, stm, b->b);
@@ -141,16 +145,29 @@ static void run_sequence(const char *name, const char *fen, const char *moves[],
 }
 
 static void test_nnue_feature_contracts(void) {
+#ifdef NN_FEAT_IN
+    /* NNU4 / HalfKP-4Bucket contracts. */
+    CHECK(NN_FEAT_IN == 2560, "NNU4 feature dimension changed");
+    CHECK(NN_L1_OUT == 512 && NN_L2_IN == 1024 && NN_L2_OUT == 32,
+          "NNU4 layer dimensions changed");
     CHECK(nnue_feature_index(WP, 48, 1, 0) == 8,
           "white-POV WP a2 feature index changed");
     CHECK(nnue_feature_index(BP, 8, 0, 0) == 8,
           "black-POV BP a7 feature index changed");
     CHECK(nnue_feature_index(WK, 60, 1, 0) == -1,
-          "king must not be an NNUE feature");
+          "king must not be an NNU4 piece feature");
     CHECK(nnue_king_bucket_w(60) == 1,
           "white king e1 bucket mapping changed");
     CHECK(nnue_king_bucket_b(4) == 1,
           "black king e8 bucket mapping changed");
+#else
+    /* NNU3 / HM+extras contracts. */
+    CHECK(NN_L1_IN == 799, "NNU3 input dimension changed");
+    CHECK(NN_HM_IN == 768, "NNU3 HM feature dimension changed");
+    CHECK(NN_EXTRA == 31, "NNU3 extra feature count changed");
+    CHECK(NN_L1_OUT == 256 && NN_L2_IN == 256 && NN_L2_OUT == 64,
+          "NNU3 layer dimensions changed");
+#endif
 }
 
 static void test_draw_contracts(void) {
@@ -193,4 +210,3 @@ int main(int argc, char **argv) {
     printf("PASS: native engine invariants\n");
     return 0;
 }
-
