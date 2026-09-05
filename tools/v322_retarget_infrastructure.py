@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Retarget inherited v4.03 infrastructure defaults to the active v3.22 line.
 
-This intentionally changes only configuration/default wiring. It does not alter
-engine search or NNUE code. The v4.x native net-vs-net fast paths remain NNU4
-specific; NNU3 engines use the UCI paths in run_arena/run_selfplay/tournament.
+Only configuration/default wiring changes here. The v4.x native net-vs-net
+fast paths require the NNU4 NnueNet API and therefore stay compiled against
+v403. NNU3 engines such as v322 use the UCI player paths for arena/tournament
+and tests/run_selfplay.py's persistent UCI workers for self-play.
 """
 from __future__ import annotations
 
@@ -24,19 +25,38 @@ def replace(path: str, old: str, new: str, *, required: bool = True) -> int:
     return n
 
 
-# Python test/arena wrappers: v3.22 is now the default code-under-test.
-replace("tests/run_arena.py", "zchezz_v402", "zchezz_v322")
+# Arena wrapper: HEAD/default players are v322, but the shared native arena
+# binary remains hosted by v403 because arena.c's in-process `net:` player uses
+# the NNU4-only NnueNet API. UCI players are architecture-neutral.
+replace("tests/run_arena.py",
+        'ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v402")',
+        'ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v322")')
+replace("tests/run_arena.py", r'uci:engine\c\zchezz_v402\zchezz.exe',
+        r'uci:engine\c\zchezz_v322\zchezz.exe')
 replace("tests/run_arena.py", '"gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavxvnni", "-mavx2",',
         '"gcc", "-O3", "-ffast-math", "-D_GNU_SOURCE", "-std=c11", "-mavx2",')
+# Native arena host/fallback: upgrade old v402 references to the current NNU4 host.
+replace("tests/run_arena.py", '"-I" + os.path.join("..", "c", "zchezz_v402")',
+        '"-I" + os.path.join("..", "c", "zchezz_v403")')
+replace("tests/run_arena.py", 'os.path.join("..", "c", "zchezz_v402", "board.c")',
+        'os.path.join("..", "c", "zchezz_v403", "board.c")')
+replace("tests/run_arena.py", 'os.path.join("..", "c", "zchezz_v402", "search.c")',
+        'os.path.join("..", "c", "zchezz_v403", "search.c")')
+replace("tests/run_arena.py", 'os.path.join("..", "c", "zchezz_v402", "nnue.c")',
+        'os.path.join("..", "c", "zchezz_v403", "nnue.c")')
+replace("tests/run_arena.py", '["make", "ENGINE=v402", "arena"]', '["make", "ENGINE=v403", "arena"]')
+replace("tests/run_arena.py", '["mingw32-make", "ENGINE=v402", "arena"]', '["mingw32-make", "ENGINE=v403", "arena"]')
 replace("tests/run_arena.py", "net:<path.nnu4>", "net:<weights-file>", required=False)
 
+# Persistent UCI self-play is architecture-neutral and becomes the v322 default.
 replace("tests/run_selfplay.py", r"engine\c\zchezz_v401\zchezz.exe", r"engine\c\zchezz_v322\zchezz.exe")
 replace("tests/run_selfplay.py", "Zchezz-v401", "Zchezz-v322")
 
+# Full tournament defaults to v322 vs the stable v314 reference.
 replace("tests/run_tournament.py", r"engine\c\zchezz_v402\zchezz.exe", r"engine\c\zchezz_v322\zchezz.exe")
 replace("tests/run_tournament.py", "Zchezz-v401", "Zchezz-v322")
 
-# Quick regression preset: current candidate versus the long-lived v3.14 baseline.
+# Quick regression preset: current candidate versus long-lived v3.14 baseline.
 replace("tests/run_tournament_quick.py", r"engine\c\zchezz_v401\zchezz.exe", r"engine\c\zchezz_v322\zchezz.exe")
 replace("tests/run_tournament_quick.py", '"label":    "v401-1T"', '"label":    "v322-1T"')
 replace("tests/run_tournament_quick.py", r"engine\c\zchezz_v400\zchezz.exe", r"engine\c\zchezz_v314\zchezz.exe")
@@ -50,9 +70,8 @@ replace("tests/run_tournament_quick.py", "#  CONFIGURATION — v4.01 vs v4.00 sa
 replace("tests/run_tournament_quick.py", "# ── v4.01 (trained) vs v4.00 (placeholder weights) sanity check ───────────────",
         "# ── v3.22 candidate vs v3.14 stable baseline ───────────────────────────────")
 
-# Native selfplay remains useful for NNU4. For NNU3, make the limitation explicit
-# and retarget its source defaults only when the active engine has the native-net API.
-# The general v3.22 selfplay path is tests/run_selfplay.py (persistent UCI workers).
+# Native selfplay remains the NNU4 fast path. Keep it on the current NNU4 host
+# and remove mandatory VNNI so the helper can build on ordinary AVX2 machines.
 replace("tests/run_selfplay_native.py", "make ENGINE=v402 selfplay", "make ENGINE=v403 selfplay")
 replace("tests/run_selfplay_native.py", 'ENGINE_DIR = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v402")',
         'ENGINE_DIR = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v403")')
@@ -61,16 +80,14 @@ replace("tests/run_selfplay_native.py", 'os.path.join("..", "c", "zchezz_v402")'
         'os.path.join("..", "c", "zchezz_v403")')
 replace("tests/run_selfplay_native.py", "v4.02: absolute path", "NNU4 host: absolute path", required=False)
 
-# Termux default follows the active release line.
+# Termux and canonical test runner follow the explicit active engine marker.
 replace("engine/build/build_termux.sh", 'VERSION="${1:-v401}"', 'VERSION="${1:-v322}"')
-
-# Canonical test runner must use the explicit active-engine marker, not numeric max.
 replace("tests/run_tests.py", "    latest_version,\n", "    active_version,\n")
 replace("tests/run_tests.py", "version = args.version or latest_version()", "version = args.version or active_version()")
 
-# Guardrail: no stale candidate default should survive in the main entry points.
+# Guardrails: stale *candidate defaults* must not survive. v403 references are
+# permitted only in native NNU4 tool-host wiring.
 checks = {
-    "tests/run_arena.py": ["zchezz_v402"],
     "tests/run_selfplay.py": [r"engine\c\zchezz_v401\zchezz.exe", "Zchezz-v401"],
     "tests/run_tournament.py": [r"engine\c\zchezz_v402\zchezz.exe", "Zchezz-v401"],
     "engine/build/build_termux.sh": ['VERSION="${1:-v401}"'],
@@ -80,5 +97,11 @@ for path, needles in checks.items():
     for needle in needles:
         if needle in text:
             raise SystemExit(f"{path}: stale default survived: {needle!r}")
+
+arena = (ROOT / "tests/run_arena.py").read_text(encoding="utf-8")
+for needle in ("ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, \"engine\", \"c\", \"zchezz_v322\")",
+               '"make", "ENGINE=v403", "arena"'):
+    if needle not in arena:
+        raise SystemExit(f"tests/run_arena.py: expected architecture routing missing: {needle}")
 
 print("v3.22 infrastructure retarget complete")
