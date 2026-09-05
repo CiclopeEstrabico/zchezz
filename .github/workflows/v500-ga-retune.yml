@@ -1,0 +1,164 @@
+name: v500-ga-retune
+
+on:
+  push:
+    branches: ["v500-strength"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ga-retune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install opening generator
+        run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Correct GA anchor to promoted v4.02/v4.03 defaults
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('engine/c/tools/ga_tune.c')
+          t = p.read_text(encoding='utf-8')
+          replacements = {
+            '{ "rfp_mult",                 "TUNE_RFP_MULT_DEFAULT",                  30,  200,  90, 1 },':
+            '{ "rfp_mult",                 "TUNE_RFP_MULT_DEFAULT",                  30,  200, 105, 1 },',
+            '{ "rfp_improving_bonus",      "TUNE_RFP_IMPROVING_BONUS_DEFAULT",        0,  150,  50, 1 },':
+            '{ "rfp_improving_bonus",      "TUNE_RFP_IMPROVING_BONUS_DEFAULT",        0,  150,  24, 1 },',
+            '{ "nmp_eval_bonus_threshold", "TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT",  50,  400, 200, 1 },':
+            '{ "nmp_eval_bonus_threshold", "TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT",  50,  400, 134, 1 },',
+            '{ "probcut_margin",           "TUNE_PROBCUT_MARGIN_DEFAULT",            50,  400, 200, 1 },':
+            '{ "probcut_margin",           "TUNE_PROBCUT_MARGIN_DEFAULT",            50,  400, 215, 1 },',
+            '{ "fut_mult",                 "TUNE_FUT_MULT_DEFAULT",                  50,  300, 150, 1 },':
+            '{ "fut_mult",                 "TUNE_FUT_MULT_DEFAULT",                  50,  300,  91, 1 },',
+            '{ "fut_improving_adj",        "TUNE_FUT_IMPROVING_ADJ_DEFAULT",          0,  150,  50, 1 },':
+            '{ "fut_improving_adj",        "TUNE_FUT_IMPROVING_ADJ_DEFAULT",          0,  150,  76, 1 },',
+          }
+          for old,new in replacements.items():
+              if old not in t:
+                  raise SystemExit(f'GA anchor missing: {old}')
+              t=t.replace(old,new,1)
+          p.write_text(t,encoding='utf-8')
+          PY
+
+      - name: Build v500 tuner and baselines
+        run: |
+          make -C engine/build ENGINE=v500 ga_tune
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Generate deterministic GA openings
+        run: |
+          mkdir -p artifacts/v500-ga
+          python - <<'PY'
+          import random, chess
+          from pathlib import Path
+          rng=random.Random(500500)
+          rows=[]; seen=set()
+          while len(rows)<256:
+              b=chess.Board(); ok=True
+              for _ in range(rng.randint(8,18)):
+                  moves=list(b.legal_moves)
+                  if not moves: ok=False; break
+                  quiet=[m for m in moves if not b.is_capture(m)]
+                  b.push(rng.choice(quiet if quiet and rng.random()<0.75 else moves))
+                  if b.is_game_over(claim_draw=True): ok=False; break
+              if not ok: continue
+              key=' '.join(b.fen().split()[:4])
+              if key not in seen:
+                  seen.add(key); rows.append(key)
+          Path('artifacts/v500-ga/openings.epd').write_text('\n'.join(rows)+'\n',encoding='utf-8')
+          PY
+
+      - name: Run short GA against actual v500 search anchor
+        run: |
+          cd engine/build
+          ./ga_tune.exe \
+            --net ../c/zchezz_v500/nnue_weights.bin \
+            --openings ../../artifacts/v500-ga/openings.epd \
+            --opening-plies 0 \
+            --pop 20 --generations 8 --games 12 --movetime 8 \
+            --max-plies 220 --threads 4 --tt-mb 4 \
+            --seed 500500 --elite 3 --tournament-k 3 \
+            --mutation-rate 0.22 --mutation-sigma 0.10 --crossover-rate 0.75 \
+            --update-baseline 0 \
+            --state ../../artifacts/v500-ga/ga_state.txt \
+            --best-out ../../artifacts/v500-ga/ga_best_params.h \
+            2>&1 | tee ../../artifacts/v500-ga/ga.log
+
+      - name: Materialize GA winner as an engine candidate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, shutil
+          src=Path('engine/c/zchezz_v500')
+          dst=Path('engine/c/zchezz_v500_ga')
+          if dst.exists(): shutil.rmtree(dst)
+          shutil.copytree(src,dst)
+          hdr=Path('artifacts/v500-ga/ga_best_params.h').read_text(encoding='utf-8')
+          search=(dst/'search.c').read_text(encoding='utf-8')
+          found=0
+          for macro,value in re.findall(r'^#define\s+(TUNE_[A-Z0-9_]+_DEFAULT)\s+([^\s]+)',hdr,re.M):
+              pat=rf'(#define\s+{re.escape(macro)}\s+)([^\s]+)'
+              search,n=re.subn(pat,rf'\g<1>{value}',search,count=1)
+              if n!=1: raise SystemExit(f'missing search macro {macro}')
+              found+=1
+          if found!=13: raise SystemExit(f'expected 13 tuned macros, found {found}')
+          (dst/'search.c').write_text(search,encoding='utf-8')
+          PY
+          make -C engine/build ENGINE=v500_ga native
+
+      - name: Validate GA winner at fixed nodes vs v500
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_ga/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 192 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
+            --openings artifacts/v500-ga/openings.epd --opening-plies 0 \
+            --seed 500501 --tt-mb 16 \
+            --json artifacts/v500-ga/ga_vs_v500_10kn.json \
+            --pgn artifacts/v500-ga/ga_vs_v500_10kn.pgn
+
+      - name: Validate GA winner at fixed nodes vs v314
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_ga/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 192 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
+            --openings artifacts/v500-ga/openings.epd --opening-plies 0 \
+            --seed 500502 --tt-mb 16 \
+            --json artifacts/v500-ga/ga_vs_v314_10kn.json \
+            --pgn artifacts/v500-ga/ga_vs_v314_10kn.pgn
+
+      - name: Validate GA winner at 50 ms vs v314
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_ga/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 50 --nodes 0 --max-plies 260 \
+            --openings artifacts/v500-ga/openings.epd --opening-plies 0 \
+            --seed 500503 --tt-mb 16 \
+            --json artifacts/v500-ga/ga_vs_v314_50ms.json \
+            --pgn artifacts/v500-ga/ga_vs_v314_50ms.pgn
+
+      - name: Upload GA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v500-ga-retune
+          path: artifacts/v500-ga/
+          if-no-files-found: warn
