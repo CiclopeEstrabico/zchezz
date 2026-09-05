@@ -57,10 +57,13 @@ if "v3.20: AVX-VNNI path ported from v4.02" not in text:
     NNUE.write_text(text, encoding="utf-8")
 
 main = MAIN.read_text(encoding="utf-8")
-if "Zchezz 3.20" not in main:
-    if "Zchezz 3.14" not in main:
-        raise SystemExit("could not find the v3.14 UCI version string")
-    main = main.replace("Zchezz 3.14", "Zchezz 3.20")
+old_version = '#define ENGINE_VERSION "3.14"'
+new_version = '#define ENGINE_VERSION "3.20"'
+if new_version not in main:
+    if old_version not in main:
+        raise SystemExit("could not find the v3.14 ENGINE_VERSION macro")
+    main = main.replace(old_version, new_version, 1)
+    main = main.replace("main.c — Zchezz v3.14 UCI engine", "main.c — Zchezz v3.20 UCI engine", 1)
     MAIN.write_text(main, encoding="utf-8")
 
 print("v3.20 source upgrade materialized")
