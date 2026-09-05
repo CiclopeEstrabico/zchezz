@@ -48,7 +48,13 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - name: Deterministic smoke
-        run: python tests/run_tests.py smoke --version v403 --baseline v402 --keep-going
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < engine/ACTIVE_ENGINE)"
+          BASELINE="$(python -c "import sys; sys.path.insert(0, 'utils'); from repo_paths import previous_version; print(previous_version('$VERSION'))")"
+          echo "candidate=$VERSION baseline=$BASELINE cc=$CC"
+          python tests/run_tests.py smoke --version "$VERSION" --baseline "$BASELINE" --keep-going
       - name: Upload smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,12 +74,19 @@ jobs:
         with:
           python-version: "3.12"
       - name: ASan and UBSan build
-        run: make -C engine/build ENGINE=v403 sanitize
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < engine/ACTIVE_ENGINE)"
+          make -C engine/build ENGINE="$VERSION" sanitize
       - name: Exercise sanitized engine
-        run: >-
-          python tests/test_uci_extended.py
-          --exe engine/c/zchezz_v403/zchezz_sanitize.exe
-          --only T1 --only T2
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < engine/ACTIVE_ENGINE)"
+          python tests/test_uci_extended.py \
+            --exe "engine/c/zchezz_${VERSION}/zchezz_sanitize.exe" \
+            --only T1 --only T2
 
   web:
     runs-on: ubuntu-24.04
@@ -89,7 +102,13 @@ jobs:
       - run: pip install -e ".[all]"
       - run: python -m playwright install --with-deps chromium
       - name: Web profile
-        run: python tests/run_tests.py web --version v403 --baseline v402 --keep-going
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < engine/ACTIVE_ENGINE)"
+          BASELINE="$(python -c "import sys; sys.path.insert(0, 'utils'); from repo_paths import previous_version; print(previous_version('$VERSION'))")"
+          echo "candidate=$VERSION baseline=$BASELINE"
+          python tests/run_tests.py web --version "$VERSION" --baseline "$BASELINE" --keep-going
       - name: Upload web evidence
         if: always()
         uses: actions/upload-artifact@v4
