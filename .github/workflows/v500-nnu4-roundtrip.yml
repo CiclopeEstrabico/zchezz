@@ -1,0 +1,45 @@
+name: v500-nnu4-roundtrip
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - "train/import_nnu4.py"
+      - "train/export_nnu4.py"
+      - ".github/workflows/v500-nnu4-roundtrip.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install numeric dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: NNU4 to PyTorch to NNU4
+        run: |
+          python train/import_nnu4.py \
+            --src engine/c/zchezz_v500/nnue_weights.bin \
+            --dst /tmp/v500-bootstrap.pt
+          python train/export_nnu4.py \
+            --ckpt /tmp/v500-bootstrap.pt \
+            --dst /tmp/v500-roundtrip.bin
+
+      - name: Require byte-identical round trip
+        run: |
+          sha256sum engine/c/zchezz_v500/nnue_weights.bin /tmp/v500-roundtrip.bin
+          cmp engine/c/zchezz_v500/nnue_weights.bin /tmp/v500-roundtrip.bin
+          echo 'NNU4 round trip is byte-identical.'

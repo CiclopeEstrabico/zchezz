@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Convert an NNU4 engine weight file back into a PyTorch transfer checkpoint.
 
-v5.00 uses this only as a warm start.  It lets generation 0 fine-tune the
-already useful v4.03/v5.00 HalfKP network instead of throwing it away and
-starting from random weights.
+v5.00 uses this as a warm start: generation 0 fine-tunes the already useful
+v4.03/v5.00 HalfKP network instead of discarding it and starting randomly.
 
-The conversion is the exact inverse of export_nnu4.py's quantization:
+This is the exact inverse of train/export_nnu4.py for the fixed NNU4 format:
   L1W int16 / QA
   L1B int32 / QA
   L2W int8  / QB
-  L2B int32 / (((QA*QA)>>SHIFT) * QB)
+  L2B int32 / (QA_EFF * QB)
   L3W int8  / QB
   L3B float32 unchanged
 
-No legacy handcrafted features are introduced; the imported architecture is
-still HalfKP-4Bucket 2560->512, dual-perspective concat 1024->32->1.
+A no-training import -> export round trip is required to be byte-identical.
+The CI workflow v500-nnu4-roundtrip.yml enforces that invariant.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import struct
 from pathlib import Path
 
@@ -31,6 +31,10 @@ L1_OUT = 512
 L2_IN = 1024
 L2_OUT = 32
 L3_IN = 32
+QA = 255.0
+QB = 64.0
+SHIFT = 8.0
+OUT_SCALE = 320.0 / (QB * QB)
 
 
 def read_nnu4(path: Path) -> tuple[dict[str, torch.Tensor], dict]:
@@ -50,11 +54,15 @@ def read_nnu4(path: Path) -> tuple[dict[str, torch.Tensor], dict]:
 
     qa, qb, shift, out_scale = struct.unpack_from("<4f", data, off)
     off += 16
-    if qa <= 0 or qb <= 0:
-        raise ValueError(f"{path}: invalid quantization scales qa={qa}, qb={qb}")
+    expected_scales = (("QA", qa, QA), ("QB", qb, QB),
+                       ("SHIFT", shift, SHIFT), ("OUT_SCALE", out_scale, OUT_SCALE))
+    for name, got, expected in expected_scales:
+        if not math.isclose(got, expected, rel_tol=0.0, abs_tol=1e-7):
+            raise ValueError(f"{path}: {name}={got}, expected fixed NNU4 value {expected}")
+
     qa_eff = int((qa * qa) // (1 << int(shift)))
-    if qa_eff <= 0:
-        raise ValueError(f"{path}: invalid derived QA_EFF={qa_eff}")
+    if qa_eff != 254:
+        raise ValueError(f"{path}: derived QA_EFF={qa_eff}, expected 254")
 
     def take(dtype: str, count: int) -> np.ndarray:
         nonlocal off
@@ -100,7 +108,10 @@ def convert(src: Path, dst: Path) -> None:
     weights, meta = read_nnu4(src)
     dst.parent.mkdir(parents=True, exist_ok=True)
     ckpt = {
-        "epoch": 0,
+        # Preserve the source epoch so a pure import/export is byte-identical.
+        # train_nnue.py still starts transfer learning at epoch 0 because the
+        # dataset tag below intentionally differs from the target dataset tag.
+        "epoch": meta["source_epoch"],
         "dataset": "v500_bootstrap_nnu4",
         "avg_loss": None,
         "val_loss": None,
@@ -121,7 +132,10 @@ def convert(src: Path, dst: Path) -> None:
     }
     torch.save(ckpt, dst)
     print(f"[bootstrap] {src} -> {dst}")
-    print(f"[bootstrap] source_epoch={meta['source_epoch']} QA={meta['qa']:g} QB={meta['qb']:g} OUT_SCALE={meta['out_scale']:g}")
+    print(
+        f"[bootstrap] source_epoch={meta['source_epoch']} "
+        f"QA={meta['qa']:g} QB={meta['qb']:g} OUT_SCALE={meta['out_scale']:g}"
+    )
 
 
 def main() -> int:
