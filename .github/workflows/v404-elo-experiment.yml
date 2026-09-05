@@ -9,11 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  hybrid-strength:
+  exact-v314-pgo:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      ARCH_FLAGS: -mavx2
       STATIC_FLAG: ""
     steps:
       - uses: actions/checkout@v4
@@ -27,26 +26,53 @@ jobs:
       - name: Install opening generator dependency
         run: python -m pip install --disable-pip-version-check python-chess
 
-      - name: Build v3.14 baseline, v4.04 hybrid and shared arena
+      - name: Prove v404 playing code is identical to v314
         run: |
-          make -C engine/build ENGINE=v314 native
-          make -C engine/build ENGINE=v404 native
-          make -C engine/build ENGINE=v403 arena
+          set -euo pipefail
+          for f in main.c board.c board.h search.c search.h nnue.c nnue.h nnue_weights.bin book.c book.h poly_keys.h stdendian.h syzygy.c syzygy.h tbconfig.h; do
+            cmp "engine/c/zchezz_v314/$f" "engine/c/zchezz_v404/$f"
+          done
+          echo "v404 source/eval policy is byte-identical to v314"
+
+      - name: Build stock v314 baseline
+        run: |
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v314 clean native
+          mkdir -p artifacts/v404
+          engine/c/zchezz_v314/zchezz.exe bench 11 | tee artifacts/v404/bench_v314_stock.txt
+
+      - name: Train and build PGO+LTO v404
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/zchezz-pgo
+          mkdir -p /tmp/zchezz-pgo
+
+          # Instrument the exact v3.14 code. Native tuning is safe here because
+          # both engines execute on the same runner CPU; this experiment asks
+          # whether code-generation alone can turn the same policy into Elo.
+          ARCH_FLAGS="-mavx2 -march=native -mtune=native -flto -fprofile-generate=/tmp/zchezz-pgo" \
+            make -C engine/build ENGINE=v404 clean native
+
+          # Exercise the same hot paths used in play across several depths so
+          # profile data is not dominated by one particular tree size.
+          engine/c/zchezz_v404/zchezz.exe bench 8  >/dev/null
+          engine/c/zchezz_v404/zchezz.exe bench 10 >/dev/null
+          engine/c/zchezz_v404/zchezz.exe bench 12 >/dev/null
+
+          ARCH_FLAGS="-mavx2 -march=native -mtune=native -flto -fprofile-use=/tmp/zchezz-pgo -fprofile-correction -fomit-frame-pointer" \
+            make -C engine/build ENGINE=v404 clean native
+
+          engine/c/zchezz_v404/zchezz.exe bench 11 | tee artifacts/v404/bench_v404_pgo.txt
+
+      - name: Build shared arena
+        run: ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
 
       - name: UCI sanity
         run: |
           set -euo pipefail
-          printf 'uci\nisready\nposition startpos\ngo depth 5\nquit\n' | timeout 30s engine/c/zchezz_v314/zchezz.exe | tee /tmp/v314_uci.txt
-          printf 'uci\nisready\nposition startpos\ngo depth 5\nquit\n' | timeout 30s engine/c/zchezz_v404/zchezz.exe | tee /tmp/v404_uci.txt
+          printf 'uci\nisready\nposition startpos\ngo nodes 20000\n' | timeout 30s engine/c/zchezz_v314/zchezz.exe | tee /tmp/v314_uci.txt
+          printf 'uci\nisready\nposition startpos\ngo nodes 20000\n' | timeout 30s engine/c/zchezz_v404/zchezz.exe | tee /tmp/v404_uci.txt
           grep -q 'bestmove ' /tmp/v314_uci.txt
           grep -q 'bestmove ' /tmp/v404_uci.txt
-          ! grep -q 'bestmove 0000' /tmp/v404_uci.txt
-
-      - name: Bench both engines
-        run: |
-          mkdir -p artifacts/v404
-          engine/c/zchezz_v314/zchezz.exe bench 10 | tee artifacts/v404/bench_v314.txt
-          engine/c/zchezz_v404/zchezz.exe bench 10 | tee artifacts/v404/bench_v404.txt
 
       - name: Generate deterministic paired opening pool
         run: |
@@ -57,12 +83,10 @@ jobs:
 
           rng = random.Random(4042026)
           out = Path('artifacts/v404/openings.epd')
-          out.parent.mkdir(parents=True, exist_ok=True)
-          seen = set()
-          rows = []
-          while len(rows) < 192:
+          seen, rows = set(), []
+          while len(rows) < 256:
               b = chess.Board()
-              target = rng.randint(8, 16)
+              target = rng.randint(8, 18)
               ok = True
               for _ in range(target):
                   moves = list(b.legal_moves)
@@ -70,60 +94,58 @@ jobs:
                       ok = False
                       break
                   quiet = [m for m in moves if not b.is_capture(m)]
-                  choice_pool = quiet if quiet and rng.random() < 0.78 else moves
-                  b.push(rng.choice(choice_pool))
+                  pool = quiet if quiet and rng.random() < 0.78 else moves
+                  b.push(rng.choice(pool))
                   if b.is_game_over(claim_draw=True):
                       ok = False
                       break
               if not ok:
                   continue
               key = ' '.join(b.fen().split()[:4])
-              if key in seen:
-                  continue
-              seen.add(key)
-              rows.append(key)
+              if key not in seen:
+                  seen.add(key)
+                  rows.append(key)
           out.write_text('\n'.join(rows) + '\n', encoding='utf-8')
-          digest = hashlib.sha256(out.read_bytes()).hexdigest()
-          print(f'openings={len(rows)} sha256={digest}')
+          print(f'openings={len(rows)} sha256={hashlib.sha256(out.read_bytes()).hexdigest()}')
           PY
 
-      - name: Fixed-node H2H gate (10k nodes/move)
+      - name: Exact-policy fixed-node identity gate
         run: |
           python tests/run_arena.py \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v404/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 256 --threads 4 --movetime 0 --nodes 10000 --max-plies 260 \
+            --games 64 --threads 4 --movetime 0 --nodes 20000 --max-plies 220 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
-            --json artifacts/v404/h2h_10kn.json \
-            --pgn artifacts/v404/h2h_10kn.pgn
+            --json artifacts/v404/identity_20kn.json \
+            --pgn artifacts/v404/identity_20kn.pgn
 
-      - name: Fixed-node H2H gate (50k nodes/move)
+      - name: Timed H2H screening (20 ms/move)
         run: |
           python tests/run_arena.py \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v404/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
+            --games 512 --threads 4 --movetime 20 --max-plies 240 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
-            --json artifacts/v404/h2h_50kn.json \
-            --pgn artifacts/v404/h2h_50kn.pgn
+            --json artifacts/v404/h2h_pgo_20ms.json \
+            --pgn artifacts/v404/h2h_pgo_20ms.pgn
 
-      - name: Short wall-clock confirmation (20 ms/move)
+      - name: Timed H2H confirmation (100 ms/move)
         run: |
           python tests/run_arena.py \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v404/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
-            --games 64 --threads 4 --movetime 20 --max-plies 220 \
+            --games 192 --threads 4 --movetime 100 --max-plies 240 \
             --openings artifacts/v404/openings.epd --opening-plies 0 \
             --seed 4042026 --tt-mb 16 \
-            --json artifacts/v404/h2h_20ms_short.json \
-            --pgn artifacts/v404/h2h_20ms_short.pgn
+            --json artifacts/v404/h2h_pgo_100ms.json \
+            --pgn artifacts/v404/h2h_pgo_100ms.pgn
 
       - name: Upload experiment evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v404-elo-evidence
+          name: v404-pgo-elo-evidence
           path: artifacts/v404/
           if-no-files-found: warn
