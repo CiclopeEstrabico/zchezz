@@ -43,12 +43,14 @@ jobs:
           diff -ur engine/c/zchezz_v321base engine/c/zchezz_v321cand > "artifacts/v321-round4/$VARIANT/patch.diff" || true
           test -s "artifacts/v321-round4/$VARIANT/patch.diff"
 
-      - name: Build with release SIMD flags
+      - name: Build with CI-safe SIMD flags
         shell: bash
         run: |
           set -euo pipefail
-          ARCH_FLAGS="-mavxvnni -mavx2" make -C engine/build ENGINE=v321base clean native
-          ARCH_FLAGS="-mavxvnni -mavx2" make -C engine/build ENGINE=v321cand clean native
+          # GitHub-hosted runners used here do not expose AVX-VNNI at runtime.
+          # Both sides therefore use AVX2 so the only difference is the tested source change.
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321base clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v321cand clean native
           ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v403 arena
           engine/c/zchezz_v321base/zchezz.exe bench 11 | tee "artifacts/v321-round4/$VARIANT/bench_base.txt"
           engine/c/zchezz_v321cand/zchezz.exe bench 11 | tee "artifacts/v321-round4/$VARIANT/bench_candidate.txt"
@@ -98,7 +100,7 @@ jobs:
             --json "artifacts/v321-round4/$VARIANT/fixed_20kn.json" \
             --pgn "artifacts/v321-round4/$VARIANT/fixed_20kn.pgn"
 
-      - name: Timed Elo with release flags
+      - name: Timed Elo
         shell: bash
         run: |
           set -euo pipefail
