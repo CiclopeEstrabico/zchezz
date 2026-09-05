@@ -1,0 +1,325 @@
+name: v500-static-distill
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-static-distill.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  static-distill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v500-strength
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Recover all 10k-game self-play shards
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+
+      - name: Count available positions
+        run: |
+          mkdir -p artifacts/static_distill
+          python - <<'PY' | tee artifacts/static_distill/corpus.txt
+          import glob, os, sys
+          sys.path.insert(0, 'train')
+          import dataset
+          total = 0
+          for g in range(10):
+              pat = f'data/v500_selfplay/gen{g:02d}/*.bin'
+              files = sorted(glob.glob(pat))
+              assert files, pat
+              ds = dataset.MultiShardSelfplay(files)
+              print(f'gen{g:02d}: {len(ds):,} positions in {len(files)} shard(s)')
+              total += len(ds)
+          print(f'TOTAL: {total:,} positions')
+          assert total >= 500_000, total
+          PY
+
+      - name: Build native static relabelers for v5 and v3.14
+        run: |
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=500 \
+            -Iengine/c/zchezz_v500 -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_v500/nnue.c \
+            -lm -o relabel_v500
+          gcc -O3 -std=c11 -mavx2 -DSAMPLE_ENGINE_VERSION=314 \
+            -Iengine/c/zchezz_v314 -Iengine/c/tools \
+            engine/c/tools/relabel_static.c engine/c/zchezz_v314/nnue.c \
+            -lm -o relabel_v314
+
+      - name: Relabel every position with raw v5 and v3.14 static eval
+        run: |
+          mkdir -p data/static500 data/static314
+          for G in 00 01 02 03 04 05 06 07 08 09; do
+            IN="data/v500_selfplay/gen${G}/selfplay_000.bin"
+            test -f "$IN"
+            ./relabel_v500 --input "$IN" --output "data/static500/gen${G}.bin" \
+              --nnue engine/c/zchezz_v500/nnue_weights.bin
+            ./relabel_v314 --input "$IN" --output "data/static314/gen${G}.bin" \
+              --nnue engine/c/zchezz_v314/nnue_weights.bin
+          done
+
+      - name: Full Python-QAT versus C-integer forward parity
+        run: |
+          python train/import_nnu4.py \
+            --src engine/c/zchezz_v500/nnue_weights.bin \
+            --dst checkpoints/v500_static_parity.pt
+          python - <<'PY' | tee artifacts/static_distill/forward_parity.txt
+          import glob, json, math, sys
+          from pathlib import Path
+          import numpy as np
+          import torch
+          sys.path.insert(0, 'train')
+          import dataset
+          from encoding import encode_mailbox_batch
+          from model import NNUE
+
+          ck = torch.load('checkpoints/v500_static_parity.pt', map_location='cpu')
+          m = NNUE().eval()
+          m.load_state_dict(ck['weights'])
+          ds = dataset.MultiShardSelfplay(sorted(glob.glob('data/static500/*.bin')))
+          rng = np.random.default_rng(500314)
+          n = min(20000, len(ds))
+          idx = np.sort(rng.choice(len(ds), size=n, replace=False))
+          r = ds.get_batch(idx)
+          stm_i, stm_o, opp_i, opp_o = encode_mailbox_batch(r['board'], r['stm'])
+          with torch.no_grad():
+              p = m(torch.from_numpy(stm_i).long(), torch.from_numpy(stm_o),
+                    torch.from_numpy(opp_i).long(), torch.from_numpy(opp_o)).numpy()
+          p = np.clip(p, 1e-7, 1-1e-7)
+          py_cp = 320.0 * np.log(p / (1.0-p))
+          c_cp = r['eval_cp'].astype(np.float64)
+          err = py_cp - c_cp
+          pearson = float(np.corrcoef(py_cp, c_cp)[0,1])
+          mae = float(np.mean(np.abs(err)))
+          rmse = float(np.sqrt(np.mean(err*err)))
+          p95 = float(np.quantile(np.abs(err), .95))
+          mx = float(np.max(np.abs(err)))
+          sign = float(np.mean(np.sign(py_cp) == np.sign(c_cp)))
+          out = dict(n=n, pearson=pearson, mae_cp=mae, rmse_cp=rmse,
+                     p95_abs_cp=p95, max_abs_cp=mx, sign_agreement=sign)
+          print(json.dumps(out, indent=2))
+          Path('artifacts/static_distill/forward_parity.json').write_text(json.dumps(out, indent=2))
+          # Broad enough to tolerate integer rounding, strict enough to catch
+          # a scale/orientation/concat mismatch before wasting an Elo run.
+          assert pearson > 0.995, out
+          assert mae < 25.0, out
+          assert sign > 0.97, out
+          PY
+
+      - name: Train identity control and two v3.14-static candidates
+        run: |
+          python - <<'PY'
+          import glob, os, shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, 'train')
+          import train_nnue as tn
+          from import_nnu4 import import_nnu4
+
+          bootstrap = Path('checkpoints/static_bootstrap.pt')
+          bootstrap.parent.mkdir(parents=True, exist_ok=True)
+          import_nnu4('engine/c/zchezz_v500/nnue_weights.bin', str(bootstrap))
+
+          recipes = [
+              ('identity', 'data/static500/*.bin', 1.0e-5, 6),
+              ('teacher_lr1e5', 'data/static314/*.bin', 1.0e-5, 12),
+              ('teacher_lr3e5', 'data/static314/*.bin', 3.0e-5, 12),
+          ]
+          for name, path, lr, epochs in recipes:
+              out = Path('checkpoints') / name
+              shutil.rmtree(out, ignore_errors=True)
+              out.mkdir(parents=True, exist_ok=True)
+              ns = tn.build_arg_parser().parse_args([])
+              ns.ckpt_dir = str(out)
+              ns.dataset_name = f'v500_{name}_static'
+              ns.epochs = epochs
+              ns.batch_size = 8192
+              ns.max_positions_chunk = 1_100_000
+              ns.lr = 1e-3
+              ns.transfer_lr = lr
+              ns.weight_decay = 0.0
+              ns.workers = 4
+              ns.device = 'cpu'
+              ns.val_every = 1
+              ns.resample_each_epoch = False
+              ns.encode_cache = False
+              ns.show_config = False
+              ns.checkpoint_source = str(bootstrap)
+              ns.seed = 540000 + len(name)
+              ns.sources = [tn.SourceSpec(
+                  kind='bin', path=path, k=0.0, train_pct=1.0,
+                  val_frac=0.02, name=name)]
+              print(f'\n=== TRAIN {name}: lr={lr} epochs={epochs} ===')
+              tn.train(ns)
+          PY
+
+      - name: Export candidates
+        run: |
+          for C in identity teacher_lr1e5 teacher_lr3e5; do
+            mkdir -p "artifacts/static_distill/$C"
+            CKPT=$(ls -t checkpoints/$C/*.pt | head -1)
+            python train/export_nnu4.py --ckpt "$CKPT" \
+              --dst "artifacts/static_distill/$C/nnue_weights.bin"
+            sha256sum "artifacts/static_distill/$C/nnue_weights.bin"
+          done
+          sha256sum engine/c/zchezz_v500/nnue_weights.bin
+
+      - name: Build candidates and arena
+        run: |
+          for C in identity teacher_lr1e5 teacher_lr3e5; do
+            rm -rf "engine/c/zchezz_v500_${C}"
+            cp -a engine/c/zchezz_v500 "engine/c/zchezz_v500_${C}"
+            cp "artifacts/static_distill/$C/nnue_weights.bin" \
+              "engine/c/zchezz_v500_${C}/nnue_weights.bin"
+            make -C engine/build "ENGINE=v500_${C}" native
+          done
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v500 arena
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, 'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/static_distill/gate_openings.epd', 541731, 384)
+          PY
+
+      - name: Identity-control Elo gate
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_identity/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 64 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 542000 --tt-mb 16 \
+            --json artifacts/static_distill/identity/vs_v500_nodes.json \
+            --pgn artifacts/static_distill/identity/vs_v500_nodes.pgn
+
+      - name: Teacher candidates versus current v5 at fixed nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_teacher_lr1e5/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 542100 --tt-mb 16 \
+            --json artifacts/static_distill/teacher_lr1e5/vs_v500_nodes.json \
+            --pgn artifacts/static_distill/teacher_lr1e5/vs_v500_nodes.pgn
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_teacher_lr3e5/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 542101 --tt-mb 16 \
+            --json artifacts/static_distill/teacher_lr3e5/vs_v500_nodes.json \
+            --pgn artifacts/static_distill/teacher_lr3e5/vs_v500_nodes.pgn
+
+      - name: Teacher candidates versus current v5 at fixed time
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_teacher_lr1e5/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 542200 --tt-mb 16 \
+            --json artifacts/static_distill/teacher_lr1e5/vs_v500_time.json \
+            --pgn artifacts/static_distill/teacher_lr1e5/vs_v500_time.pgn
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_teacher_lr3e5/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 96 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 542201 --tt-mb 16 \
+            --json artifacts/static_distill/teacher_lr3e5/vs_v500_time.json \
+            --pgn artifacts/static_distill/teacher_lr3e5/vs_v500_time.pgn
+
+      - name: Select best static-distilled candidate
+        id: choose
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          def elo(path): return json.load(open(path))['pairings'][0]['elo']
+          scores = {}
+          for c in ('teacher_lr1e5','teacher_lr3e5'):
+              scores[c] = (elo(f'artifacts/static_distill/{c}/vs_v500_nodes.json') +
+                           elo(f'artifacts/static_distill/{c}/vs_v500_time.json')) / 2.0
+          best = max(scores, key=scores.get)
+          print(f'best={best}')
+          print(f'best_avg={scores[best]}')
+          print(f'scores={scores}')
+          PY
+
+      - name: Best candidate versus v3.14 at fixed nodes
+        run: |
+          C='${{ steps.choose.outputs.best }}'
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_${C}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 543000 --tt-mb 16 \
+            --json "artifacts/static_distill/${C}/vs_v314_nodes.json" \
+            --pgn "artifacts/static_distill/${C}/vs_v314_nodes.pgn"
+
+      - name: Best candidate versus v3.14 at fixed time
+        run: |
+          C='${{ steps.choose.outputs.best }}'
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_${C}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/static_distill/gate_openings.epd --opening-plies 0 \
+            --seed 543001 --tt-mb 16 \
+            --json "artifacts/static_distill/${C}/vs_v314_time.json" \
+            --pgn "artifacts/static_distill/${C}/vs_v314_time.pgn"
+
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          print('=== STATIC DISTILLATION ===')
+          p=Path('artifacts/static_distill/forward_parity.json')
+          if p.exists(): print('forward parity:', p.read_text())
+          for c in ('identity','teacher_lr1e5','teacher_lr3e5'):
+              print('\n', c)
+              for n in ('vs_v500_nodes.json','vs_v500_time.json','vs_v314_nodes.json','vs_v314_time.json'):
+                  p=Path(f'artifacts/static_distill/{c}/{n}')
+                  if not p.exists(): continue
+                  x=json.loads(p.read_text())['pairings'][0]
+                  print(f'{n}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - name: Upload evidence and candidate weights
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v500-static-distill-results
+          path: artifacts/static_distill/
+          retention-days: 30
