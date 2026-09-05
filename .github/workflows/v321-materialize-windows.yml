@@ -1,0 +1,39 @@
+name: v321-materialize-windows
+
+on:
+  push:
+    branches: [v321-search-strength]
+    paths:
+      - '.github/workflows/v321-materialize-windows.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Materialize exact confirmed bundle
+        shell: pwsh
+        run: |
+          python tools/finalize_v321.py strong_plus_prefetch
+          Select-String -Path engine/c/zchezz_v321/main.c -Pattern '#define ENGINE_VERSION "3.21"' -Quiet | ForEach-Object { if (-not $_) { exit 1 } }
+          Select-String -Path engine/c/zchezz_v321/search.c -Pattern 'static_eval - beta > 134' -Quiet | ForEach-Object { if (-not $_) { exit 1 } }
+          Select-String -Path engine/c/zchezz_v321/nnue.c -Pattern '_mm_prefetch' -Quiet | ForEach-Object { if (-not $_) { exit 1 } }
+      - name: Commit v3.21 source
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add engine/c/zchezz_v321
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { throw 'No source changes to commit' }
+          git commit -m 'v3.21: materialize confirmed search-strength bundle'
+          git push origin HEAD:v321-search-strength
