@@ -1,0 +1,47 @@
+name: v322-materialize
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v322-nps-strength]
+    paths: ['.github/workflows/v322-materialize.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Materialize v3.22 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf engine/c/zchezz_v322
+          cp -a engine/c/zchezz_v321 engine/c/zchezz_v322
+          python tools/v322_apply_hotpath2.py feature_state_cache16 --root engine/c/zchezz_v322
+          python tools/v322_tune_quiet_see.py d4x60 --root engine/c/zchezz_v322
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('engine/c/zchezz_v322/main.c')
+          s=p.read_text(encoding='utf-8')
+          old='#define ENGINE_VERSION "3.21"'
+          if s.count(old) != 1:
+              raise SystemExit(f'ENGINE_VERSION marker mismatch: {s.count(old)}')
+          p.write_text(s.replace(old, '#define ENGINE_VERSION "3.22"', 1), encoding='utf-8')
+          PY
+      - name: Commit v3.22
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add engine/c/zchezz_v322
+          git diff --cached --check
+          git commit -m 'v3.22: add quiet SEE pruning and feature-state cache'
+          git push origin HEAD:v322-nps-strength
