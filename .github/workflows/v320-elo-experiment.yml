@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           test -d engine/c/zchezz_v320
-          grep -q 'Zchezz 3.20' engine/c/zchezz_v320/main.c
+          grep -q 'ENGINE_VERSION "3.20"' engine/c/zchezz_v320/main.c
           grep -q '__AVXVNNI__' engine/c/zchezz_v320/nnue.c
           cmp engine/c/zchezz_v314/nnue_weights.bin engine/c/zchezz_v320/nnue_weights.bin
           cmp engine/c/zchezz_v314/search.c engine/c/zchezz_v320/search.c
