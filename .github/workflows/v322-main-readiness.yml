@@ -1,6 +1,8 @@
 name: v322-main-readiness
 
 on:
+  push:
+    branches: [v322-nps-strength]
   workflow_dispatch:
   pull_request:
     branches: [v322-nps-strength]
@@ -8,13 +10,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: v322-main-readiness-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  infrastructure:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+  readiness:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       STATIC_FLAG: ''
+      ARCH_FLAGS: '-mavx2'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,8 +32,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Python smoke-test dependencies
-        run: python -m pip install --disable-pip-version-check python-chess numpy pandas pyarrow torch
+      - name: Install test and WASM dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check \
+            python-chess numpy pandas pyarrow torch pytest
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends emscripten
+          emcc --version
 
       - name: Materialize v3.22 infrastructure defaults
         run: python tools/v322_retarget_infrastructure.py
@@ -46,38 +60,58 @@ jobs:
           assert engine_dir().name == 'zchezz_v322'
           print('active engine:', active_version(), engine_dir())
           PY
+          python tests/run_selfplay.py --show-config >/dev/null
+          python tests/run_tournament.py --show-config >/dev/null
+          python tests/run_tournament_quick.py --show-config >/dev/null
+          python tests/run_arena.py --help >/dev/null
+          python tests/run_selfplay_native.py --help >/dev/null
 
-      - name: NNU3 encoder, train and export smoke tests
+      - name: Exercise NNU3 encoder, real training loop and export
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p artifacts/nnu3-smoke/data artifacts/nnu3-smoke/checkpoints
           python train/encoding_nnu3.py
           python train/train_nnu3.py --self-test
-          mkdir -p checkpoints/v322-smoke artifacts/nnu3-smoke
           python - <<'PY'
-          import sys, torch
-          sys.path.insert(0, 'train')
-          from model_nnu3 import NNUE, architecture_dict
-          model = NNUE()
-          torch.save({
-              'format': 'zchezz_nnu3_checkpoint_v1',
-              'arch': architecture_dict(),
-              'dataset_name': 'ci-smoke',
-              'epoch': 1,
-              'lr': 1e-3,
-              'model': model.state_dict(),
-          }, 'checkpoints/v322-smoke/smoke.pt')
+          import random
+          import chess
+          import pandas as pd
+
+          rng = random.Random(322)
+          rows = []
+          for i in range(96):
+              board = chess.Board()
+              for _ in range(2 + (i % 10)):
+                  if board.is_game_over():
+                      break
+                  board.push(rng.choice(list(board.legal_moves)))
+              rows.append({'fen': board.fen(), 'cp': float((i % 9 - 4) * 25), 'result': 0.5})
+          pd.DataFrame(rows).to_parquet('artifacts/nnu3-smoke/data/tiny.parquet', index=False)
           PY
+          python train/train_nnu3.py \
+            --source kind=parquet,path=artifacts/nnu3-smoke/data/tiny.parquet,train_pct=1,val_frac=.20,lam=0 \
+            --checkpoint-source new \
+            --ckpt-dir artifacts/nnu3-smoke/checkpoints \
+            --dataset-name ci-smoke \
+            --epochs 1 --batch-size 16 --max-positions-chunk 96 \
+            --parquet-chunk-rows 96 --max-val-positions 96 \
+            --workers 1 --device cpu
+          CKPT="$(find artifacts/nnu3-smoke/checkpoints -name '*.pt' -print -quit)"
+          test -n "$CKPT"
           python train/export_nnu3.py \
-            --checkpoint checkpoints/v322-smoke/smoke.pt \
+            --checkpoint "$CKPT" \
             --output artifacts/nnu3-smoke/nnue_weights.bin
           test "$(stat -c%s artifacts/nnu3-smoke/nnue_weights.bin)" = 426864
 
-      - name: Build v3.22 and load exported NNU3
+      - name: Build v3.22 and v3.14 native engines
         shell: bash
         run: |
           set -euo pipefail
-          ARCH_FLAGS='-mavx2' make -C engine/build ENGINE=v322 clean native
+          make -C engine/build ENGINE=v322 clean native
+          make -C engine/build ENGINE=v314 clean native
+          test -x engine/c/zchezz_v322/zchezz.exe
+          test -x engine/c/zchezz_v314/zchezz.exe
           {
             printf 'uci\n'
             printf 'setoption name NNUE value %s/artifacts/nnu3-smoke/nnue_weights.bin\n' "$GITHUB_WORKSPACE"
@@ -87,22 +121,95 @@ jobs:
           grep -q '\[NNUE\] Loaded:' artifacts/nnu3-smoke/uci-load.txt
           grep -q 'readyok' artifacts/nnu3-smoke/uci-load.txt
 
-      - name: Build shared native tool host and smoke wrappers
+      - name: Compile and bundle v3.22 WASM
         shell: bash
         run: |
           set -euo pipefail
-          ARCH_FLAGS='-mavx2' make -C engine/build arena
-          ARCH_FLAGS='-mavx2' make -C engine/build selfplay
-          python tests/run_arena.py --help >/dev/null
-          python tests/run_selfplay.py --help >/dev/null
-          python tests/run_tournament.py --help >/dev/null
-          python tests/run_tournament_quick.py --help >/dev/null || true
-          # The retarget operation is configuration-only: engine source/weights
-          # must remain untouched.
+          make -C engine/build ENGINE=v322 bundle
+          test -s engine/c/zchezz_v322/zchezz_wasm.js
+          test -s engine/c/zchezz_v322/zchezz_wasm.wasm
+          test -s engine/c/zchezz_v322/zchezz_bundle.html
+          python tests/test_browser_html.py --html engine/c/zchezz_v322/zchezz_bundle.html
+          python tests/test_book.py \
+            --html engine/c/zchezz_v322/zchezz_bundle.html \
+            --evaluate false --write-cleaned false
+
+      - name: Canonical full engine suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_tests.py full --version v322 --baseline v314 --keep-going
+
+      - name: Build shared arena and native selfplay hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C engine/build TOOLS_ENGINE=v403 arena
+          make -C engine/build TOOLS_ENGINE=v403 selfplay
+          test -x engine/build/arena.exe
+          test -x engine/build/selfplay.exe
+
+      - name: Functional persistent selfplay smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/smoke-selfplay
+          python tests/run_selfplay.py \
+            --games 1 --concurrency 1 --max-plies 16 --move-timeout 10 \
+            --report-every 1 --pgn false --epd true --bin false \
+            --results-dir artifacts/smoke-selfplay \
+            --opening-mode random --random-plies 2 \
+            --engine engine/c/zchezz_v322/zchezz.exe \
+            --engine-label Zchezz-v322 --movetime 2
+          test -n "$(find artifacts/smoke-selfplay -name '*.log' -print -quit)"
+          test -n "$(find artifacts/smoke-selfplay -name '*.epd' -print -quit)"
+          ! grep -R -E 'TIMEOUT|\[ERRO\]|Lance Invalido|Lance Nulo' artifacts/smoke-selfplay/*.log
+
+      - name: Functional tournament smokes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/smoke-tournament artifacts/smoke-tournament-quick
+          python tests/run_tournament.py \
+            --games 0 --games-self-play 1 --movetime 2 --concurrency 1 \
+            --max-plies 16 --move-timeout 10 \
+            --pgn false --epd false --bin false \
+            --results-dir artifacts/smoke-tournament \
+            --engine engine/c/zchezz_v322/zchezz.exe \
+            --engine-label Zchezz-v322
+          python tests/run_tournament_quick.py \
+            --games 1 --movetime 2 --concurrency 1 --max-plies 16 --move-timeout 10 \
+            --pgn false --epd false --bin false \
+            --results-dir artifacts/smoke-tournament-quick \
+            --engine-a engine/c/zchezz_v322/zchezz.exe --label-a Zchezz-v322 \
+            --engine-b engine/c/zchezz_v314/zchezz.exe --label-b Zchezz-v314 \
+            --threads 1
+          ! grep -R -E 'TIMEOUT|\[ERRO\]|Lance Invalido|Lance Nulo' \
+            artifacts/smoke-tournament/*.log artifacts/smoke-tournament-quick/*.log
+
+      - name: Functional arena smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/smoke-arena
+          python tests/run_arena.py \
+            --player uci:engine/c/zchezz_v322/zchezz.exe \
+            --player uci:engine/c/zchezz_v314/zchezz.exe \
+            --games 4 --threads 1 --movetime 0 --nodes 1000 \
+            --max-plies 16 --seed 322 --tt-mb 4 \
+            --json artifacts/smoke-arena/result.json \
+            --pgn artifacts/smoke-arena/games.pgn
+          test -s artifacts/smoke-arena/result.json
+          test -s artifacts/smoke-arena/games.pgn
+
+      - name: Verify retarget did not touch engine implementation
+        shell: bash
+        run: |
+          set -euo pipefail
           git diff --exit-code -- engine/c/zchezz_v322
 
-      - name: Commit materialized configuration to validation branch
-        if: github.event_name == 'pull_request'
+      - name: Materialize validated v3.22 defaults on branch
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
@@ -111,10 +218,24 @@ jobs:
             tests/run_tournament.py tests/run_tournament_quick.py tests/run_tests.py \
             engine/build/build_termux.sh
           if git diff --cached --quiet; then
-            echo 'No materialized retarget changes.'
+            echo 'v3.22 infrastructure defaults already materialized.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'refactor(v322): materialize inherited infrastructure defaults'
-          git push origin HEAD:${{ github.head_ref }}
+          git commit -m 'refactor(v322): materialize validated v3.22 infrastructure defaults'
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: Upload readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v322-main-readiness-${{ github.run_id }}
+          path: |
+            artifacts/nnu3-smoke
+            artifacts/smoke-selfplay
+            artifacts/smoke-tournament
+            artifacts/smoke-tournament-quick
+            artifacts/smoke-arena
+            artifacts/tests
+          if-no-files-found: warn
