@@ -64,20 +64,11 @@ static void build_fathom_bbs(const Board *b,
     *kings   = flip_bb(b->bb[5] | b->bb[11]);
 }
 
-/* Fathom assumes a valid chess position and asserts internally when either
- * side has no king.  The search can transiently visit pseudo-legal leaves
- * before its normal terminal-position handling runs, so never pass one of
- * those positions across the library boundary. */
-static int fathom_position_is_safe(const Board *b) {
-    return __builtin_popcountll(b->bb[5]) == 1
-        && __builtin_popcountll(b->bb[11]) == 1;
-}
-
 /* ── WDL Probe (for search) ──────────────────────────────────── */
 
 int syzygy_probe_wdl(const Board *b, int *wdl) {
     /* Fathom requires no castling rights */
-    if (b->ca != 0 || !fathom_position_is_safe(b)) return 0;
+    if (b->ca != 0) return 0;
 
     /* Check piece count: skip KvK positions (2 pieces).
      * KvK is always a draw with no TB file. All 3-piece endgames
@@ -117,7 +108,7 @@ int syzygy_probe_wdl(const Board *b, int *wdl) {
 /* ── Root DTZ Probe ──────────────────────────────────────────── */
 
 int syzygy_probe_root(const Board *b, int *best_from, int *best_to, int *wdl, int *dtz) {
-    if (b->ca != 0 || !fathom_position_is_safe(b)) return 0;
+    if (b->ca != 0) return 0;
 
     int npieces = __builtin_popcountll(b->occ);
     if (npieces < 3) return 0;

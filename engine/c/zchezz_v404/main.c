@@ -1,15 +1,4 @@
-/* main.c — Zchezz v4.01 UCI engine
- *
- * v4.00 CHANGES (NNUE architecture):
- *   The evaluation moved from 768 half-mirror features + 31 hand-made
- *   endgame features to HalfKP-4Bucket (2560 features per perspective,
- *   king-square dependent) with SCReLU and a dual-perspective concat —
- *   see nnue.h for the architecture and the coordinate invariants.
- *   Weight file format is now NNU4 (~2.6 MB, was NNU3 ~427 KB).
- *   NnueAccum grew from ~68 KB to ~257 KB per thread; helper threads
- *   already heap-allocate it via sizeof(), so no change was needed in
- *   helper_thread_fn — but that is exactly why it must stay sizeof().
- *
+/* main.c — Zchezz v3.14 UCI engine
  *
  * Full UCI protocol implementation with Syzygy tablebase + Polyglot book support.
  *
@@ -98,7 +87,7 @@ static int z_strncasecmp(const char *a, const char *b, size_t n) {
 #endif
 
 #define ENGINE_NAME    "Zchezz"
-#define ENGINE_VERSION "4.01"
+#define ENGINE_VERSION "3.14"
 #define ENGINE_AUTHOR  "Gustavo Zambrano"
 
 /* ── Global game state ─────────────────────────────────────────── */
@@ -178,7 +167,7 @@ static int tt_hashfull(void) {
     int sample = 1000;
     if (sample > TT_SIZE) sample = TT_SIZE;
     for (int i = 0; i < sample; i++) {
-        if (g_tt->e[i].hash != 0 && g_tt->e[i].gen == g_tt->gen) used++;
+        if (TT_H[i] != 0 && TT_G[i] == TT_GEN) used++;
     }
     return used;  /* per-mille */
 }
@@ -234,9 +223,8 @@ static void cmd_isready(void) {
 }
 
 static void cmd_ucinewgame(void) {
-    /* Clear TT generation so old entries are ignored (logical bump,
-     * same semantics as before — not a physical memset). */
-    tt_new_generation(g_tt);
+    /* Clear TT generation so old entries are ignored */
+    TT_GEN = (TT_GEN + 1) & 0xFFFF;
     search_history_clear(&g_ss);
     g_has_position = 0;
     nnue_reset(&g_nnue_accum);  /* v3.13: reset global accumulator */
@@ -298,12 +286,9 @@ static void cmd_setoption(const char *line) {
                 g_tb_probe_depth = 1;
                 g_tb_probe_limit = loaded < 7 ? loaded : 6;
             }
-            /* UCI "info string" belongs on stdout — that is the only stream a
-             * GUI (or a test harness) reads.  On stderr this confirmation is
-             * invisible to every consumer that matters. */
-            printf("info string Syzygy %d-piece tables loaded (probe_depth=%d)\n",
-                   loaded, g_tb_probe_depth);
-            fflush(stdout);
+            fprintf(stderr, "info string Syzygy %d-piece tables loaded (probe_depth=%d)\n",
+                    loaded, g_tb_probe_depth);
+            fflush(stderr);
         } else {
             /* Empty path = disable TB entirely */
             g_tb_probe_depth = 99;
@@ -331,12 +316,9 @@ static void cmd_setoption(const char *line) {
         strncpy(g_opt_book_file, value, sizeof(g_opt_book_file)-1);
         if (value[0]) {
             int loaded = book_open(value);
-            if (g_debug) {
-                /* stdout, for the same reason as the Syzygy message above. */
-                printf("info string BookFile set to %s (%d entries loaded)\n",
-                       value, loaded);
-                fflush(stdout);
-            }
+            if (g_debug)
+                fprintf(stderr, "info string BookFile set to %s (%d entries loaded)\n",
+                        value, loaded);
         }
     }
     else if (strcasecmp(name, "Threads") == 0) {
@@ -558,7 +540,7 @@ static void zfree32(void *ptr) {
  *         board.nnue      = my_nnue
  *
  * SHARED STATE (thread-safe by design):
- *   • TT arrays (g_tt->H/S/D/G/M/E, one shared TTable) — lockless, benign races
+ *   • TT arrays (TT_H, TT_S, TT_D, TT_G, TT_M, TT_E) — lockless, benign races
  *   • g_stop_flag — volatile int, set by main thread to signal all helpers
  *   • g_io_mutex — protects stdout (info lines, bestmove)
  *
@@ -577,9 +559,8 @@ static void zfree32(void *ptr) {
  *      has a global `ss` pointer.  Each thread uses the SearchState passed
  *      through SearchParams.search_state (helpers) or g_ss (main thread).
  *
- *   3. g_tt->gen is incremented by main thread only.  Helpers read but
- *      don't write (no TT aging conflicts).  All helpers and the main
- *      thread share the SAME TTable pointer (g_tt) — intentional.
+ *   3. TT_GEN is incremented by main thread only.  Helpers read but
+ *      don't write (no TT aging conflicts).
  *
  *   4. Helper's Board is a COPY made at launch time.  board_make/unmake
  *      operate on the copy, so the main thread's board is never touched.
@@ -620,16 +601,10 @@ static void *helper_thread_fn(void *arg) {
     ha->board.undo = my_undo;
     ha->board.undo_top = &my_undo_top;
 
-    /* Per-thread NNUE accumulator (~68 KB: HM acc stack + ext cache).
-     * v4.00 Phase 0-follow-up: an accumulator is meaningless without the
-     * net it was built against, so bind it to the process-wide default
-     * net here (mirrors board.c's g_nnue_accum.net binding done inside
-     * nnue_load()). Without this, na->net stays NULL and every eval on
-     * this helper's accumulator would silently return 0. */
+    /* Per-thread NNUE accumulator (~68 KB: HM acc stack + ext cache) */
     NnueAccum *my_nnue = (NnueAccum *)zmalloc32(sizeof(NnueAccum));
     if (my_nnue) {
         memset(my_nnue, 0, sizeof(NnueAccum));
-        my_nnue->net = g_nnue_net;
         ha->board.nnue = my_nnue;
     }
 
@@ -837,8 +812,6 @@ static void cmd_go(const char *line) {
     p.multi_pv = g_opt_multi_pv;
     p.threads = g_opt_threads;
     p.stop = &g_stop_flag;
-    p.tt = g_tt;  /* v4.00: explicit — struct-copied into every helper's params below */
-    p.mpv_share_budget = 0;  /* v4.00: UCI `go` always gives each PV its own full budget */
 
     /* Copy board state + params for the search thread */
     g_sta.board = g_board;
@@ -889,8 +862,6 @@ static void cmd_bench(int depth) {
         SearchParams sp = {0};
         sp.max_depth = depth;
         sp.info_cb = NULL;  /* silent */
-        sp.tt = g_tt;
-        sp.mpv_share_budget = 0;  /* v4.00: bench is single-PV anyway, explicit for clarity */
         SearchResult r = search_best(&bb, &sp);
         total_nodes += r.nodes;
         char mv[6]; move_to_uci(&r.best, mv);
@@ -1146,7 +1117,5 @@ int main(int argc, char **argv) {
         g_searching = 0;
     }
     book_close();
-    tt_destroy(g_tt);  /* v4.00: free the per-instance TT allocated in search_init() */
-    g_tt = NULL;
     return 0;
 }

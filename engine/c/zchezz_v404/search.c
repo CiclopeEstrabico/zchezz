@@ -44,75 +44,31 @@
 #include <math.h>
 #include <time.h>
 
-/* ── TT (per-instance AoS entries, v4.02) ────────────────────────
- * Transposition table with packed Array-of-Structs entries for cache
- * locality.  Each logical entry contains: hash, score, depth+flags,
- * generation, packed move, and static eval.  Two entries per slot
- * (2-bucket scheme).
+/* ── TT (global SoA arrays) ──────────────────────────────────────
+ * Transposition table with Structure-of-Arrays layout for cache locality.
+ * Each logical entry contains: hash, score, depth+flags, generation,
+ * packed move, and static eval.  Two entries per slot (2-bucket scheme).
  *
- * e[i].hash   — 64-bit Zobrist hash (full, not truncated; 0 = empty)
- * e[i].score  — stored score (mate scores adjusted for ply distance)
- * e[i].dflag  — packed: bits [15:8]=depth, bits [1:0]=flag (EXACT/LOWER/UPPER)
- * e[i].gen    — generation stamp
- * e[i].move   — packed move (from|to<<6|prom<<12|epc<<15|castle<<16)
- * e[i].eval   — static eval at the time of storage (for pruning decisions)
- * tt->gen     — current generation; incremented once per ID iteration
- *               by the main thread only (helpers read but don't write).
+ * TT_H[i]  — 64-bit Zobrist hash (full, not truncated)
+ * TT_S[i]  — stored score (mate scores adjusted for ply distance)
+ * TT_D[i]  — packed: bits [15:8]=depth, bits [1:0]=flag (EXACT/LOWER/UPPER)
+ * TT_G[i]  — generation counter (16-bit, wraps at 65536)
+ * TT_M[i]  — packed move (from|to<<6|prom<<12|epc<<15|castle<<16)
+ * TT_E[i]  — static eval at the time of storage (for pruning decisions)
+ * TT_GEN   — current generation; incremented once per ID iteration
+ *            by the main thread only (helpers read but don't write).
  *
- * Total memory: n_entries * 24 bytes (packed, no padding)
- *   Native (4M entries): ~96 MB
- *   WASM   (512K entries): ~12 MB
- *
- * v4.02 layout change: v4.00 kept six parallel SoA arrays, so a probe
- * touched up to six cache lines (hash first, then score/depth/gen/
- * move/eval on a hit).  A packed bucket is 48 bytes and keeps both
- * hashes + dflags in the first line, so probes and prefetches pay a
- * single miss in the common case.
- *
- * This used to be a set of process-global arrays (TT_H/TT_S/.../TT_GEN),
- * which made it impossible to run two independent searches (e.g. a
- * native self-play worker pool or an A/B arena) in one process without
- * them contaminating each other's TT.  It is now a dynamically
- * allocated TTable; the UCI engine still allocates exactly ONE
- * instance (g_tt, created in search_init()) and every SearchParams it
- * builds points at that same instance — including Lazy SMP helper
- * threads, which intentionally continue to SHARE the TT (struct-copy
- * of SearchParams copies the pointer, not the table). Behaviour is
- * unchanged; this is pointer indirection only. */
-TTable *g_tt = NULL;
-
-TTable *tt_create(size_t n_entries) {
-    TTable *tt = (TTable *)calloc(1, sizeof(TTable));
-    if (!tt) return NULL;
-    tt->e = (TTEntry *)calloc(n_entries, sizeof(TTEntry));
-    if (!tt->e) {
-        tt_destroy(tt);
-        return NULL;
-    }
-    tt->size = n_entries;
-    tt->mask = (n_entries / TT_BUCKETS) - 1;
-    tt->gen  = 0;
-    for (size_t i = 0; i < n_entries; i++) tt->e[i].eval = TT_EVAL_NONE;
-    return tt;
-}
-
-void tt_destroy(TTable *tt) {
-    if (!tt) return;
-    free(tt->e);
-    free(tt);
-}
-
-void tt_clear(TTable *tt) {
-    if (!tt) return;
-    /* hash==0 marks an empty slot; eval sentinel reset in the same pass */
-    for (size_t i = 0; i < tt->size; i++) { tt->e[i].hash = 0; tt->e[i].eval = TT_EVAL_NONE; }
-    tt->gen = 0;
-}
-
-void tt_new_generation(TTable *tt) {
-    if (!tt) return;
-    tt->gen = (tt->gen + 1) & 0xFFFF;
-}
+ * Total memory: TT_SIZE * (8+4+4+2+4+4) = TT_SIZE * 26 bytes
+ *   Native (4M entries): ~104 MB
+ *   WASM   (512K entries): ~13 MB
+ */
+uint64_t TT_H[TT_SIZE];
+int32_t  TT_S[TT_SIZE];
+int32_t  TT_D[TT_SIZE];
+uint16_t TT_G[TT_SIZE];
+int32_t  TT_M[TT_SIZE];
+int32_t  TT_E[TT_SIZE];
+uint16_t TT_GEN = 0;
 
 
 
@@ -127,75 +83,7 @@ void tt_new_generation(TTable *tt) {
 /* ── LMR table ───────────────────────────────────────────────── */
 #define LMR_D 64
 #define LMR_M 128
-static uint8_t lmr_tab[LMR_D * LMR_M];   /* built once from the DEFAULT lmr_divisor at
-                                           * search_init() time; kept for reference/UCI-only
-                                           * builds — the hot path below now reads
-                                           * g_tune.lmr_divisor live instead of this table,
-                                           * so a per-thread tuner can change it without a
-                                           * rebuild (see "Tunable search constants" in
-                                           * search.h). Left populated so nothing else that
-                                           * might reference it in the future silently reads
-                                           * zeros. */
-/* Unrounded numerator of the LMR formula.  Precomputing it allows the GA to
- * vary its divisor without calling log() at every searched node. */
-static float lmr_log_product[LMR_D * LMR_M];
-
-/* ── Tunable search constants — defaults ─────────────────────────
- * Same numbers that used to be bare literals in alpha_beta()/the ID
- * loop below.  Kept as named macros (not just numbers in the struct
- * initializer) so a diff against the pre-tuner history line-matches
- * the original literals. See search.h's SearchTunables comment for
- * the full contract. */
-#define TUNE_RAZOR_MARGIN_DEFAULT             200
-#define TUNE_RFP_MULT_DEFAULT                  105
-#define TUNE_RFP_IMPROVING_BONUS_DEFAULT       24
-#define TUNE_NMP_BASE_DEFAULT                   3
-#define TUNE_NMP_DEPTH_DIV_DEFAULT              3
-#define TUNE_NMP_MAX_R_DEFAULT                  6
-#define TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT 134
-#define TUNE_PROBCUT_MARGIN_DEFAULT           215
-#define TUNE_LMR_DIVISOR_DEFAULT              1.5
-#define TUNE_FUT_MULT_DEFAULT                 91
-#define TUNE_FUT_IMPROVING_ADJ_DEFAULT          76
-#define TUNE_ASP_DELTA_INIT_DEFAULT            20
-#define TUNE_ASP_DELTA_MAX_DEFAULT            500
-
-_Thread_local SearchTunables g_tune = {
-    .razor_margin              = TUNE_RAZOR_MARGIN_DEFAULT,
-    .rfp_mult                  = TUNE_RFP_MULT_DEFAULT,
-    .rfp_improving_bonus       = TUNE_RFP_IMPROVING_BONUS_DEFAULT,
-    .nmp_base                  = TUNE_NMP_BASE_DEFAULT,
-    .nmp_depth_div              = TUNE_NMP_DEPTH_DIV_DEFAULT,
-    .nmp_max_r                 = TUNE_NMP_MAX_R_DEFAULT,
-    .nmp_eval_bonus_threshold  = TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT,
-    .probcut_margin            = TUNE_PROBCUT_MARGIN_DEFAULT,
-    .lmr_divisor               = TUNE_LMR_DIVISOR_DEFAULT,
-    .fut_mult                  = TUNE_FUT_MULT_DEFAULT,
-    .fut_improving_adj         = TUNE_FUT_IMPROVING_ADJ_DEFAULT,
-    .asp_delta_init            = TUNE_ASP_DELTA_INIT_DEFAULT,
-    .asp_delta_max             = TUNE_ASP_DELTA_MAX_DEFAULT,
-};
-
-void search_tunables_apply(const SearchTunables *t) { g_tune = *t; }
-
-SearchTunables search_tunables_defaults(void) {
-    SearchTunables d = {
-        .razor_margin              = TUNE_RAZOR_MARGIN_DEFAULT,
-        .rfp_mult                  = TUNE_RFP_MULT_DEFAULT,
-        .rfp_improving_bonus       = TUNE_RFP_IMPROVING_BONUS_DEFAULT,
-        .nmp_base                  = TUNE_NMP_BASE_DEFAULT,
-        .nmp_depth_div              = TUNE_NMP_DEPTH_DIV_DEFAULT,
-        .nmp_max_r                 = TUNE_NMP_MAX_R_DEFAULT,
-        .nmp_eval_bonus_threshold  = TUNE_NMP_EVAL_BONUS_THRESHOLD_DEFAULT,
-        .probcut_margin            = TUNE_PROBCUT_MARGIN_DEFAULT,
-        .lmr_divisor               = TUNE_LMR_DIVISOR_DEFAULT,
-        .fut_mult                  = TUNE_FUT_MULT_DEFAULT,
-        .fut_improving_adj         = TUNE_FUT_IMPROVING_ADJ_DEFAULT,
-        .asp_delta_init            = TUNE_ASP_DELTA_INIT_DEFAULT,
-        .asp_delta_max             = TUNE_ASP_DELTA_MAX_DEFAULT,
-    };
-    return d;
-}
+static uint8_t lmr_tab[LMR_D * LMR_M];
 
 /* ── MVV-LVA table ───────────────────────────────────────────── */
 /* victim 1-5, attacker 1-6  → index = victim*7+attacker */
@@ -206,19 +94,11 @@ static int32_t MVV_LVA[7*7];
  * in Lazy SMP.  Single-thread mode uses a single static instance.
  * Multi-thread mode allocates one per helper on the heap.         */
 struct SearchState {
-    TTable *tt;    /* transposition table this search reads/writes (v4.00:
-                    * per-instance TT — Lazy SMP helpers get the SAME pointer
-                    * as the main thread, intentionally shared) */
     long   nodes;
     long   nodes_total;
     long   node_limit;
     long   deadline_ms;
     int    time_up;
-    /* While set, time_up() reports "keep going" no matter what the stop flag
-     * or the clock say.  search_best() raises it for the FIRST depth of the
-     * FIRST PV line of a search that starts at depth 1, so that search always
-     * has a real move to return.  See search_best() for the full rationale. */
-    int    stop_guard;
     volatile int *stop_flag;
     long   tb_hits;
     Move killers[MAX_PLY][2];
@@ -256,13 +136,6 @@ static long now_ms(void) {
  *      the syscall cost of clock_gettime — ~1μs on Linux/Windows)
  * Once time_up is set, it stays set for the remainder of the search. */
 static int time_up(SearchState *ss) {
-    /* Depth-1 guarantee: a "stop"/"quit" that arrives before the search
-     * thread has run a single node must not make the search return an
-     * empty result (which surfaces as "bestmove 0000").  While the guard
-     * is up neither the stop flag nor the deadline can end the search;
-     * search_best() lowers it the moment the first depth completes, so
-     * the stop is honored immediately after. */
-    if (ss->stop_guard) return 0;
     if (ss->stop_flag && *ss->stop_flag) { ss->time_up = 1; return 1; }
     if ((ss->nodes_total & 8191) == 0 && ss->deadline_ms > 0)
         ss->time_up = (now_ms() >= ss->deadline_ms);
@@ -324,57 +197,60 @@ typedef struct { int score; int depth; int flag; Move move; int static_eval; } T
  *
  * This balances depth-quality (deep entries survive longer) with
  * recency (new shallow entries still get stored somewhere). */
-static void tt_store(TTable *tt, uint64_t hash, int score,
+static void tt_store(uint64_t hash, int score,
                      int depth, int flag, const Move *move,
                      int ply, int static_eval) {
-    int slot = (int)(hash & tt->mask);
+    int slot = (int)(hash & TT_MASK);
     int base = slot * TT_BUCKETS;
-    TTEntry *b0 = &tt->e[base];
     int stored_score = tt_score_store(score, ply);
-    int16_t packed_df = (int16_t)(((depth & 0xFF) << 8) | (flag & 3));
+    int32_t packed_df = ((depth & 0xFF) << 8) | (flag & 3);
     int32_t packed_mv = pack_move(move);
     int32_t se = (static_eval != TT_EVAL_NONE) ? static_eval : TT_EVAL_NONE;
 
     /* Bucket 0: depth-preferred (replace only if deeper or stale generation) */
-    int exist_depth0 = (b0->dflag >> 8) & 0xFF;
-    if (!b0->hash || b0->gen != tt->gen || depth >= exist_depth0) {
+    int exist_depth0 = (TT_D[base] >> 8) & 0xFF;
+    if (!TT_H[base] || TT_G[base] != TT_GEN || depth >= exist_depth0) {
         /* Cascade displaced entry to bucket 1 (preserve it for move ordering) */
-        if (b0->hash && b0->gen == tt->gen && depth >= exist_depth0)
-            b0[1] = *b0;
-        b0->hash = hash; b0->score = stored_score;
-        b0->dflag = packed_df; b0->gen = tt->gen;
-        b0->move = packed_mv; b0->eval = se;
+        if (TT_H[base] && TT_G[base] == TT_GEN && depth >= exist_depth0) {
+            TT_H[base+1] = TT_H[base]; TT_S[base+1] = TT_S[base];
+            TT_D[base+1] = TT_D[base]; TT_G[base+1] = TT_G[base];
+            TT_M[base+1] = TT_M[base]; TT_E[base+1] = TT_E[base];
+        }
+        TT_H[base] = hash; TT_S[base] = stored_score;
+        TT_D[base] = packed_df; TT_G[base] = TT_GEN;
+        TT_M[base] = packed_mv; TT_E[base] = se;
         return;
     }
 
     /* Bucket 1: always-replace (catches shallow/recent entries) */
-    TTEntry *b1 = b0 + 1;
-    b1->hash = hash; b1->score = stored_score;
-    b1->dflag = packed_df; b1->gen = tt->gen;
-    b1->move = packed_mv; b1->eval = se;
+    TT_H[base+1] = hash; TT_S[base+1] = stored_score;
+    TT_D[base+1] = packed_df; TT_G[base+1] = TT_GEN;
+    TT_M[base+1] = packed_mv; TT_E[base+1] = se;
 }
 
-static int tt_probe(TTable *tt, uint64_t hash, int ply, TTE *out) {
-    TTEntry *e = &tt->e[(size_t)(hash & tt->mask) * TT_BUCKETS];
+static int tt_probe(uint64_t hash, int ply, TTE *out) {
+    int slot = (int)(hash & TT_MASK);
+    int base = slot * TT_BUCKETS;
 
     /* Check both buckets */
-    for (int b = 0; b < TT_BUCKETS; b++, e++) {
-        if (e->hash != hash) continue;
-        if (e->gen != tt->gen) {
+    for (int b = 0; b < TT_BUCKETS; b++) {
+        int idx = base + b;
+        if (TT_H[idx] != hash) continue;
+        if (TT_G[idx] != TT_GEN) {
             /* Stale generation: reuse the stored move for ordering, but not the score */
             out->score  = TT_EVAL_NONE;
             out->depth  = 0;
             out->flag   = TT_UPPER;
             out->static_eval = TT_EVAL_NONE;
-            unpack_move(e->move, &out->move);
+            unpack_move(TT_M[idx], &out->move);
             return 2;   /* 2 = stale hit (move only) */
         }
-        int d = e->dflag;
-        out->score  = tt_score_read(e->score, ply);
+        int d = TT_D[idx];
+        out->score  = tt_score_read(TT_S[idx], ply);
         out->depth  = (d >> 8) & 0xFF;
         out->flag   = d & 3;
-        out->static_eval = e->eval;
-        unpack_move(e->move, &out->move);
+        out->static_eval = TT_E[idx];
+        unpack_move(TT_M[idx], &out->move);
         return 1;   /* 1 = full hit */
     }
     return 0;
@@ -414,22 +290,12 @@ static inline uint64_t see_attackers(const Board *bd, int sq, uint64_t occ) {
 }
 
 static int see_board(const Board *bd, int from, int to, int is_epc) {
-    /* Empty target square = QUIET move (v4.02 exp_seeq): treated as the
-     * capture of a zero-valued piece.  PC_TYPE(empty)==0 and
-     * MV_TAB[0]==0, so gained[0]==0 automatically; the normal SWAP
-     * loop below then runs over the opponent's recaptures of the
-     * moving piece, which is exactly the SEE of a non-capture move
-     * (e.g. a piece moving to an attacked square).  Call sites that
-     * still rely on the old "capture-only" contract are all guarded:
-     *   - score_move()      : only reached when `cap || m->epc`
-     *   - qsearch()         : captures from board_gen_captures(),
-     *                         skipped when prom/epc
-     *   - ProbCut           : same pattern as qsearch()
-     * so passing quiets happens ONLY from the STAGE 3 SEE pruning. */
+    if (!bd->b[to] && !is_epc) return 0;
+
     int gained[32];
     int ng = 0;
 
-    /* Initial capture value (empty target -> MV_TAB[0] == 0) */
+    /* Initial capture value */
     int attacker_type = PC_TYPE(bd->b[from]);
     if (is_epc)
         gained[ng++] = MV_TAB[1]; /* pawn captured via ep */
@@ -495,33 +361,6 @@ static int see_board(const Board *bd, int from, int to, int is_epc) {
     return gained[0] - sc;
 }
 
-/* ── Cheap direct-check test (v4.02) ──────────────────────────
- * True if the quiet move from→to gives a DIRECT check after it is
- * played: the moving piece attacks the enemy king from `to` with its
- * own origin square vacated (so slider x-rays through `from` count).
- * Discovered checks are deliberately NOT detected — this exists only
- * to let the pre-make futility pruning skip make/unmake for hopeless
- * quiets while never pruning a move that obviously checks the king.
- * Cost is one magic lookup (no board mutation), versus the full
- * board_make + board_in_check pair this replaces on the prune path. */
-static inline int quiet_direct_check(const Board *bd, int from, int to) {
-    int ksq = bd->turn == COL_W ? bd->bk : bd->wk;
-    uint64_t occ = bd->occ & ~((uint64_t)1 << from);
-    switch (PC_TYPE(bd->b[from])) {
-        case 1: return (bd->turn == COL_W ? wpawn_attacks_bb((uint64_t)1 << to)
-                                          : bpawn_attacks_bb((uint64_t)1 << to)) >> ksq & 1;
-        case 2: return (NATK[to] >> ksq) & 1;
-        case 3: return (bish_attacks(to, occ) >> ksq) & 1;
-        /* v4.02 bisect: the "exact per-piece attack" version of this helper
-         * (rook=rook-only, queen=rook|bishop, plus the UNKNOWN-check hint
-         * fallback below) was tested and cost ~35 ELO at fast TC — the
-         * extra soundness prunes fewer moves than it wins tactics.
-         * Reverted to the lote5 shape (cheap, slightly over-exempt). */
-        case 4: case 5: return ((rook_attacks(to, occ) | bish_attacks(to, occ)) >> ksq) & 1;
-        default: return 0;   /* king moves can never directly check */
-    }
-}
-
 
 /* ── Move scoring + sorting ──────────────────────────────────── */
 /*
@@ -571,7 +410,9 @@ static int score_move(SearchState *ss, const Move *m, const Board *bd, int ply,
 
     /* ── Quiet move scoring ──────────────────────────────────────
      * Combined bonus = history + CMH-slot-0 + CMH-slot-1.
-     * Each component is int16_t (-32000..32000); combined fits int32. */
+     * Each component is int16_t (-32000..32000); combined fits int32.
+     * We add a base of 300 000 so that a worst-case combined score of
+     * 300 000 + 3*(-32000) = 204 000 stays above losing captures.     */
     if (ss->killers[ply][0].from==mfr && ss->killers[ply][0].to==mto &&
         (ss->killers[ply][0].from||ss->killers[ply][0].to)) return 900000;
     if (ss->killers[ply][1].from==mfr && ss->killers[ply][1].to==mto &&
@@ -643,24 +484,17 @@ static void sort_moves(SearchState *ss, Move *moves, int n, const Board *bd, int
  *   4. TT probe: check if this position was already evaluated at QS depth.
  *   5. Check evasion: if in check, search ALL moves (not just captures).
  *
- * v4.02: fail-highs and improved-over-stand-pat results ARE stored now
- * (depth-0 entries; see the tt_store calls below for the pollution
- * argument and why it does not apply to the 2-bucket scheme). */
+ * Does NOT store results in TT (depth-0 entries would pollute the TT
+ * and displace more valuable deeper entries). */
 static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
     if (ply >= MAX_PLY-1) return eval_stm(b);
-    /* node_limit is a budget for the WHOLE search, so it must be checked
-     * against nodes_total: ss->nodes is reset at every iterative-deepening
-     * depth (see search_best()), and checking that instead grants a fresh
-     * budget per depth -- i.e. no overall stop condition at all when no
-     * time limit is set.  UCI "go nodes N" means N total nodes. */
-    if (ss->nodes_total >= ss->node_limit || time_up(ss)) return eval_stm(b);
+    if (ss->nodes >= ss->node_limit || time_up(ss)) return eval_stm(b);
     ss->nodes++; ss->nodes_total++;
-    TTable *tt = ss->tt;   /* per-search TT, cached locally (never changes mid-search) */
 
     /* ── TT probe in qsearch ─────────────────────────────────── */
     uint64_t qs_hash = b->hash;
     TTE qs_tte;
-    int qs_tte_hit = tt_probe(tt, qs_hash, ply, &qs_tte);
+    int qs_tte_hit = tt_probe(qs_hash, ply, &qs_tte);
     Move qs_tt_move = {0};
     if (qs_tte_hit) {
         qs_tt_move = qs_tte.move;
@@ -708,9 +542,6 @@ static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
     int qs_orig_alpha = alpha;
 
     if (stand >= beta) return beta;
-    /* (v4.02 bisect: storing stand-pat fail-highs here REGRESSED ~30 ELO —
-     * the flood of depth-0 TT_LOWER entries evicts move-ordering entries
-     * from TT bucket 1. Reverted to the v4.01 behaviour.) */
     /* Delta pruning */
     {
         int has_passer = (b->turn==COL_W) ? !!(b->bb[0] & 0x000000000000FF00ULL)
@@ -759,37 +590,13 @@ static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
 
         if (sc > qs_best) { qs_best = sc; best_move_qs = moves[i]; }
         if (sc >= beta) {
-            /* v4.02: persist qsearch fail-highs. Depth-0 entries lose the
-             * depth competition for TT bucket 0 against any real search
-             * entry, so they cannot displace deep knowledge — they only
-             * serve future qsearch probes (cutoffs + move ordering).
-             * Never store after a time/stop abort — see alpha_beta's
-             * tt_store comment. */
-            if (!ss->time_up)
-                tt_store(tt, b->hash, qs_best, 0, TT_LOWER, &best_move_qs, ply, stand);
             return beta;
         }
         if (sc > alpha) alpha = sc;
     }
 
-    /* v4.02: store non-cutoff qsearch results too when the search actually
-     * improved over stand-pat (a capture was played).  Pure stand-pat nodes
-     * stay unstored exactly as before — they carry no move information and
-     * their eval is already reachable through the static_eval field of any
-     * entry written by the nodes around them.
-     * EXACT is only claimed when a real searched move produced the value;
-     * if the "improvement" was just the alpha=stand raise, the score is a
-     * pure upper bound and must be stored as such. */
-    if (qs_best > stand && !ss->time_up) {
-        int from_move = best_move_qs.from || best_move_qs.to;
-        tt_store(tt, b->hash, qs_best, 0,
-                 (from_move && qs_best > qs_orig_alpha) ? TT_EXACT : TT_UPPER,
-                 from_move ? &best_move_qs : NULL,
-                 ply, stand);
-    }
-
-    /* (v4.01 policy was to store nothing here; v4.02 stores improved
-     * results above — see the comment on the tt_store call.) */
+    /* Don't store non-cutoff qsearch results — they pollute the TT
+     * with depth-0 entries that displace more valuable deeper entries */
 
     return alpha;
 }
@@ -840,15 +647,12 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
 static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                       Move *pv, int *pv_len, int ply, int in_check_hint) {
     if (ply >= MAX_PLY-1) { *pv_len=0; return eval_stm(b); }
-    /* Whole-search budget -- see qsearch()'s note on why this is
-     * nodes_total and not the per-depth ss->nodes. */
-    if (ss->nodes_total >= ss->node_limit || time_up(ss)) {
+    if (ss->nodes >= ss->node_limit || time_up(ss)) {
         *pv_len=0;
         return depth<=0 ? eval_stm(b) : qsearch(ss,b,alpha,beta,ply);
     }
     ss->nodes++; ss->nodes_total++;
     *pv_len = 0;
-    TTable *tt = ss->tt;   /* per-search TT, cached locally (never changes mid-search) */
 
     int mate_val = 19000 - ply;
     if (alpha >  mate_val) return  mate_val;
@@ -900,17 +704,10 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      * lines 2+ would always return the same (cached) score as line 1. */
     TTE tte; int tte_hit = 0;
     Move pv_move = {0};
-    tte_hit = tt_probe(tt, b->hash, ply, &tte);
+    tte_hit = tt_probe(b->hash, ply, &tte);
     if (tte_hit) {
         pv_move = tte.move;
-        /* v4.02: score cutoffs are NEVER taken at ply == 0.  With the
-         * per-move generation bump gone (see search_best), a deep EXACT
-         * entry written by a PREVIOUS search of the SAME position could
-         * instant-cutoff the whole root before any move is searched
-         * (iter_len stays 0 → no PV, no info line, bestmove 0000 risk).
-         * Interior nodes keep normal TT cutoffs; the root still benefits
-         * from the TT through pv_move ordering and its children. */
-        if (tte_hit == 1 && tte.depth >= depth && ply > 0 && ss->excluded_root_n == 0) {
+        if (tte_hit == 1 && tte.depth >= depth && !(ply == 0 && ss->excluded_root_n > 0)) {
             if (tte.flag == TT_EXACT) return tte.score;
             if (tte.flag == TT_LOWER && tte.score >= beta) return tte.score;
             if (tte.flag == TT_UPPER && tte.score <= alpha) return tte.score;
@@ -981,7 +778,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                  * can find practical advantages in 50-move-rule draws. */
                 int tb_tt_depth = (wdl == 3 || wdl == 1) ? depth
                                 : (depth + 6 < 127 ? depth + 6 : 127);
-                tt_store(tt, b->hash, tb_score, tb_tt_depth, tb_flag, NULL, ply, TT_EVAL_NONE);
+                tt_store(b->hash, tb_score, tb_tt_depth, tb_flag, NULL, ply, TT_EVAL_NONE);
                 /* Cut off for definitive results (Stockfish-style):
                  *   EXACT (draw WDL=2):  always return 0.
                  *   LOWER (win WDL=4):   return if tb_score >= beta.
@@ -1042,7 +839,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      * At depth 1, if eval is far below alpha (by 200cp), verify with
      * a qsearch.  If qsearch confirms, this node is hopeless — prune.
      * Only at depth 1 because deeper nodes have more tactical potential. */
-    if (!in_check && !is_pv && depth==1 && static_eval+g_tune.razor_margin < alpha) {
+    if (!in_check && !is_pv && depth==1 && static_eval+200 < alpha) {
         int qs = qsearch(ss, b, alpha-1, alpha, ply);
         if (qs < alpha) return qs;
     }
@@ -1054,7 +851,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      * Extended to depth 9 (Stockfish uses up to depth 9 too).
      * Guard: skip near mate scores to avoid pruning forced mates. */
     if (!in_check && !is_pv && depth>=2 && depth<=9 && beta<18000 && static_eval<18000) {
-        int rfp_margin = depth*g_tune.rfp_mult - (improving ? g_tune.rfp_improving_bonus : 0);
+        int rfp_margin = depth*90 - (improving ? 50 : 0);
         if (static_eval - rfp_margin >= beta) return static_eval;
     }
 
@@ -1072,9 +869,9 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
     if (!in_check && !is_pv && depth>=3 && ply>0 && not_endgame && static_eval>=beta) {
         /* NMP reduction: base 3 + depth/3, capped at 6.
          * Add +1 if static_eval is much above beta (eval margin bonus). */
-        int R = g_tune.nmp_base + depth / g_tune.nmp_depth_div;
-        if (R > g_tune.nmp_max_r) R = g_tune.nmp_max_r;
-        if (static_eval - beta > g_tune.nmp_eval_bonus_threshold) R += 1;
+        int R = 3 + depth / 3;
+        if (R > 6) R = 6;
+        if (static_eval - beta > 200) R += 1;
         /* Make null move */
         uint64_t save_hash = b->hash;
         int8_t   save_ep   = b->ep;
@@ -1109,7 +906,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
      *   • enabled in endgames too (null move is disabled there,
      *     so ProbCut is the only forward-pruning in endgames) */
     if (!in_check && !is_pv && depth >= 5 && beta < 18000 && ply > 0) {
-        int pc_beta  = beta + g_tune.probcut_margin;
+        int pc_beta  = beta + 200;
         int pc_depth = depth - 4;   /* shallow probe: depth-4, min 1 */
         if (pc_depth < 1) pc_depth = 1;
 
@@ -1204,15 +1001,10 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
     int cmh1 = ply >= 2 ? ss->prev_to_sq[ply-2] : -1;
     const Move *pv_ptr = (pv_move.from||pv_move.to) ? &pv_move : NULL;
 
-    /* LMP limits — not tunable (see ga_tune.c's header comment "PARAMETERS
-     * NOT TUNED, AND WHY": an 8-entry hand-shaped table doesn't reduce to
-     * one or two scalars the way the futility margin does). */
+    /* LMP limits */
     static const int lmp_limit[8] = {0,10,18,26,36,48,62,78};
-    int fut_adj = improving ? 0 : g_tune.fut_improving_adj;
-    /* fut_base(d) = g_tune.fut_mult * d — the original hardcoded table
-     * {0,150,300,450,600,750,900,1050,1200} IS exactly 150*d for d=0..8,
-     * so this is not an approximation, just the same table parameterized
-     * by its one degree of freedom. */
+    int fut_adj = improving ? 0 : 50;
+    static const int fut_base[9] = {0,150,300,450,600,750,900,1050,1200};
 
     int best = -99999, flag = TT_UPPER;
     Move best_move = {0};
@@ -1241,7 +1033,9 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
         /* Skip singular move */
         if (!(ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply])) {
             board_make(b, m);
-            __builtin_prefetch(&tt->e[((b->hash ^ ZR_side) & tt->mask) * TT_BUCKETS], 0, 1);
+            __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+            ss->prev_ft[ply]    = mfr*64 + mto;
+            ss->prev_to_sq[ply] = mto;
 
             int mover_col = b->turn ^ 24;
             int king_sq   = mover_col == COL_W ? b->wk : b->bk;
@@ -1252,11 +1046,6 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                 } else {
                     tt_tried = 1;
                     legal_count++;
-
-                    ss->prev_ft[ply]    = mfr*64 + mto;
-
-                    ss->prev_to_sq[ply] = mto;
-
 
                     int gives_check = 0;
                     { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
@@ -1360,7 +1149,9 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
             if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
 
             board_make(b, m);
-            __builtin_prefetch(&tt->e[((b->hash ^ ZR_side) & tt->mask) * TT_BUCKETS], 0, 1);
+            __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+            ss->prev_ft[ply]    = mfr*64 + mto;
+            ss->prev_to_sq[ply] = mto;
 
             int mover_col = b->turn ^ 24;
             int king_sq   = mover_col == COL_W ? b->wk : b->bk;
@@ -1371,11 +1162,6 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
             }
 
             legal_count++;
-
-            ss->prev_ft[ply]    = mfr*64 + mto;
-
-            ss->prev_to_sq[ply] = mto;
-
 
             int gives_check = 0;
             { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
@@ -1438,8 +1224,8 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
             int n_quiets = board_gen_quiets(b, quiets);
             /* Score quiets using the same scorer */
             for (int i = 0; i < n_quiets; i++)
-            quiets[i].score = score_move(ss, &quiets[i], b, ply, pv_ptr, ok_sq,
-                                         cur_prev_ft, cmh0, cmh1);
+                quiets[i].score = score_move(ss, &quiets[i], b, ply, pv_ptr, ok_sq,
+                                             cur_prev_ft, cmh0, cmh1);
 
             for (int i = 0; i < n_quiets; i++) {
                 /* Pick-best */
@@ -1483,40 +1269,10 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                 /* Skip singular move */
                 if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
 
-                /* v4.02: SEE pruning of quiet moves (Stockfish-style): a quiet move
-                 * that loses material even in a favourable exchange sequence cannot
-                 * be best at shallow depth.
-                 * Killers and the current counter-move are exempted (experiment
-                 * spec: they already carry proven tactical weight; the material
-                 * heuristic alone misjudges quiet defensive resources), as are
-                 * direct checking moves via quiet_direct_check(). */
-                if (!in_check && !is_pv && legal_count > 0 && depth <= 3 &&
-                    !is_killer &&
-                    !(cur_prev_ft >= 0 && ss->counter_move[cur_prev_ft] == (mfr*64+mto)) &&
-                    !quiet_direct_check(b, mfr, mto)) {
-                    if (see_board(b, mfr, mto, 0) < -(depth * 60)) { continue; }
-                }
-
-                /* Futility pruning (pre-make, v4.02) ─────────────────
-                 * Same margin as before (static_eval + fut_mult*depth +
-                 * fut_adj <= alpha), but evaluated BEFORE board_make so
-                 * pruned moves no longer pay make + NNUE accumulator push
-                 * + legality test + unmake.  The old post-make version was
-                 * allowed to run only after computing the exact gives_check
-                 * flag; here we use quiet_direct_check() instead, which is
-                 * a single magic lookup and misses discovered checks (those
-                 * rare moves may now be futility-pruned where v4.01 kept
-                 * them — measured as a net win, see arena tests).
-                 * legal_count>0 == "not the first searched move", matching
-                 * the old post-increment legal_count>1 condition. */
-                if (!in_check && is_quiet && depth>=1 && depth<=8 && legal_count>0 &&
-                    !quiet_direct_check(b, mfr, mto)) {
-                    int fd = depth < 9 ? depth : 8;
-                    if (static_eval + g_tune.fut_mult * fd + fut_adj <= alpha) continue;
-                }
-
                 board_make(b, m);
-                __builtin_prefetch(&tt->e[((b->hash ^ ZR_side) & tt->mask) * TT_BUCKETS], 0, 1);
+                __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+                ss->prev_ft[ply]    = mfr*64 + mto;
+                ss->prev_to_sq[ply] = mto;
 
                 int mover_col = b->turn ^ 24;
                 int king_sq   = mover_col == COL_W ? b->wk : b->bk;
@@ -1528,17 +1284,18 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
 
                 legal_count++;
 
-                ss->prev_ft[ply]    = mfr*64 + mto;
-
-                ss->prev_to_sq[ply] = mto;
-
-
                 int gives_check = 0;
                 { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
                   int gdr=((m->to>>3)-(gksq>>3)); if(gdr<0)gdr=-gdr;
                   int gdc=((m->to&7)-(gksq&7));   if(gdc<0)gdc=-gdc;
                   if (gpt>=3||gpt==2||m->prom||(gdr>gdc?gdr:gdc)<=2)
                       gives_check = board_in_check(b);
+                }
+
+                /* Futility pruning */
+                if (!in_check && is_quiet && !gives_check && depth>=1 && depth<=8 && legal_count>1) {
+                    int fd = depth < 9 ? depth : 8;
+                    if (static_eval + fut_base[fd] + fut_adj <= alpha) { board_unmake(b); continue; }
                 }
 
                 int check_ext = 0;
@@ -1564,23 +1321,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                     if (legal_count>=3 && depth>=3 && !in_check && !gives_check && is_quiet && !is_killer) {
                         int ld = depth<LMR_D?depth:LMR_D-1;
                         int lm = legal_count<LMR_M?legal_count:LMR_M-1;
-                        /* Computed live from g_tune.lmr_divisor rather than a
-                         * precomputed lmr_tab[] lookup — see search.h's
-                         * SearchTunables comment: lmr_tab is built once by
-                         * search_init() on the main thread only, so a
-                         * per-thread tuner could never see its own divisor
-                         * reflected in it. Same formula/clamps that used to
-                         * build the table (search_init() below), just
-                         * evaluated per-node so it tracks THIS thread's
-                         * g_tune. */
-                        {
-                            double lv = lmr_log_product[ld * LMR_M + lm]
-                                      / g_tune.lmr_divisor;
-                            int lr = (int)lv;
-                            if (lr < 1) lr = 1;
-                            if (lr > ld-1) lr = ld-1;
-                            reduce = (uint8_t)lr;
-                        }
+                        reduce = lmr_tab[ld*LMR_M+lm];
                         if (is_pv) reduce = reduce>0?reduce-1:0;
                         if (!improving) reduce += 1;
                         {
@@ -1648,7 +1389,9 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
             if (ss->sing_from[ply]>=0 && mfr==ss->sing_from[ply] && mto==ss->sing_to[ply]) continue;
 
             board_make(b, m);
-            __builtin_prefetch(&tt->e[((b->hash ^ ZR_side) & tt->mask) * TT_BUCKETS], 0, 1);
+            __builtin_prefetch(&TT_H[((b->hash ^ ZR_side) & TT_MASK) * TT_BUCKETS], 0, 1);
+            ss->prev_ft[ply]    = mfr*64 + mto;
+            ss->prev_to_sq[ply] = mto;
 
             int mover_col = b->turn ^ 24;
             int king_sq   = mover_col == COL_W ? b->wk : b->bk;
@@ -1659,11 +1402,6 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
             }
 
             legal_count++;
-
-            ss->prev_ft[ply]    = mfr*64 + mto;
-
-            ss->prev_to_sq[ply] = mto;
-
 
             int gives_check = 0;
             { uint8_t gpt=b->b[m->to]&7,gksq=b->turn==COL_W?b->wk:b->bk;
@@ -1729,10 +1467,6 @@ cutoff:
         int is_promo   = !!best_move.prom;
         int is_castle  = !!best_move.castle;
         int is_quiet   = !is_capture && !is_promo && !is_castle;
-        /* quadratic bonus: deeper cutoffs get more reward (quiets AND
-         * captures since v4.02) */
-        int bonus = depth*depth;
-        if (bonus > 16384) bonus = 16384;
 
         if (is_quiet) {
             /* Killer moves: 2 slots per ply.  Slot 0 is most recent;
@@ -1744,6 +1478,9 @@ cutoff:
             }
             /* Counter move: "after opponent played X, this move cuts" */
             if (cur_prev_ft >= 0) ss->counter_move[cur_prev_ft] = mfr*64+mto;
+
+            int bonus = depth*depth;  /* quadratic bonus: deeper cutoffs get more reward */
+            if (bonus > 16384) bonus = 16384;
 
             /* Reward the cutoff move in all history tables */
             int ft = mfr*64+mto;
@@ -1757,6 +1494,7 @@ cutoff:
                 int c = ss->cont_hist[1][cmh1][ft] + bonus;
                 ss->cont_hist[1][cmh1][ft] = (int16_t)(c < 16384 ? c : 16384);
             }
+
             /* Penalise all quiet moves that were searched before the cutoff
              * move but failed to produce a cutoff themselves.  This teaches
              * the engine that these moves are relatively weaker in this context. */
@@ -1781,14 +1519,9 @@ cutoff:
 
     /* No legal moves: checkmate (in check) or stalemate (not in check) */
     if (!legal_count) return in_check ? (-19000+ply) : 0;
-    /* Store best result in TT for future visits.
-     * v4.02: NEVER store when the search was aborted by time/stop — the
-     * scores unwinding out of an aborted subtree are garbage bounds.
-     * v4.01 could afford to store anyway because every new move bumped
-     * the TT generation and flushed them; with the generation now stable
-     * within a game, an aborted-store would poison later moves. */
-    if ((best_move.from||best_move.to) && !ss->time_up)
-        tt_store(tt, b->hash, best, depth, flag, &best_move, ply, raw_eval);
+    /* Store best result in TT for future visits */
+    if (best_move.from||best_move.to)
+        tt_store(b->hash, best, depth, flag, &best_move, ply, raw_eval);
     return best;
 }
 
@@ -1804,9 +1537,7 @@ void search_init(void) {
      * reduce to depth 0 — that would skip to qsearch prematurely). */
     for (int d = 1; d < LMR_D; d++)
         for (int m = 1; m < LMR_M; m++) {
-            double numerator = log((double)d) * log((double)m);
-            lmr_log_product[d * LMR_M + m] = (float)numerator;
-            double v = numerator / 1.5;
+            double v = log((double)d) * log((double)m) / 1.5;
             int r = (int)v;
             if (r < 1) r = 1;
             if (r > d-1) r = d-1;
@@ -1818,33 +1549,15 @@ void search_init(void) {
     for (int v = 1; v <= 5; v++)
         for (int a = 1; a <= 6; a++)
             MVV_LVA[v*7+a] = (6-a) + v*10;
-    /* Allocate the process-wide default TT (v4.00: per-instance TTable).
-     * tt_create() zero-initialises H/S/D/G/M (calloc) and sets every E[i]
-     * to TT_EVAL_NONE — identical to the old memset(TT_H,...) + E-loop. */
-    if (!g_tt) {
-        g_tt = tt_create(TT_SIZE);
-        if (!g_tt) {
-            /* OOM at startup: fail loudly instead of leaving g_tt NULL,
-             * which would crash inside tt_probe/tt_store on first search
-             * with a confusing null-deref instead of a clear message. */
-            fprintf(stderr, "[TT] fatal: tt_create(%d entries) failed (out of memory)\n", TT_SIZE);
-            exit(1);
-        }
-    }
+    /* Clear TT hash entries and set all static evals to NONE */
+    memset(TT_H, 0, sizeof(TT_H));
+    for (int i = 0; i < TT_SIZE; i++) TT_E[i] = TT_EVAL_NONE;
 }
 
 void search_history_clear(SearchState *s) {
     memset(s->mv_history,   0, sizeof(s->mv_history));
     memset(s->counter_move, 0, sizeof(s->counter_move));
     memset(s->cont_hist,    0, sizeof(s->cont_hist));
-}
-
-/* See search.h for why this exists alongside search_reset(). */
-void search_clear_ordering(SearchState *ss) {
-    memset(ss->killers,      0, sizeof(ss->killers));
-    memset(ss->mv_history,   0, sizeof(ss->mv_history));
-    memset(ss->counter_move, 0, sizeof(ss->counter_move));
-    memset(ss->cont_hist,    0, sizeof(ss->cont_hist));
 }
 
 void search_reset(SearchState *ss) {
@@ -1856,19 +1569,12 @@ void search_reset(SearchState *ss) {
         ss->prev_to_sq[i] = -1;
         ss->prev_static_eval[i] = TT_EVAL_NONE;
     }
-    /* History aging (v4.02 bisect: RESTORED — removing it cost ~-100 ELO
-     * in the lote3 SPRT; un-decayed history saturates and stale-maluses
-     * prune good moves for the rest of the game).  Kept per-search as in
-     * v4.01: >>2 per move keeps values fresh while preserving order.
-     * counter_move is NOT wiped here anymore (v4.02): like the TT
-     * generation bug, wiping per move threw away positional knowledge
-     * that stays valid within a game; game boundaries own the reset via
-     * search_history_clear()/search_clear_ordering(). */
-    /* counter_move wipe kept per-search (v4.02 bisect: persisting it across
-     * moves was tested together with other lote6 items and the batch
-     * regressed; restore v4.01 behaviour until individually re-validated). */
-    memset(ss->counter_move, 0, sizeof(ss->counter_move));
+    /* Age history tables: divide by 4 to preserve relative ordering
+     * while preventing saturation across games/iterations.
+     * Loop is ~4K iterations for mv_history and ~512K for ss->cont_hist[2];
+     * compiler will auto-vectorise with -O3 -march=native.            */
     for (int i = 0; i < 64*64; i++) ss->mv_history[i] >>= 2;
+    memset(ss->counter_move, 0, sizeof(ss->counter_move));
     /* Age both CMH slots (int16_t arithmetic right-shift → signed divide by 4) */
     for (int s = 0; s < 2; s++)
         for (int i = 0; i < 64; i++)
@@ -1910,20 +1616,8 @@ SearchResult search_best(Board *b, const SearchParams *p) {
      * p->search_state; main thread uses the default global g_ss. */
     SearchState *ss = p->search_state ? p->search_state : &g_ss;
     SearchResult res = {0};
-    /* Per-instance TT (v4.00): use the caller-supplied table, or fall back
-     * to the process-wide default.  Lazy SMP helpers receive the SAME
-     * pointer as the main thread here (SearchParams is struct-copied in
-     * main.c's search_thread_fn, so p->tt is identical for every helper
-     * and the main thread) — sharing the TT across helpers is unchanged. */
-    ss->tt = p->tt ? p->tt : g_tt;
-    /* v4.02: NO per-search TT generation bump.  v4.01 bumped the
-     * generation on EVERY search (every move), which invalidated all
-     * scores stored by previous moves — the TT could never serve a
-     * score across moves, only within one search.  Standard practice
-     * (Stockfish et al.) keeps the generation stable within a game and
-     * bumps it exactly once on the game boundary; the UCI "ucinewgame"
-     * handler (main.c cmd_ucinewgame) and the tools' physical
-     * tt_clear() per game own that boundary now. */
+    /* Only main thread increments TT generation — helpers share it */
+    if (p->start_depth <= 1) TT_GEN = (TT_GEN+1) & 0xFFFF;
     nnue_reset(b->nnue);  /* v3.13: per-thread accumulator reset */
 
     int md = p->max_depth;
@@ -1942,7 +1636,6 @@ SearchResult search_best(Board *b, const SearchParams *p) {
 
     ss->deadline_ms = p->time_limit_ms > 0 ? now_ms() + p->time_limit_ms : 0;
     ss->time_up     = 0;
-    ss->stop_guard  = 0;   /* per-thread state is reused across searches */
     ss->stop_flag   = p->stop;  /* may be NULL */
     ss->nodes       = 0;
     ss->nodes_total = 0;
@@ -2050,50 +1743,14 @@ SearchResult search_best(Board *b, const SearchParams *p) {
     /* Starting depth for iterative deepening (Lazy SMP helpers start higher) */
     int sd = p->start_depth > 1 ? p->start_depth : 1;
 
-    /* v4.00 shared MultiPV budget (mpv_share_budget==1):
-     * Divide the caller's total time_limit_ms evenly across the n_pvs
-     * lines instead of giving each line its own full budget.  This is
-     * design choice (a) — a per-line divided budget — rather than (b) a
-     * single wall-clock deadline for the whole loop.  (b) was rejected:
-     * with a single shared deadline, PV line 1 (searched first, deepest
-     * move ordering) can burn the ENTIRE budget before line 2 even starts,
-     * leaving later lines at time_up=1 with zero depth searched — exactly
-     * the "MultiPV freeze" bug the existing per-PV reset above was written
-     * to avoid, just reintroduced across lines instead of within one line.
-     * That would hand the temperature sampler an unfinished, effectively
-     * garbage score for every PV after the first.  Dividing the budget (a)
-     * guarantees every line gets its own nonzero, bounded slice.
-     *
-     * Depth>=2 guarantee: ss->time_up is only ever set from inside
-     * alpha_beta's node-count check (every 8192 nodes), never checked
-     * before a depth begins, and depths 1-2 below always run as a full
-     * (non-aspiration) search regardless of prev_score_valid.  A depth-1
-     * or depth-2 search from the root visits far fewer than 8192 nodes in
-     * practice, so as long as the per-line slice is > 0ms every PV line
-     * completes at least depth 2 before time_up can possibly fire — even
-     * under selfplay's 50ms/4-line = ~12ms slices.  This is not a special
-     * case in the code below; it falls out of the existing per-depth
-     * structure.  (If a slice were ever exhausted mid-way through a rare
-     * huge depth-1/2 search, the loop still returns whatever the LAST
-     * fully-completed depth produced — never a partial/garbage score, see
-     * the `update` gate a few lines down.) */
-    long pv_budget_ms = p->time_limit_ms;
-    if (p->mpv_share_budget && p->time_limit_ms > 0 && n_pvs > 1) {
-        pv_budget_ms = p->time_limit_ms / n_pvs;
-        if (pv_budget_ms < 1) pv_budget_ms = 1;
-    }
-
     for (int mpv = 0; mpv < n_pvs; mpv++) {
         /* Reset time budget for each PV line.
          * Without this, PV line 1 at deep depths consumes the entire
          * time budget, leaving PV lines 2-N with time_up=1 and they
          * never get searched (the MultiPV "freeze" bug).
-         * Each PV line gets its own full time allocation (or its share of
-         * the total, if mpv_share_budget is set — see pv_budget_ms above,
-         * which equals p->time_limit_ms and is therefore a no-op when
-         * mpv_share_budget==0). */
+         * Each PV line gets its own full time allocation. */
         if (p->time_limit_ms > 0) {
-            ss->deadline_ms = now_ms() + pv_budget_ms;
+            ss->deadline_ms = now_ms() + p->time_limit_ms;
         }
         ss->time_up = 0;
         Move best_move = {0}; int best_score = 0;
@@ -2106,41 +1763,24 @@ SearchResult search_best(Board *b, const SearchParams *p) {
             Move iter_pv[MAX_PLY]; int iter_len = 0;
             int score;
 
-            /* Raise the depth-1 guarantee for the first depth of the first
-             * PV line (see SearchState.stop_guard).  Conditions:
-             *   sd == 1   — only the search that starts from scratch owes a
-             *               move.  Lazy SMP helpers are staggered to start at
-             *               depth 2/3/5/7 and their results are discarded, so
-             *               guarding them would just make "quit" wait on a
-             *               deep search for nothing.
-             *   mpv == 0  — later MultiPV lines are extra, not the bestmove.
-             * A depth-1 search is a handful of nodes, so the cost of ignoring
-             * a stop for its duration is negligible. */
-            ss->stop_guard = (sd == 1 && depth == sd && mpv == 0);
-
             if (depth <= 2 || !prev_score_valid) {
                 score = alpha_beta(ss, b, depth, -99999, 99999, iter_pv, &iter_len, 0, -1);
             } else {
                 /* Aspiration windows */
-                int delta = g_tune.asp_delta_init, alpha2 = prev_score-delta, beta2 = prev_score+delta;
+                int delta = 20, alpha2 = prev_score-delta, beta2 = prev_score+delta;
                 int tries = 0; int exact = 0;
                 while (tries < 6) {
                     tries++;
                     iter_len = 0;
                     score = alpha_beta(ss, b, depth, alpha2, beta2, iter_pv, &iter_len, 0, -1);
                     if (ss->time_up) break;
-                    if      (score <= alpha2) { alpha2 -= delta; if(alpha2<-18000)alpha2=-18000; delta*=2; if(delta>g_tune.asp_delta_max)delta=g_tune.asp_delta_max; exact=0; }
-                    else if (score >= beta2)  { beta2  += delta; if(beta2>18000)beta2=18000;   delta*=2; if(delta>g_tune.asp_delta_max)delta=g_tune.asp_delta_max; exact=0; }
+                    if      (score <= alpha2) { alpha2 -= delta; if(alpha2<-18000)alpha2=-18000; delta*=2; if(delta>500)delta=500; exact=0; }
+                    else if (score >= beta2)  { beta2  += delta; if(beta2>18000)beta2=18000;   delta*=2; if(delta>500)delta=500; exact=0; }
                     else { exact=1; break; }
                     if (alpha2<=-18000 && beta2>=18000) break;
                 }
                 if (!exact && iter_len > 0) {}   /* use whatever we have */
             }
-
-            /* First depth is in the bag — lower the guard so a pending stop
-             * takes effect from the next depth on (the check just below,
-             * and time_up() inside the next depth's alpha_beta). */
-            ss->stop_guard = 0;
 
             if (ss->time_up && !iter_len) break;
             if (iter_len > 0) {
@@ -2228,17 +1868,6 @@ void search_best_sret(SearchResult *out, Board *b, const SearchParams *p) {
     safe.info_cb      = NULL;   /* no callback in WASM mode */
     safe.stop         = NULL;   /* no external stop flag */
     safe.search_state = NULL;   /* use default global state */
-    safe.tt           = NULL;   /* v4.00: JS never sets this — force the
-                                  * g_tt fallback inside search_best() instead
-                                  * of trusting whatever garbage/OOB byte was
-                                  * read from the 32-byte SearchParams buffer
-                                  * the JS worker allocates (see zchezz_wasm.html). */
-    safe.mpv_share_budget = 0;  /* v4.00: JS never sets this either — force the
-                                  * interactive per-PV-full-budget behavior so
-                                  * the browser's MultiPV analysis panel always
-                                  * gets full-depth lines, regardless of
-                                  * whatever byte the JS buffer happened to have
-                                  * at this offset. */
     SearchResult tmp = search_best(b, &safe);
     memcpy(out, &tmp, sizeof(SearchResult));
 }
