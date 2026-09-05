@@ -1,7 +1,11 @@
 # engine/build/Makefile — shared build system for Zchezz engine versions.
 
-ENGINE     ?= v403
-ARCH_FLAGS ?= -mavxvnni -mavx2
+# The active release line on this branch. Override with ENGINE=vXXX for
+# historical/regression builds. Keep this aligned with engine/ACTIVE_ENGINE.
+ENGINE     ?= v322
+# AVX2 is the portable x86-64 release baseline. AVX-VNNI remains opt-in via
+# ARCH_FLAGS="-mavxvnni -mavx2" on CPUs that actually support it.
+ARCH_FLAGS ?= -mavx2
 STATIC_FLAG ?= -static
 
 # GNU Make defines CC=cc as a built-in default. Override only that built-in
@@ -63,6 +67,7 @@ endif
 build-info:
 	@echo ENGINE=$(ENGINE)
 	@echo CC=$(CC)
+	@echo ARCH_FLAGS=$(ARCH_FLAGS)
 	@echo HAVE_FATHOM=$(HAVE_FATHOM)
 	@echo Tablebases: $(TB_STATUS)
 
