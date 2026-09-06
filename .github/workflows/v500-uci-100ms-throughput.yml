@@ -1,0 +1,109 @@
+name: v500-uci-100ms-throughput
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-uci-100ms-throughput.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Build engines
+        run: |
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+      - name: Measure persistent-UCI movetime 100ms
+        run: |
+          mkdir -p artifacts/uci100
+          python3 - <<'PY'
+          import chess, random, subprocess, re, json, statistics, time
+          rng=random.Random(710731)
+          fens=[]
+          while len(fens)<64:
+              b=chess.Board()
+              for _ in range(rng.randint(6,42)):
+                  if b.is_game_over(): break
+                  moves=list(b.legal_moves)
+                  b.push(rng.choice(moves))
+              if not b.is_game_over() and len(list(b.legal_moves))>1:
+                  fens.append(b.fen())
+
+          def read_until(p, token):
+              out=[]
+              while True:
+                  line=p.stdout.readline()
+                  if not line: raise RuntimeError('engine exited: '+token)
+                  line=line.strip(); out.append(line)
+                  if line.startswith(token): return out
+
+          info_re=re.compile(r'^info depth (\d+).*? nodes (\d+) nps (\d+) time (\d+)')
+          def measure(exe):
+              p=subprocess.Popen([exe],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                                 text=True,bufsize=1)
+              def send(x): p.stdin.write(x+'\n'); p.stdin.flush()
+              send('uci'); read_until(p,'uciok')
+              send('setoption name Threads value 1')
+              send('setoption name MultiPV value 1')
+              send('isready'); read_until(p,'readyok')
+              rows=[]
+              for idx,fen in enumerate(fens):
+                  send('ucinewgame'); send('isready'); read_until(p,'readyok')
+                  send('position fen '+fen)
+                  t0=time.perf_counter()
+                  send('go movetime 100')
+                  lines=read_until(p,'bestmove')
+                  wall_ms=(time.perf_counter()-t0)*1000.0
+                  infos=[]
+                  for line in lines:
+                      m=info_re.search(line)
+                      if m: infos.append(tuple(map(int,m.groups())))
+                  if not infos: raise RuntimeError('no parseable info for '+fen+'\n'+'\n'.join(lines[-10:]))
+                  depth,nodes,nps,reported_ms=infos[-1]
+                  rows.append({'i':idx,'depth':depth,'nodes':nodes,'nps':nps,'reported_ms':reported_ms,'wall_ms':wall_ms})
+              send('quit'); p.wait(timeout=5)
+              return rows
+
+          data={}
+          for name,exe in [('v500','engine/c/zchezz_v500/zchezz.exe'),('v314','engine/c/zchezz_v314/zchezz.exe')]:
+              rows=measure(exe); data[name]=rows
+              print(name,'median nodes',statistics.median(x['nodes'] for x in rows),
+                    'median nps',statistics.median(x['nps'] for x in rows),
+                    'median reported ms',statistics.median(x['reported_ms'] for x in rows),
+                    'median wall ms',statistics.median(x['wall_ms'] for x in rows),
+                    'median depth',statistics.median(x['depth'] for x in rows))
+          summary={}
+          for name,rows in data.items():
+              summary[name]={
+                  'median_nodes':statistics.median(x['nodes'] for x in rows),
+                  'mean_nodes':statistics.mean(x['nodes'] for x in rows),
+                  'median_nps':statistics.median(x['nps'] for x in rows),
+                  'median_reported_ms':statistics.median(x['reported_ms'] for x in rows),
+                  'median_wall_ms':statistics.median(x['wall_ms'] for x in rows),
+                  'median_depth':statistics.median(x['depth'] for x in rows),
+              }
+          paired=[a['nodes']/b['nodes'] for a,b in zip(data['v500'],data['v314']) if b['nodes']]
+          summary['paired_v500_over_v314_nodes']={
+              'median':statistics.median(paired),'mean':statistics.mean(paired),
+              'min':min(paired),'max':max(paired)}
+          print(json.dumps(summary,indent=2))
+          open('artifacts/uci100/results.json','w').write(json.dumps({'summary':summary,'rows':data,'fens':fens},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-uci-100ms-throughput
+          path: artifacts/uci100/
+          retention-days: 30
