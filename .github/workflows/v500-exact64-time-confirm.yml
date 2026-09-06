@@ -14,6 +14,7 @@ env:
   ARCH_FLAGS: -mavx2
   STATIC_FLAG: ''
 
+# Confirmation run: single arena thread, both player orders, two independent seeds.
 jobs:
   confirm:
     strategy:
