@@ -86,14 +86,21 @@ jobs:
       - name: Repeated NPS bench
         run: |
           python - <<'PY'
-          import subprocess,re,statistics,json
+          import subprocess,re,statistics,json,time
           from pathlib import Path
           def one(exe):
+              t0=time.perf_counter()
               p=subprocess.run([exe,'bench','11'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              wall=time.perf_counter()-t0
               out=p.stdout
-              m=re.findall(r'(?i)(?:nps|nodes/second|nodes per second)\s*[:=]?\s*([0-9,]+)',out)
-              if not m: raise SystemExit(out[-3000:])
-              return int(m[-1].replace(',','')),out
+              m=re.findall(r'(?i)(?:nps|nodes/sec|nodes/second|nodes per second)\s*[:=]?\s*([0-9,]+)',out)
+              if m: return int(m[-1].replace(',','')),out
+              nodes=re.findall(r'(?i)total nodes\s*:\s*([0-9,]+)',out)
+              ms=re.findall(r'(?i)elapsed\s*:\s*([0-9]+)\s*ms',out)
+              if nodes and ms and int(ms[-1])>0:
+                  return int(nodes[-1].replace(',',''))*1000/int(ms[-1]),out
+              if nodes: return int(nodes[-1].replace(',',''))/wall,out
+              raise SystemExit(out[-3000:])
           d={}
           for name in ('base','fused'):
               exe=f'engine/c/zchezz_v500{name}/zchezz.exe'
