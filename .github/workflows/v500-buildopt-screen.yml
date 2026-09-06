@@ -1,0 +1,102 @@
+name: v500-buildopt-screen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-buildopt-screen.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  buildopt:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [lto, pgo_lto]
+    env:
+      STATIC_FLAG: ""
+      VARIANT: ${{ matrix.variant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Clone identical v5 source trees
+        run: |
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500base
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500opt
+          mkdir -p "artifacts/v500-buildopts/$VARIANT"
+
+      - name: Build AVX2 baseline
+        run: |
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500base clean native
+          engine/c/zchezz_v500base/zchezz.exe bench 11 | tee "artifacts/v500-buildopts/$VARIANT/bench_base.txt"
+
+      - name: Build optimized candidate
+        run: |
+          if [ "$VARIANT" = lto ]; then
+            ARCH_FLAGS="-mavx2 -flto" make -C engine/build ENGINE=v500opt clean native
+          else
+            rm -rf /tmp/zchezz-v500-pgo && mkdir -p /tmp/zchezz-v500-pgo
+            ARCH_FLAGS="-mavx2 -flto -fprofile-generate=/tmp/zchezz-v500-pgo" \
+              make -C engine/build ENGINE=v500opt clean native
+            engine/c/zchezz_v500opt/zchezz.exe bench 8 >/dev/null
+            engine/c/zchezz_v500opt/zchezz.exe bench 10 >/dev/null
+            engine/c/zchezz_v500opt/zchezz.exe bench 12 >/dev/null
+            ARCH_FLAGS="-mavx2 -flto -fprofile-use=/tmp/zchezz-v500-pgo -fprofile-correction" \
+              make -C engine/build ENGINE=v500opt clean native
+          fi
+          engine/c/zchezz_v500opt/zchezz.exe bench 11 | tee "artifacts/v500-buildopts/$VARIANT/bench_opt.txt"
+
+      - name: Create paired openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'openings_buildopt.epd', 600731, 256)
+          PY
+
+      - name: Fixed-node semantic control
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500opt/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 96 --threads 4 --movetime 0 --nodes 30000 --max-plies 220 \
+            --openings openings_buildopt.epd --opening-plies 0 --seed 601000 --tt-mb 16 \
+            --json "artifacts/v500-buildopts/$VARIANT/nodes.json"
+
+      - name: Timed Elo screen
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500opt/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 384 --threads 4 --movetime 20 --nodes 0 --max-plies 220 \
+            --openings openings_buildopt.epd --opening-plies 0 --seed 601100 --tt-mb 16 \
+            --json "artifacts/v500-buildopts/$VARIANT/time20.json"
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('artifacts/v500-buildopts')
+          for p in root.rglob('*.json'):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-buildopt-${{ matrix.variant }}
+          path: artifacts/v500-buildopts/${{ matrix.variant }}/
+          retention-days: 30
