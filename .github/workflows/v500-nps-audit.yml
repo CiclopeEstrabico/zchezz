@@ -1,0 +1,89 @@
+name: v500-nps-audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-nps-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  nps:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch v3.22 reference
+        run: |
+          git fetch --depth=1 origin v322-nps-strength
+          git checkout FETCH_HEAD -- engine/c/zchezz_v322
+      - name: Build engines
+        run: |
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v322 native
+          make -C engine/build ENGINE=v500 native
+      - name: Run matched built-in benches
+        run: |
+          mkdir -p artifacts/nps
+          python - <<'PY'
+          import re, subprocess, json, statistics, time
+          from pathlib import Path
+
+          engines = {
+              'v314': 'engine/c/zchezz_v314/zchezz.exe',
+              'v322': 'engine/c/zchezz_v322/zchezz.exe',
+              'v500': 'engine/c/zchezz_v500/zchezz.exe',
+          }
+          results = {}
+          for depth in (10, 12, 14):
+              for name, exe in engines.items():
+                  vals=[]
+                  raws=[]
+                  for rep in range(3):
+                      t0=time.perf_counter()
+                      p=subprocess.run([exe, 'bench', str(depth)], text=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       check=True, timeout=180)
+                      wall=time.perf_counter()-t0
+                      out=p.stdout
+                      raws.append(out)
+                      # Accept common forms: 'NPS: 123', 'nps 123', 'Nodes/second: 123'.
+                      found=[int(x.replace(',','')) for x in re.findall(r'(?i)(?:nps|nodes/second|nodes per second)\s*[:=]?\s*([0-9,]+)', out)]
+                      if found:
+                          nps=found[-1]
+                      else:
+                          # Fallback: parse total nodes and elapsed ms/s if bench format differs.
+                          nodes=[int(x.replace(',','')) for x in re.findall(r'(?i)(?:total\s+)?nodes\s*[:=]?\s*([0-9,]+)', out)]
+                          ms=[int(x) for x in re.findall(r'(?i)(?:time|elapsed)\s*[:=]?\s*([0-9]+)\s*ms', out)]
+                          if nodes and ms and ms[-1] > 0:
+                              nps=nodes[-1]*1000/ms[-1]
+                          elif nodes:
+                              nps=nodes[-1]/wall
+                          else:
+                              raise RuntimeError(f'Could not parse bench output for {name} depth {depth}:\n{out[-3000:]}')
+                      vals.append(float(nps))
+                  results[f'{name}_d{depth}']={
+                      'nps_runs': vals,
+                      'nps_median': statistics.median(vals),
+                      'nps_mean': statistics.mean(vals),
+                  }
+                  Path(f'artifacts/nps/{name}_d{depth}.txt').write_text('\n\n--- REP ---\n'.join(raws))
+          for depth in (10,12,14):
+              b=results[f'v314_d{depth}']['nps_median']
+              b322=results[f'v322_d{depth}']['nps_median']
+              v=results[f'v500_d{depth}']['nps_median']
+              print(f'depth {depth}: v314={b:,.0f} v322={b322:,.0f} v500={v:,.0f} NPS')
+              print(f'  v500/v314={v/b:.3f}  v500/v322={v/b322:.3f}  v322/v314={b322/b:.3f}')
+          Path('artifacts/nps/summary.json').write_text(json.dumps(results, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-nps-audit
+          path: artifacts/nps/
+          retention-days: 30
