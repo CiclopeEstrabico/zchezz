@@ -214,15 +214,22 @@ static inline void _acc_add_piece(int16_t *accW, int16_t *accB,
     }
 #elif defined(__wasm_simd128__)
     for (int o = 0; o < NN_L1_OUT; o += 8) {
-        v128_t aw = wasm_v128_load(accW + o);
-        v128_t ab = wasm_v128_load(accB + o);
-        aw = wasm_i16x8_add(aw, wasm_v128_load(wRow + o));
-        ab = wasm_i16x8_add(ab, wasm_v128_load(bRow + o));
-        wasm_v128_store(accW + o, aw);
-        wasm_v128_store(accB + o, ab);
+        if (updW) {
+            v128_t aw = wasm_v128_load(accW + o);
+            aw = wasm_i16x8_add(aw, wasm_v128_load(wRow + o));
+            wasm_v128_store(accW + o, aw);
+        }
+        if (updB) {
+            v128_t ab = wasm_v128_load(accB + o);
+            ab = wasm_i16x8_add(ab, wasm_v128_load(bRow + o));
+            wasm_v128_store(accB + o, ab);
+        }
     }
 #else
-    for (int o = 0; o < NN_L1_OUT; o++) { accW[o] += wRow[o]; accB[o] += bRow[o]; }
+    for (int o = 0; o < NN_L1_OUT; o++) {
+        if (updW) accW[o] += wRow[o];
+        if (updB) accB[o] += bRow[o];
+    }
 #endif
 }
 
@@ -252,15 +259,22 @@ static inline void _acc_sub_piece(int16_t *accW, int16_t *accB,
     }
 #elif defined(__wasm_simd128__)
     for (int o = 0; o < NN_L1_OUT; o += 8) {
-        v128_t aw = wasm_v128_load(accW + o);
-        v128_t ab = wasm_v128_load(accB + o);
-        aw = wasm_i16x8_sub(aw, wasm_v128_load(wRow + o));
-        ab = wasm_i16x8_sub(ab, wasm_v128_load(bRow + o));
-        wasm_v128_store(accW + o, aw);
-        wasm_v128_store(accB + o, ab);
+        if (updW) {
+            v128_t aw = wasm_v128_load(accW + o);
+            aw = wasm_i16x8_sub(aw, wasm_v128_load(wRow + o));
+            wasm_v128_store(accW + o, aw);
+        }
+        if (updB) {
+            v128_t ab = wasm_v128_load(accB + o);
+            ab = wasm_i16x8_sub(ab, wasm_v128_load(bRow + o));
+            wasm_v128_store(accB + o, ab);
+        }
     }
 #else
-    for (int o = 0; o < NN_L1_OUT; o++) { accW[o] -= wRow[o]; accB[o] -= bRow[o]; }
+    for (int o = 0; o < NN_L1_OUT; o++) {
+        if (updW) accW[o] -= wRow[o];
+        if (updB) accB[o] -= bRow[o];
+    }
 #endif
 }
 
