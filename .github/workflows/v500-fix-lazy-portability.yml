@@ -1,0 +1,146 @@
+name: v500-fix-lazy-portability
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-fix-lazy-portability.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Patch scalar and WASM perspective masks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('engine/c/zchezz_v500/nnue.c')
+          s=p.read_text()
+          old_add='''#elif defined(__wasm_simd128__)
+    for (int o = 0; o < NN_L1_OUT; o += 8) {
+        v128_t aw = wasm_v128_load(accW + o);
+        v128_t ab = wasm_v128_load(accB + o);
+        aw = wasm_i16x8_add(aw, wasm_v128_load(wRow + o));
+        ab = wasm_i16x8_add(ab, wasm_v128_load(bRow + o));
+        wasm_v128_store(accW + o, aw);
+        wasm_v128_store(accB + o, ab);
+    }
+#else
+    for (int o = 0; o < NN_L1_OUT; o++) { accW[o] += wRow[o]; accB[o] += bRow[o]; }
+#endif
+}'''
+          new_add='''#elif defined(__wasm_simd128__)
+    for (int o = 0; o < NN_L1_OUT; o += 8) {
+        if (updW) {
+            v128_t aw = wasm_v128_load(accW + o);
+            aw = wasm_i16x8_add(aw, wasm_v128_load(wRow + o));
+            wasm_v128_store(accW + o, aw);
+        }
+        if (updB) {
+            v128_t ab = wasm_v128_load(accB + o);
+            ab = wasm_i16x8_add(ab, wasm_v128_load(bRow + o));
+            wasm_v128_store(accB + o, ab);
+        }
+    }
+#else
+    for (int o = 0; o < NN_L1_OUT; o++) {
+        if (updW) accW[o] += wRow[o];
+        if (updB) accB[o] += bRow[o];
+    }
+#endif
+}'''
+          old_sub='''#elif defined(__wasm_simd128__)
+    for (int o = 0; o < NN_L1_OUT; o += 8) {
+        v128_t aw = wasm_v128_load(accW + o);
+        v128_t ab = wasm_v128_load(accB + o);
+        aw = wasm_i16x8_sub(aw, wasm_v128_load(wRow + o));
+        ab = wasm_i16x8_sub(ab, wasm_v128_load(bRow + o));
+        wasm_v128_store(accW + o, aw);
+        wasm_v128_store(accB + o, ab);
+    }
+#else
+    for (int o = 0; o < NN_L1_OUT; o++) { accW[o] -= wRow[o]; accB[o] -= bRow[o]; }
+#endif
+}'''
+          new_sub='''#elif defined(__wasm_simd128__)
+    for (int o = 0; o < NN_L1_OUT; o += 8) {
+        if (updW) {
+            v128_t aw = wasm_v128_load(accW + o);
+            aw = wasm_i16x8_sub(aw, wasm_v128_load(wRow + o));
+            wasm_v128_store(accW + o, aw);
+        }
+        if (updB) {
+            v128_t ab = wasm_v128_load(accB + o);
+            ab = wasm_i16x8_sub(ab, wasm_v128_load(bRow + o));
+            wasm_v128_store(accB + o, ab);
+        }
+    }
+#else
+    for (int o = 0; o < NN_L1_OUT; o++) {
+        if (updW) accW[o] -= wRow[o];
+        if (updB) accB[o] -= bRow[o];
+    }
+#endif
+}'''
+          if s.count(old_add)!=1: raise SystemExit(f'add snippet count={s.count(old_add)}')
+          if s.count(old_sub)!=1: raise SystemExit(f'sub snippet count={s.count(old_sub)}')
+          s=s.replace(old_add,new_add).replace(old_sub,new_sub)
+          p.write_text(s)
+          PY
+          git diff --check
+      - name: Scalar verification build
+        run: |
+          rm -rf engine/c/zchezz_v500scalar engine/c/zchezz_v500avx2
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500scalar
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500avx2
+          ARCH_FLAGS="-DNNUE_VERIFY_ACC" make -C engine/build ENGINE=v500scalar clean native
+          engine/c/zchezz_v500scalar/zchezz.exe bench 10 | tee /tmp/scalar_verify.txt
+      - name: AVX2 verification build
+        run: |
+          ARCH_FLAGS="-mavx2 -DNNUE_VERIFY_ACC" make -C engine/build ENGINE=v500avx2 clean native
+          engine/c/zchezz_v500avx2/zchezz.exe bench 10 | tee /tmp/avx2_verify.txt
+      - name: Scalar versus AVX2 deterministic parity
+        run: |
+          ARCH_FLAGS="" make -C engine/build ENGINE=v500scalar clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500avx2 clean native
+          python - <<'PY'
+          import subprocess,re
+          def positions(exe, depth):
+              out=subprocess.run([exe,'bench',str(depth)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=True,timeout=180).stdout
+              lines=[]
+              for line in out.splitlines():
+                  if line.startswith('Position '):
+                      lines.append(re.sub(r'\s+',' ',line.strip()))
+              if not lines:
+                  raise SystemExit(f'no Position lines from {exe}\n{out[-3000:]}')
+              return lines
+          for depth in (8,10,12):
+              a=positions('engine/c/zchezz_v500scalar/zchezz.exe',depth)
+              b=positions('engine/c/zchezz_v500avx2/zchezz.exe',depth)
+              if a != b:
+                  for i,(x,y) in enumerate(zip(a,b)):
+                      if x!=y:
+                          print('first mismatch',depth,i,x,y)
+                          break
+                  raise SystemExit(f'scalar/AVX2 deterministic mismatch at depth {depth}')
+              print(f'parity depth {depth}: {len(a)} positions identical')
+          PY
+      - name: Commit portability fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add engine/c/zchezz_v500/nnue.c
+          git commit -m "fix(v500): honor lazy perspective masks on scalar and WASM"
+          git push origin HEAD:v500-strength
