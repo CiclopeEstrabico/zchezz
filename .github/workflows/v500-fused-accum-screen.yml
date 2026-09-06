@@ -1,0 +1,161 @@
+name: v500-fused-accum-screen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - "tools/v500_apply_fused_accum.py"
+      - ".github/workflows/v500-fused-accum-screen.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Materialize candidate
+        run: |
+          rm -rf engine/c/zchezz_v500base engine/c/zchezz_v500fused
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500base
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500fused
+          python tools/v500_apply_fused_accum.py --root engine/c/zchezz_v500fused
+          mkdir -p artifacts/fused_accum
+          diff -ur engine/c/zchezz_v500base engine/c/zchezz_v500fused > artifacts/fused_accum/patch.diff || true
+          test -s artifacts/fused_accum/patch.diff
+
+      - name: Build
+        run: |
+          make -C engine/build ENGINE=v500base clean native
+          make -C engine/build ENGINE=v500fused clean native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Exact static-eval parity
+        run: |
+          python - <<'PY'
+          import chess, random, subprocess, re, sys
+          rng=random.Random(610731)
+          fens=[]
+          while len(fens)<500:
+              b=chess.Board()
+              for _ in range(rng.randint(0,80)):
+                  ms=list(b.legal_moves)
+                  if not ms: break
+                  b.push(rng.choice(ms))
+                  if b.is_game_over(claim_draw=True): break
+              if not b.is_game_over(claim_draw=True): fens.append(b.fen())
+          def evals(exe):
+              p=subprocess.Popen([exe],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1)
+              def send(s): p.stdin.write(s+'\n'); p.stdin.flush()
+              send('uci')
+              while True:
+                  if 'uciok' in p.stdout.readline(): break
+              send('isready')
+              while True:
+                  if 'readyok' in p.stdout.readline(): break
+              out=[]
+              for fen in fens:
+                  send('position fen '+fen); send('go depth 1')
+                  score=None
+                  while True:
+                      line=p.stdout.readline()
+                      m=re.search(r' score cp (-?\d+)',line)
+                      if m: score=int(m.group(1))
+                      if line.startswith('bestmove'): break
+                  out.append(score)
+              send('quit'); p.wait(timeout=5)
+              return out
+          a=evals('engine/c/zchezz_v500base/zchezz.exe')
+          b=evals('engine/c/zchezz_v500fused/zchezz.exe')
+          bad=[(i,x,y) for i,(x,y) in enumerate(zip(a,b)) if x!=y]
+          print('positions',len(a),'mismatches',len(bad))
+          if bad: print(bad[:20]); sys.exit(1)
+          PY
+
+      - name: Repeated NPS bench
+        run: |
+          python - <<'PY'
+          import subprocess,re,statistics,json
+          from pathlib import Path
+          def one(exe):
+              p=subprocess.run([exe,'bench','11'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              out=p.stdout
+              m=re.findall(r'(?i)(?:nps|nodes/second|nodes per second)\s*[:=]?\s*([0-9,]+)',out)
+              if not m: raise SystemExit(out[-3000:])
+              return int(m[-1].replace(',','')),out
+          d={}
+          for name in ('base','fused'):
+              exe=f'engine/c/zchezz_v500{name}/zchezz.exe'
+              vals=[]; raws=[]
+              for _ in range(7):
+                  v,o=one(exe); vals.append(v); raws.append(o)
+              d[name]={'runs':vals,'median':statistics.median(vals),'mean':statistics.mean(vals)}
+              Path(f'artifacts/fused_accum/bench_{name}.txt').write_text('\n---\n'.join(raws))
+          print(json.dumps(d,indent=2))
+          print('median ratio fused/base =',d['fused']['median']/d['base']['median'])
+          Path('artifacts/fused_accum/nps.json').write_text(json.dumps(d,indent=2))
+          PY
+
+      - name: Generate openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/fused_accum/openings.epd', 610731, 384)
+          PY
+
+      - name: Fixed-node identity gate
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500fused/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 192 --threads 4 --movetime 0 --nodes 30000 --max-plies 240 \
+            --openings artifacts/fused_accum/openings.epd --opening-plies 0 \
+            --seed 611000 --tt-mb 16 \
+            --json artifacts/fused_accum/nodes.json \
+            --pgn artifacts/fused_accum/nodes.pgn
+
+      - name: Timed Elo screen
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500fused/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 512 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/fused_accum/openings.epd --opening-plies 0 \
+            --seed 611100 --tt-mb 16 \
+            --json artifacts/fused_accum/time20.json \
+            --pgn artifacts/fused_accum/time20.pgn
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('artifacts/fused_accum').glob('*.json')):
+              try:
+                  j=json.loads(p.read_text())
+                  if 'pairings' in j:
+                      x=j['pairings'][0]
+                      print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+              except Exception as e: print(p,e)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-fused-accum-screen
+          path: artifacts/fused_accum/
+          retention-days: 30
