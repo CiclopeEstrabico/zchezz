@@ -1,0 +1,112 @@
+name: v500-combined-fastgate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-combined-fastgate.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  combined:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Fetch v3.22 and best NNUE
+        run: |
+          git fetch --depth=1 origin v322-nps-strength
+          git checkout FETCH_HEAD -- engine/c/zchezz_v322
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33996922992
+          name: v500-static-teacher_lr3e5
+          path: candidate_artifact
+      - name: Materialize combined v5 candidate
+        run: |
+          CAND=$(find candidate_artifact -type f -name nnue_weights.bin | head -1)
+          test -n "$CAND"
+          rm -rf engine/c/zchezz_v500combo
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500combo
+          cp "$CAND" engine/c/zchezz_v500combo/nnue_weights.bin
+          python tools/v500_apply_fused_accum.py --root engine/c/zchezz_v500combo
+      - name: Build reference engines
+        run: |
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500 clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v314 clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v322 clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500 arena
+      - name: Build combined candidate with x86-v3 PGO+LTO
+        run: |
+          rm -rf /tmp/v500combo-pgo && mkdir -p /tmp/v500combo-pgo
+          ARCH_FLAGS="-march=x86-64-v3 -flto -fprofile-generate=/tmp/v500combo-pgo" \
+            make -C engine/build ENGINE=v500combo clean native
+          engine/c/zchezz_v500combo/zchezz.exe bench 8 >/dev/null
+          engine/c/zchezz_v500combo/zchezz.exe bench 10 >/dev/null
+          engine/c/zchezz_v500combo/zchezz.exe bench 12 >/dev/null
+          ARCH_FLAGS="-march=x86-64-v3 -flto -fprofile-use=/tmp/v500combo-pgo -fprofile-correction" \
+            make -C engine/build ENGINE=v500combo clean native
+          mkdir -p artifacts/combo
+          engine/c/zchezz_v500combo/zchezz.exe bench 11 | tee artifacts/combo/bench_combo.txt
+          engine/c/zchezz_v500/zchezz.exe bench 11 | tee artifacts/combo/bench_v500.txt
+          engine/c/zchezz_v314/zchezz.exe bench 11 | tee artifacts/combo/bench_v314.txt
+          engine/c/zchezz_v322/zchezz.exe bench 11 | tee artifacts/combo/bench_v322.txt
+      - name: Openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/combo/openings.epd',650731,320)
+          PY
+      - name: Combined vs v3.14 at 20ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500combo/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 256 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/combo/openings.epd --opening-plies 0 --seed 651000 --tt-mb 16 \
+            --json artifacts/combo/combo_vs_v314_20ms.json
+      - name: Combined vs v3.22 at 20ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500combo/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --games 256 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/combo/openings.epd --opening-plies 0 --seed 651100 --tt-mb 16 \
+            --json artifacts/combo/combo_vs_v322_20ms.json
+      - name: Combined vs current v5 at 20ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500combo/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 256 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/combo/openings.epd --opening-plies 0 --seed 651200 --tt-mb 16 \
+            --json artifacts/combo/combo_vs_v500_20ms.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('artifacts/combo').glob('*.json')):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: {x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-combined-fastgate
+          path: artifacts/combo/
+          retention-days: 30
