@@ -1,0 +1,73 @@
+name: v500-h1-utilization-audit
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-h1-utilization-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit quantized baseline H1 utilization
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import struct
+          p=Path('engine/c/zchezz_v500/nnue_weights.bin')
+          b=p.read_bytes()
+          assert b[:4]==b'NNU4'
+          epoch=struct.unpack_from('<I',b,4)[0]
+          dims=struct.unpack_from('<5I',b,8)
+          l1in,h1,l2in,h2,l3in=dims
+          assert l2in==2*h1
+          off=4+4+20+16
+          off += l1in*h1*2
+          off += h1*4
+          l2=list(struct.unpack_from(f'<{h2*l2in}b',b,off))
+          # row-major [h2][2*h1]
+          imp=[]
+          nz_entries=[]
+          for i in range(h1):
+              s=0; n=0
+              for r in range(h2):
+                  a=l2[r*l2in+i]
+                  c=l2[r*l2in+h1+i]
+                  s += abs(a)+abs(c)
+                  n += (a!=0)+(c!=0)
+              imp.append(s); nz_entries.append(n)
+          nonzero=[i for i,x in enumerate(imp) if x]
+          zero=[i for i,x in enumerate(imp) if not x]
+          ranked=sorted(range(h1), key=lambda i: imp[i], reverse=True)
+          total=sum(imp)
+          print(f'NNU4 epoch={epoch} dims={dims}')
+          print(f'H1 channels with any non-zero outgoing quantized L2 weight: {len(nonzero)}/{h1}')
+          print(f'H1 channels completely dead at L2: {len(zero)}/{h1}')
+          print(f'nonzero indices min/max: {min(nonzero) if nonzero else None}/{max(nonzero) if nonzero else None}')
+          print(f'first 40 dead indices: {zero[:40]}')
+          for k in (32,64,128,192,224,256,288,320,384,512):
+              if k<=h1:
+                  kept=sum(imp[i] for i in ranked[:k])
+                  print(f'top{k:3d} absolute outgoing importance: {kept/total if total else 0:.9f}')
+          # Also inspect whether dead channels are zero in L1 or merely disconnected.
+          off_l1=4+4+20+16
+          l1=struct.unpack_from(f'<{l1in*h1}h',b,off_l1)
+          dead_l1_nonzero=0
+          live_l1_nonzero=0
+          for feat in range(l1in):
+              row=feat*h1
+              for i in zero:
+                  dead_l1_nonzero += (l1[row+i]!=0)
+              for i in nonzero:
+                  live_l1_nonzero += (l1[row+i]!=0)
+          print(f'L1 nonzero weights feeding dead H1 channels: {dead_l1_nonzero}')
+          print(f'L1 nonzero weights feeding live H1 channels: {live_l1_nonzero}')
+          print('top 20 channels (index, abs_outgoing, nonzero_edges):')
+          for i in ranked[:20]: print(i,imp[i],nz_entries[i])
+          PY
