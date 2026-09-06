@@ -1,0 +1,62 @@
+name: v500-throughput-baseline
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-throughput-baseline.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build v5 and v3.14
+        run: |
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+      - name: Alternating throughput benchmark
+        run: |
+          mkdir -p artifacts/throughput
+          python3 - <<'PY'
+          import subprocess, re, statistics, json
+          engines = {
+              'v500_lazy': 'engine/c/zchezz_v500/zchezz.exe',
+              'v314': 'engine/c/zchezz_v314/zchezz.exe',
+          }
+          vals = {k: [] for k in engines}
+          raw = {k: [] for k in engines}
+          order = ['v500_lazy','v314','v314','v500_lazy'] * 2
+          for name in order:
+              p = subprocess.run([engines[name], 'bench', '11'], text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 check=True, timeout=180)
+              m = re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)', p.stdout)
+              if not m:
+                  raise SystemExit('NPS not found for '+name+'\n'+p.stdout[-3000:])
+              nps = int(m[-1].replace(',',''))
+              vals[name].append(nps)
+              raw[name].append(p.stdout)
+              print(name, nps)
+          d = {}
+          for name, xs in vals.items():
+              d[name] = {'runs': xs, 'median': statistics.median(xs), 'mean': statistics.mean(xs)}
+              open(f'artifacts/throughput/{name}.txt','w').write('\n---\n'.join(raw[name]))
+          d['v500_over_v314'] = d['v500_lazy']['median'] / d['v314']['median']
+          d['remaining_nps_gap_pct'] = 100.0 * (1.0 - d['v500_over_v314'])
+          print(json.dumps(d, indent=2))
+          open('artifacts/throughput/nps.json','w').write(json.dumps(d, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-throughput-baseline
+          path: artifacts/throughput/
+          retention-days: 30
