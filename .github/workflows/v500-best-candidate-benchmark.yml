@@ -1,0 +1,127 @@
+name: v500-best-candidate-benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-best-candidate-benchmark.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --disable-pip-version-check python-chess
+
+      - name: Fetch v3.22 reference
+        run: |
+          git fetch --depth=1 origin v322-nps-strength
+          git checkout FETCH_HEAD -- engine/c/zchezz_v322
+
+      - name: Download best 1.411M-position NNUE candidate
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33996922992
+          name: v500-static-teacher_lr3e5
+          path: candidate_artifact
+
+      - name: Materialize engines
+        run: |
+          CAND=$(find candidate_artifact -type f -name nnue_weights.bin | head -1)
+          test -n "$CAND"
+          echo "candidate=$CAND"
+          rm -rf engine/c/zchezz_v500_bestnnue
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500_bestnnue
+          cp "$CAND" engine/c/zchezz_v500_bestnnue/nnue_weights.bin
+          make -C engine/build ENGINE=v500 native
+          make -C engine/build ENGINE=v500_bestnnue native
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v322 native
+          make -C engine/build ENGINE=v500 arena
+          mkdir -p artifacts/best_candidate
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, 'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/best_candidate/openings.epd', 590731, 512)
+          PY
+
+      - name: Candidate vs v3.14 at 100ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_bestnnue/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 384 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/best_candidate/openings.epd --opening-plies 0 \
+            --seed 591000 --tt-mb 16 \
+            --json artifacts/best_candidate/candidate_vs_v314_time.json \
+            --pgn artifacts/best_candidate/candidate_vs_v314_time.pgn
+
+      - name: Candidate vs v3.22 at 100ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_bestnnue/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --games 384 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/best_candidate/openings.epd --opening-plies 0 \
+            --seed 591100 --tt-mb 16 \
+            --json artifacts/best_candidate/candidate_vs_v322_time.json \
+            --pgn artifacts/best_candidate/candidate_vs_v322_time.pgn
+
+      - name: Current v5 vs v3.22 control at 100ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --games 256 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/best_candidate/openings.epd --opening-plies 0 \
+            --seed 591200 --tt-mb 16 \
+            --json artifacts/best_candidate/v500_vs_v322_time.json \
+            --pgn artifacts/best_candidate/v500_vs_v322_time.pgn
+
+      - name: Candidate vs current v5 confirmation at 100ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_bestnnue/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 384 --threads 4 --movetime 100 --nodes 0 --max-plies 300 \
+            --openings artifacts/best_candidate/openings.epd --opening-plies 0 \
+            --seed 591300 --tt-mb 16 \
+            --json artifacts/best_candidate/candidate_vs_v500_time.json \
+            --pgn artifacts/best_candidate/candidate_vs_v500_time.pgn
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('artifacts/best_candidate').glob('*.json')):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-best-candidate-benchmark
+          path: artifacts/best_candidate/
+          retention-days: 30
