@@ -1,0 +1,44 @@
+name: v323-fix-shared-tools
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v323-release-candidate]
+    paths:
+      - .github/workflows/v323-fix-shared-tools.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v323-release-candidate
+      - name: Fix GA tuner POSIX CPU detection include
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('engine/c/tools/ga_tune.c')
+          s=p.read_text(encoding='utf-8')
+          marker='#include <stdatomic.h>\n'
+          add='#include <stdatomic.h>\n#ifndef _WIN32\n#include <unistd.h>\n#endif\n'
+          if '#include <unistd.h>' not in s:
+              assert s.count(marker)==1
+              p.write_text(s.replace(marker,add,1),encoding='utf-8')
+          PY
+          make -C engine/build TOOLS_ENGINE=v403 ga_tune STATIC_FLAG='' ARCH_FLAGS='-mavx2'
+      - name: Commit fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add engine/c/tools/ga_tune.c
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(tools): include POSIX cpu detection header'
+          git push origin HEAD:v323-release-candidate
