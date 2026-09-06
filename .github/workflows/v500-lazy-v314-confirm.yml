@@ -1,0 +1,110 @@
+name: v500-lazy-v314-confirm
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-lazy-v314-confirm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nodes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Build engines and arena
+        run: |
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+          make -C engine/build ENGINE=v500 arena
+          mkdir -p artifacts/lazy_v314_nodes
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/lazy_v314_nodes/openings.epd', 680731, 640)
+          PY
+      - name: v5 lazy versus v3.14 at 50k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 512 --threads 4 --movetime 0 --nodes 50000 --max-plies 240 \
+            --openings artifacts/lazy_v314_nodes/openings.epd --opening-plies 0 \
+            --seed 681000 --tt-mb 16 \
+            --json artifacts/lazy_v314_nodes/v500_vs_v314_50k.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in Path('artifacts/lazy_v314_nodes').glob('*.json'):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-lazy-v314-nodes
+          path: artifacts/lazy_v314_nodes/
+          retention-days: 30
+
+  time100:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Build engines and arena
+        run: |
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+          make -C engine/build ENGINE=v500 arena
+          mkdir -p artifacts/lazy_v314_time
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/lazy_v314_time/openings.epd', 680731, 640)
+          PY
+      - name: v5 lazy versus v3.14 at 100ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 512 --threads 4 --movetime 100 --nodes 0 --max-plies 240 \
+            --openings artifacts/lazy_v314_time/openings.epd --opening-plies 0 \
+            --seed 681100 --tt-mb 16 \
+            --json artifacts/lazy_v314_time/v500_vs_v314_100ms.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in Path('artifacts/lazy_v314_time').glob('*.json'):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-lazy-v314-time100
+          path: artifacts/lazy_v314_time/
+          retention-days: 30
