@@ -90,6 +90,8 @@ jobs:
 
   web:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
@@ -109,6 +111,26 @@ jobs:
           BASELINE="$(python -c "import sys; sys.path.insert(0, 'utils'); from repo_paths import previous_version; print(previous_version('$VERSION'))")"
           echo "candidate=$VERSION baseline=$BASELINE"
           python tests/run_tests.py web --version "$VERSION" --baseline "$BASELINE" --keep-going
+      - name: Promote tested bundle to Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < engine/ACTIVE_ENGINE)"
+          BUNDLE="engine/c/zchezz_${VERSION}/zchezz_bundle.html"
+          test -s "$BUNDLE"
+          EXPECTED="$(python -c "import sys; sys.path.insert(0, 'engine/build'); from bundle import parse_version; print(parse_version('zchezz_${VERSION}'))")"
+          grep -Fq "Zchezz NNUE ${EXPECTED}" "$BUNDLE"
+          cp "$BUNDLE" index.html
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          if git diff --cached --quiet; then
+            echo "index.html already publishes ${VERSION}"
+          else
+            git commit -m "deploy(${VERSION}): publish tested browser bundle"
+            git push origin HEAD:main
+          fi
       - name: Upload web evidence
         if: always()
         uses: actions/upload-artifact@v4
