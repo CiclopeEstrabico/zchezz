@@ -1,0 +1,59 @@
+name: v500 concurrency throughput probe
+
+on:
+  push:
+    branches: [v500-strength]
+    paths:
+      - '.github/workflows/v500-concurrency-probe.yml'
+      - 'tests/concurrent_bench.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH_FLAGS: -mavx2
+  STATIC_FLAG: ''
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install torch for exact compression
+        run: |
+          python -c 'import torch; print(torch.__version__)' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Materialize exact 64x32
+        run: |
+          mkdir -p artifacts/concurrency
+          python train/v500_exact_compress.py \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst artifacts/concurrency/bootstrap.pt --h1 64 --seed 806064
+          python train/v500_arch_sweep.py export \
+            --ckpt artifacts/concurrency/bootstrap.pt \
+            --dst artifacts/concurrency/weights.bin --h1 64 --h2 32
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine engine/c/zchezz_vx64x32 \
+            --weights artifacts/concurrency/weights.bin --h1 64 --h2 32
+      - name: Build engines
+        run: |
+          make -C engine/build ENGINE=vx64x32 clean native
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+      - name: Measure concurrency scaling
+        run: |
+          python tests/concurrent_bench.py \
+            --engine exact64=$GITHUB_WORKSPACE/engine/c/zchezz_vx64x32/zchezz.exe \
+            --engine v500=$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe \
+            --engine v314=$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe \
+            --depth 16 --concurrency 1,2,4 --repeats 3 \
+            --json artifacts/concurrency/result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-concurrency-probe
+          path: artifacts/concurrency/
+          retention-days: 30
