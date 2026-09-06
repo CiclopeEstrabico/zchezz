@@ -1,0 +1,89 @@
+name: v500-best-candidate-fastgate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-best-candidate-fastgate.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fastgate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Fetch v3.22
+        run: |
+          git fetch --depth=1 origin v322-nps-strength
+          git checkout FETCH_HEAD -- engine/c/zchezz_v322
+      - name: Download best NNUE
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33996922992
+          name: v500-static-teacher_lr3e5
+          path: candidate_artifact
+      - name: Build
+        run: |
+          CAND=$(find candidate_artifact -type f -name nnue_weights.bin | head -1)
+          test -n "$CAND"
+          rm -rf engine/c/zchezz_v500_bestnnue
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500_bestnnue
+          cp "$CAND" engine/c/zchezz_v500_bestnnue/nnue_weights.bin
+          make -C engine/build ENGINE=v500_bestnnue native
+          make -C engine/build ENGINE=v314 native
+          make -C engine/build ENGINE=v322 native
+          make -C engine/build ENGINE=v500 arena
+          mkdir -p artifacts/fastgate
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/fastgate/openings.epd', 620731, 256)
+          PY
+      - name: Candidate vs v3.14 20ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_bestnnue/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 192 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/fastgate/openings.epd --opening-plies 0 \
+            --seed 621000 --tt-mb 16 \
+            --json artifacts/fastgate/candidate_vs_v314_20ms.json
+      - name: Candidate vs v3.22 20ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500_bestnnue/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v322/zchezz.exe" \
+            --games 192 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/fastgate/openings.epd --opening-plies 0 \
+            --seed 621100 --tt-mb 16 \
+            --json artifacts/fastgate/candidate_vs_v322_20ms.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('artifacts/fastgate').glob('*.json')):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-best-candidate-fastgate
+          path: artifacts/fastgate/
+          retention-days: 30
