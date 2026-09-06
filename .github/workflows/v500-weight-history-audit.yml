@@ -1,0 +1,48 @@
+name: v500-weight-history-audit
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-weight-history-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trace effective channels across v4/v5 weights
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import struct
+          for ver in ('v401','v402','v403','v500'):
+              p=Path(f'engine/c/zchezz_{ver}/nnue_weights.bin')
+              if not p.exists():
+                  print(ver,'MISSING'); continue
+              b=p.read_bytes()
+              if b[:4] != b'NNU4':
+                  print(ver,'non-NNU4'); continue
+              dims=struct.unpack_from('<5I',b,8)
+              l1in,h1,l2in,h2,l3in=dims
+              off=44
+              l1=struct.unpack_from(f'<{l1in*h1}h',b,off)
+              off += l1in*h1*2 + h1*4
+              l2=struct.unpack_from(f'<{h2*l2in}b',b,off)
+              imp=[]
+              for i in range(h1):
+                  imp.append(sum(abs(l2[r*l2in+i])+abs(l2[r*l2in+h1+i]) for r in range(h2)))
+              live=[i for i,x in enumerate(imp) if x]
+              l1_live=sum(l1[f*h1+i]!=0 for f in range(l1in) for i in live)
+              dead=[i for i,x in enumerate(imp) if not x]
+              l1_dead=sum(l1[f*h1+i]!=0 for f in range(l1in) for i in dead)
+              total=sum(imp); ranked=sorted(imp,reverse=True)
+              print(f'{ver}: dims={dims} liveH1={len(live)}/{h1} dead={len(dead)} '
+                    f'L1nz_live={l1_live} L1nz_dead={l1_dead} '
+                    f'top32={sum(ranked[:32])/total if total else 0:.6f} '
+                    f'top64={sum(ranked[:64])/total if total else 0:.6f}')
+          PY
