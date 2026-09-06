@@ -1,0 +1,103 @@
+name: v500-isa-screen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-isa-screen.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  isa:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [x86v3, x86v3_lto]
+    env:
+      STATIC_FLAG: ""
+      VARIANT: ${{ matrix.variant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Prepare
+        run: |
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500base
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500opt
+          mkdir -p "artifacts/isa/$VARIANT"
+      - name: Build baseline and candidate
+        run: |
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500base clean native
+          if [ "$VARIANT" = x86v3 ]; then FLAGS="-march=x86-64-v3"; else FLAGS="-march=x86-64-v3 -flto"; fi
+          ARCH_FLAGS="$FLAGS" make -C engine/build ENGINE=v500opt clean native
+          make -C engine/build ENGINE=v500 arena
+      - name: Repeated bench
+        run: |
+          python - <<'PY'
+          import os,re,subprocess,statistics,json
+          from pathlib import Path
+          root=Path('artifacts/isa')/os.environ['VARIANT']
+          def run(exe):
+              p=subprocess.run([exe,'bench','11'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
+              if not m: raise SystemExit(p.stdout[-3000:])
+              return int(m[-1].replace(',','')),p.stdout
+          d={}
+          for n in ('base','opt'):
+              vals=[]; raw=[]
+              for _ in range(7):
+                  v,o=run(f'engine/c/zchezz_v500{n}/zchezz.exe'); vals.append(v); raw.append(o)
+              d[n]={'runs':vals,'median':statistics.median(vals),'mean':statistics.mean(vals)}
+              (root/f'bench_{n}.txt').write_text('\n---\n'.join(raw))
+          d['ratio']=d['opt']['median']/d['base']['median']
+          print(json.dumps(d,indent=2)); (root/'nps.json').write_text(json.dumps(d,indent=2))
+          PY
+      - name: Openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'isa.epd',630731,256)
+          PY
+      - name: Node-control
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500opt/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 96 --threads 4 --movetime 0 --nodes 30000 --max-plies 220 \
+            --openings isa.epd --opening-plies 0 --seed 631000 --tt-mb 16 \
+            --json "artifacts/isa/$VARIANT/nodes.json"
+      - name: Timed Elo
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500opt/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 384 --threads 4 --movetime 20 --nodes 0 --max-plies 220 \
+            --openings isa.epd --opening-plies 0 --seed 631100 --tt-mb 16 \
+            --json "artifacts/isa/$VARIANT/time20.json"
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import os,json
+          from pathlib import Path
+          root=Path('artifacts/isa')/os.environ['VARIANT']
+          for p in root.glob('*.json'):
+              j=json.loads(p.read_text())
+              if 'pairings' in j:
+                  x=j['pairings'][0]; print(f'{p.name}: {x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-isa-${{ matrix.variant }}
+          path: artifacts/isa/${{ matrix.variant }}/
+          retention-days: 30
