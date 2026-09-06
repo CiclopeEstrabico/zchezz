@@ -1,0 +1,115 @@
+name: v500-avx2-scalar-parity
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths: [".github/workflows/v500-avx2-scalar-parity.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Build identical scalar and AVX2 engines
+        run: |
+          rm -rf engine/c/zchezz_v500scalar engine/c/zchezz_v500avx2
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500scalar
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500avx2
+          ARCH_FLAGS="" make -C engine/build ENGINE=v500scalar clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500avx2 clean native
+          mkdir -p artifacts/avx2_scalar
+      - name: Compare deterministic scores on 2000 positions
+        run: |
+          python - <<'PY'
+          import chess, random, subprocess, re, json, statistics
+          from pathlib import Path
+          rng=random.Random(670731)
+          fens=[]
+          while len(fens)<2000:
+              b=chess.Board()
+              for _ in range(rng.randint(0,100)):
+                  ms=list(b.legal_moves)
+                  if not ms: break
+                  b.push(rng.choice(ms))
+                  if b.is_game_over(claim_draw=True): break
+              if not b.is_game_over(claim_draw=True): fens.append(b.fen())
+
+          def scores(exe):
+              p=subprocess.Popen([exe],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1)
+              def send(s): p.stdin.write(s+'\n'); p.stdin.flush()
+              send('uci')
+              while True:
+                  if 'uciok' in p.stdout.readline(): break
+              send('isready')
+              while True:
+                  if 'readyok' in p.stdout.readline(): break
+              out=[]
+              for fen in fens:
+                  send('position fen '+fen); send('go depth 1')
+                  sc=None
+                  while True:
+                      line=p.stdout.readline()
+                      m=re.search(r' score cp (-?\d+)',line)
+                      if m: sc=int(m.group(1))
+                      if line.startswith('bestmove'): break
+                  out.append(sc)
+              send('quit'); p.wait(timeout=5)
+              return out
+          a=scores('engine/c/zchezz_v500scalar/zchezz.exe')
+          b=scores('engine/c/zchezz_v500avx2/zchezz.exe')
+          ds=[y-x for x,y in zip(a,b)]
+          bad=[(i,a[i],b[i],ds[i],fens[i]) for i in range(len(ds)) if ds[i]!=0]
+          r={
+            'positions':len(ds),'mismatches':len(bad),
+            'mismatch_pct':100*len(bad)/len(ds),
+            'mae_cp':sum(abs(x) for x in ds)/len(ds),
+            'max_abs_cp':max(abs(x) for x in ds),
+            'mean_delta_cp':statistics.mean(ds),
+            'examples':bad[:30],
+          }
+          print(json.dumps(r,indent=2)); Path('artifacts/avx2_scalar/parity.json').write_text(json.dumps(r,indent=2))
+          if bad: print('WARNING: AVX2 and scalar are not score-identical')
+          PY
+      - name: Inspect L2 weight range and maddubs overflow exposure
+        run: |
+          python - <<'PY'
+          import struct,json
+          from pathlib import Path
+          p=Path('engine/c/zchezz_v500/nnue_weights.bin'); b=p.read_bytes()
+          assert b[:4]==b'NNU4'
+          off=8
+          dims=struct.unpack_from('<5I',b,off); off+=20
+          scales=struct.unpack_from('<4f',b,off); off+=16
+          l1in,l1out,l2in,l2out,l3in=dims
+          off += l1in*l1out*2 + l1out*4
+          raw=b[off:off+l2out*l2in]
+          ws=[x if x<128 else x-256 for x in raw]
+          # maddubs forms adjacent pairs: a0*w0+a1*w1 then saturates to int16.
+          # Worst reachable with activations independently in [0,254].
+          risky=0; worst=0
+          for o in range(l2out):
+              row=ws[o*l2in:(o+1)*l2in]
+              for i in range(0,l2in,2):
+                  x,y=row[i],row[i+1]
+                  mx=254*max(x,0)+254*max(y,0)
+                  mn=254*min(x,0)+254*min(y,0)
+                  worst=max(worst,abs(mx),abs(mn))
+                  if mx>32767 or mn<-32768: risky+=1
+          r={'dims':dims,'l2_min':min(ws),'l2_max':max(ws),'max_pair_bound':worst,'risky_pairs':risky,'total_pairs':l2out*l2in//2}
+          print(json.dumps(r,indent=2)); Path('artifacts/avx2_scalar/weights.json').write_text(json.dumps(r,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-avx2-scalar-parity
+          path: artifacts/avx2_scalar/
+          retention-days: 30
