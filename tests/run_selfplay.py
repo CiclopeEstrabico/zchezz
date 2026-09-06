@@ -157,15 +157,15 @@ def kill_leftover_engines():
 # UCI engines, still with EPD export — this is NOT limited to 2 engines.
 ENGINES_CFG = [
     {
-        "path":     r"engine/c/zchezz_v322/zchezz.exe",
-        "label":    "Zchezz-v322",
+        "path":     r"engine/c/zchezz_v323/zchezz.exe",
+        "label":    "Zchezz-v323",
         "tc_mode":  "movetime",   # "movetime" | "depth" | "nodes" | "fixedtime"
         "tc_value": 200,          # units depend on tc_mode (ms for movetime)
         "tc_inc":   0             # increment in ms, "fixedtime" mode only
     },
     {
-        "path":     r"engine/c/zchezz_v322/zchezz.exe",
-        "label":    "Zchezz-v322",
+        "path":     r"engine/c/zchezz_v323/zchezz.exe",
+        "label":    "Zchezz-v323",
         "tc_mode":  "movetime",
         "tc_value": 200,
         "tc_inc":   0

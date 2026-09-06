@@ -40,7 +40,7 @@ MODES OF OPERATION (all controlled by the config block):
   run_tournament_quick.py — same engine as this file (literally: it is a
   clean copy with only the config block edited), preset for one scenario:
   a fast 200-game H2H sanity check between two specific builds (currently
-  v3.22 vs v3.14). Use it instead of hand-editing this file's config block
+  v3.23 vs v3.14). Use it instead of hand-editing this file's config block
   for that one recurring check.
 
   run_arena.py (engine/c/tools/arena.c, native) — the FAST, SPRT-driven
@@ -173,8 +173,8 @@ MOVETIME_MS             = 200    # ms per move (Phase 9-2: ELO calibration 200ms
 # and (if SELF_PLAY=True) against each other.
 MY_ENGINES = [
     {
-        "path":     r"engine/c/zchezz_v322/zchezz.exe",
-        "label":    "Zchezz-v322",
+        "path":     r"engine/c/zchezz_v323/zchezz.exe",
+        "label":    "Zchezz-v323",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,

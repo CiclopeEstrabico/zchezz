@@ -17,7 +17,7 @@ that overrides it (see the COMMAND LINE block after the config;
 
   python tests/run_tournament_quick.py
 
-Default: v3.22 (engine under test) vs v3.14 (long-lived stable baseline),
+Default: v3.23 (engine under test) vs v3.14 (long-lived stable baseline),
          200 games (100 openings x 2 colors), 14 workers, 100ms/move,
          PGN + log saved, no EPD, no .bin.
 
@@ -26,7 +26,7 @@ OUTPUT FORMATS: SAVE_PGN / SAVE_EPD / SAVE_BIN are independent and additive
 here) for why .bin, unlike EPD, is restricted to one engine's own moves
 per run (SAVE_BIN_LABEL) rather than recording every mover's eval.
 
-The default engine pair is v3.22 and v3.14; CLI overrides can select any two builds.
+The default engine pair is v3.23 and v3.14; CLI overrides can select any two builds.
 
 ── RELATION TO OTHER TOOLS — WHEN TO USE WHICH ────────────────────────────
 
@@ -90,7 +90,7 @@ import numpy as np
 from dataset import SAMPLE_DTYPE
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION — v3.22 vs v3.14 sanity check (1T)
+#  CONFIGURATION — v3.23 vs v3.14 sanity check (1T)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -98,11 +98,11 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ── Time Control ──────────────────────────────────────────────────────────────
 MOVETIME_MS             = 100    # ms per move
 
-# ── v3.22 candidate vs v3.14 stable baseline ───────────────────────────────
+# ── v3.23 candidate vs v3.14 stable baseline ───────────────────────────────
 MY_ENGINES = [
     {
-        "path":     r"engine/c/zchezz_v322/zchezz.exe",
-        "label":    "v322-1T",
+        "path":     r"engine/c/zchezz_v323/zchezz.exe",
+        "label":    "v323-1T",
         "tc_mode":  "movetime",
         "tc_value": MOVETIME_MS,
         "tc_inc":   0,

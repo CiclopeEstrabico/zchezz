@@ -2,10 +2,10 @@
 
 # The active release line on this branch. Override with ENGINE=vXXX for
 # historical/regression builds. Keep this aligned with engine/ACTIVE_ENGINE.
-ENGINE       ?= v322
+ENGINE       ?= v323
 # Native arena/selfplay/GA use the per-instance NnueNet API introduced in v4.
-# v3.22's NNU3 engine does not expose that API, so shared native tools retain
-# the current NNU4 host. v3.22 participates through architecture-neutral UCI
+# v3.23's NNU3 engine does not expose that API, so shared native tools retain
+# the current NNU4 host. v3.23 participates through architecture-neutral UCI
 # wrappers (tests/run_arena.py, run_selfplay.py, run_tournament*.py).
 TOOLS_ENGINE ?= v403
 # AVX2 is the portable x86-64 release baseline. AVX-VNNI remains opt-in via

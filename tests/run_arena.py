@@ -51,7 +51,7 @@ no anchor syntax to forward.
 ── BUILD RESOLUTION ────────────────────────────────────────────────
 
   ref == "HEAD" (case-insensitive): built IN PLACE, in this checkout's
-  own engine/c/zchezz_v322/ (the active v3.22 folder — see
+  own engine/c/zchezz_v323/ (the active v3.23 folder — see
   ENGINE_DIR_FOR_HEAD below), no git worktree involved. This is the
   common "test my current uncommitted work" case — a worktree can only
   check out a COMMITTED ref, so a dirty working tree has to be built
@@ -166,7 +166,7 @@ import argparse
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(REPO_ROOT, ".arena_build_cache")
-ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v322")
+ENGINE_DIR_FOR_HEAD = os.path.join(REPO_ROOT, "engine", "c", "zchezz_v323")
 BUILD_DIR = os.path.join(REPO_ROOT, "engine", "build")
 TOOLS_DIR = os.path.join(REPO_ROOT, "engine", "c", "tools")
 # arena.exe is a SHARED tool binary, built in engine/build/ (NOT inside
@@ -229,8 +229,8 @@ DEFAULT_GAUNTLET_SPEC    = ""       # "" = round-robin (no gauntlet candidate)
 # any --player on the CLI overrides this list in its entirety (see main()).
 # Same net:/uci:/ref: syntax as the CLI flag.
 DEFAULT_PLAYERS: list[str] = [
-    r"uci:engine/c/zchezz_v322/zchezz.exe",
-    r"uci:engine/c/zchezz_v322/zchezz.exe",
+    r"uci:engine/c/zchezz_v323/zchezz.exe",
+    r"uci:engine/c/zchezz_v323/zchezz.exe",
 ]
 
 # Mirrors CLAUDE.md's "Build Instructions -> Native (Windows/Linux)"
