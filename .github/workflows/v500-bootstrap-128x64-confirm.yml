@@ -1,0 +1,183 @@
+name: v500-bootstrap-128x64-confirm
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-bootstrap-128x64-confirm.yml"
+      - "train/v500_residual_growth.py"
+      - "train/v500_arch_sweep.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+      H1: 128
+      H2: 64
+      SEED: 781286
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Materialize pure 128x64 bootstrap
+        run: |
+          mkdir -p artifacts/bootstrap_128x64
+          python train/v500_residual_growth.py bootstrap \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst artifacts/bootstrap_128x64/bootstrap.pt \
+            --h1 "$H1" --h2 "$H2" --seed "$SEED"
+          python train/v500_arch_sweep.py export \
+            --ckpt artifacts/bootstrap_128x64/bootstrap.pt \
+            --dst artifacts/bootstrap_128x64/bootstrap.bin \
+            --h1 "$H1" --h2 "$H2"
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine engine/c/zchezz_vb128x64 \
+            --weights artifacts/bootstrap_128x64/bootstrap.bin \
+            --h1 "$H1" --h2 "$H2"
+
+      - name: Build candidate and baselines
+        run: |
+          make -C engine/build ENGINE=vb128x64 clean native
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Deterministic bench parity and throughput
+        run: |
+          python - <<'PY'
+          import subprocess,re,statistics,json
+          from pathlib import Path
+          root=Path('artifacts/bootstrap_128x64')
+          exes={
+              'candidate':'engine/c/zchezz_vb128x64/zchezz.exe',
+              'v500':'engine/c/zchezz_v500/zchezz.exe',
+              'v314':'engine/c/zchezz_v314/zchezz.exe',
+          }
+          def run(exe,depth=11):
+              p=subprocess.run([exe,'bench',str(depth)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              pos=[]
+              for line in p.stdout.splitlines():
+                  if line.startswith('Position '):
+                      pos.append(re.sub(r'\s+',' ',line.strip()))
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
+              if not m: raise SystemExit(p.stdout[-3000:])
+              return pos,int(m[-1].replace(',','')),p.stdout
+          base_lines,_,_=run(exes['v500'])
+          cand_lines,_,_=run(exes['candidate'])
+          parity=(base_lines==cand_lines)
+          print('deterministic_bench_parity=',parity)
+          if not parity:
+              print('V500',base_lines)
+              print('CAND',cand_lines)
+              raise SystemExit('pure bootstrap changed fixed-depth search semantics')
+          vals={k:[] for k in exes}
+          raw={k:[] for k in exes}
+          order=['candidate','v500','v314','v314','v500','candidate']*3
+          for k in order:
+              _,v,o=run(exes[k]); vals[k].append(v); raw[k].append(o)
+          out={k:{'runs':v,'median':statistics.median(v),'mean':statistics.mean(v)} for k,v in vals.items()}
+          out['candidate_over_v500']=out['candidate']['median']/out['v500']['median']
+          out['candidate_over_v314']=out['candidate']['median']/out['v314']['median']
+          out['v500_over_v314']=out['v500']['median']/out['v314']['median']
+          out['deterministic_parity']=parity
+          print(json.dumps(out,indent=2))
+          (root/'throughput.json').write_text(json.dumps(out,indent=2))
+          for k in exes:
+              (root/f'bench_{k}.txt').write_text('\n---\n'.join(raw[k]))
+          PY
+
+      - name: Create paired openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/bootstrap_128x64/openings.epd', 781900, 1024)
+          PY
+
+      - name: Candidate vs v5 fixed nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vb128x64/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 512 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/bootstrap_128x64/openings.epd --opening-plies 0 \
+            --seed 782000 --tt-mb 16 \
+            --json artifacts/bootstrap_128x64/vs_v500_nodes.json
+
+      - name: Candidate vs v3.14 fixed nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vb128x64/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 512 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings artifacts/bootstrap_128x64/openings.epd --opening-plies 0 \
+            --seed 782100 --tt-mb 16 \
+            --json artifacts/bootstrap_128x64/vs_v314_nodes.json
+
+      - name: Candidate vs v5 at 200ms per move
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vb128x64/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 512 --threads 4 --movetime 200 --nodes 0 --max-plies 300 \
+            --openings artifacts/bootstrap_128x64/openings.epd --opening-plies 0 \
+            --seed 782200 --tt-mb 16 \
+            --json artifacts/bootstrap_128x64/vs_v500_time200.json
+
+      - name: Candidate vs v3.14 at 200ms per move
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vb128x64/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 512 --threads 4 --movetime 200 --nodes 0 --max-plies 300 \
+            --openings artifacts/bootstrap_128x64/openings.epd --opening-plies 0 \
+            --seed 782300 --tt-mb 16 \
+            --json artifacts/bootstrap_128x64/vs_v314_time200.json
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('artifacts/bootstrap_128x64')
+          p=root/'throughput.json'
+          if p.exists():
+              j=json.loads(p.read_text())
+              print('=== THROUGHPUT ===')
+              print(f"candidate/v500={j['candidate_over_v500']:.4f}")
+              print(f"candidate/v314={j['candidate_over_v314']:.4f}")
+              print(f"v500/v314={j['v500_over_v314']:.4f}")
+              print(f"deterministic_parity={j['deterministic_parity']}")
+          print('=== GATES ===')
+          for name in ('vs_v500_nodes.json','vs_v314_nodes.json','vs_v500_time200.json','vs_v314_time200.json'):
+              p=root/name
+              if not p.exists():
+                  print(name,'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-bootstrap-128x64-confirm
+          path: artifacts/bootstrap_128x64/
+          retention-days: 30
