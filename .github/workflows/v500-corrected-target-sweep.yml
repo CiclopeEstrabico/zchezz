@@ -1,0 +1,191 @@
+name: v500-corrected-target-sweep
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-corrected-target-sweep.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train-gate:
+    name: lam-${{ matrix.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: "000"
+            lam: "0.00"
+            seed: 740000
+          - tag: "005"
+            lam: "0.05"
+            seed: 741000
+          - tag: "015"
+            lam: "0.15"
+            seed: 742000
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install training dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Regression-test teacher score orientation
+        run: python tests/test_teacher_label_sign.py
+      - name: Download original 10k corpus
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+      - name: Repair old Black-to-move labels and build uniform source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd, shutil
+          out=Path('data/v500_teacher_v314_uniform')
+          if out.exists(): shutil.rmtree(out)
+          out.mkdir(parents=True)
+          rows=black_rows=files_n=0
+          for g in range(10):
+              src=Path(f'data/v500_teacher_v314/gen{g:02d}')
+              files=sorted(src.glob('*.parquet'))
+              assert len(files)==2,(g,files)
+              for i,p in enumerate(files):
+                  x=pd.read_parquet(p)
+                  side=x['fen'].str.split().str[1]
+                  black=side.eq('b')
+                  black_rows += int(black.sum())
+                  rows += len(x)
+                  x.loc[black,'cp']=-x.loc[black,'cp']
+                  x['teacher_delta_cp']=x['cp'].astype('int64')-x['student_cp'].astype('int64')
+                  x.to_parquet(out/f'g{g:02d}_{i:02d}.parquet',index=False)
+                  files_n+=1
+          assert files_n==20
+          print(f'uniform source: files={files_n} rows={rows:,} repaired_black={black_rows:,}')
+          PY
+      - name: Warm-start and train corrected target blend
+        env:
+          LAM: ${{ matrix.lam }}
+          TAG: ${{ matrix.tag }}
+        run: |
+          mkdir -p "checkpoints/v500/target_${TAG}" "artifacts/target_${TAG}"
+          python train/import_nnu4.py \
+            --src engine/c/zchezz_v500/nnue_weights.bin \
+            --dst "checkpoints/v500/target_${TAG}_bootstrap.pt"
+          python - <<'PY'
+          import os,sys,random
+          import numpy as np
+          sys.path.insert(0,'train')
+          import torch
+          import train_nnue as tn
+          lam=float(os.environ['LAM']); tag=os.environ['TAG']
+          seed=200809
+          random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+          ns=tn.build_arg_parser().parse_args([])
+          ns.ckpt_dir=f'checkpoints/v500/target_{tag}'
+          ns.dataset_name=f'v500_corrected_target_{tag}'
+          ns.epochs=12
+          ns.batch_size=2048
+          ns.lr=5e-4
+          ns.transfer_lr=3e-5
+          ns.weight_decay=1e-4
+          ns.workers=4
+          ns.device='cpu'
+          ns.val_every=1
+          ns.resample_each_epoch=False
+          ns.encode_cache=True
+          ns.show_config=False
+          ns.checkpoint_source=f'checkpoints/v500/target_{tag}_bootstrap.pt'
+          ns.sources=[tn.SourceSpec(
+              kind='parquet', path='data/v500_teacher_v314_uniform',
+              target_col='cp', lam=lam, train_pct=1.0, val_frac=0.02,
+              name=f'v500_teacher314_corrected_lam{lam:.2f}', pct_mode='sample-rows')]
+          print(f'TRAIN corrected target blend lam={lam:.2f}')
+          tn.train(ns)
+          PY
+          CKPT=$(ls -t "checkpoints/v500/target_${TAG}"/*.pt | head -1)
+          python train/export_nnu4.py --ckpt "$CKPT" --dst "artifacts/target_${TAG}/nnue_weights.bin"
+      - name: Build candidate and baselines
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          CAND="v500t${TAG}"
+          rm -rf "engine/c/zchezz_${CAND}"
+          cp -a engine/c/zchezz_v500 "engine/c/zchezz_${CAND}"
+          cp "artifacts/target_${TAG}/nnue_weights.bin" "engine/c/zchezz_${CAND}/nnue_weights.bin"
+          make -C engine/build ENGINE="$CAND" clean native
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+          make -C engine/build ENGINE=v500 arena
+          python - <<'PY'
+          import os,sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          tag=os.environ['TAG']
+          p._make_gate_openings(p.ROOT/f'artifacts/target_{tag}/openings.epd', 743731, 512)
+          PY
+      - name: Candidate vs promoted v5 at fixed nodes
+        env:
+          TAG: ${{ matrix.tag }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500t${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/target_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$SEED" --tt-mb 16 \
+            --json "artifacts/target_${TAG}/vs_v500_nodes.json"
+      - name: Candidate vs v3.14 at fixed nodes
+        env:
+          TAG: ${{ matrix.tag }}
+          SEED: ${{ matrix.seed }}
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500t${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/target_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$((SEED+500))" --tt-mb 16 \
+            --json "artifacts/target_${TAG}/vs_v314_nodes.json"
+      - name: Summarize
+        if: always()
+        env:
+          TAG: ${{ matrix.tag }}
+          LAM: ${{ matrix.lam }}
+        run: |
+          python - <<'PY'
+          import os,json
+          from pathlib import Path
+          tag=os.environ['TAG']; lam=os.environ['LAM']
+          print(f'=== corrected target sweep lam={lam} ===')
+          for name in ('vs_v500_nodes.json','vs_v314_nodes.json'):
+              p=Path(f'artifacts/target_{tag}')/name
+              if not p.exists(): print(name,'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-corrected-target-${{ matrix.tag }}
+          path: |
+            artifacts/target_${{ matrix.tag }}/
+            checkpoints/v500/target_${{ matrix.tag }}/
+          retention-days: 30
