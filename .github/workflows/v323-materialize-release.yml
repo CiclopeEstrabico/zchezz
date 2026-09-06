@@ -1,0 +1,110 @@
+name: v323-materialize-release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v323-release-candidate]
+    paths:
+      - .github/workflows/v323-materialize-release.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v323-release-candidate
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch validated PK17 patchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin v323-fullacc-endgame-test
+          mkdir -p /tmp/v323patch
+          for f in v323_apply_pk17_split.py v323_apply_mt_hardening.py v323_run_pk17_split.py; do
+            git show origin/v323-fullacc-endgame-test:tools/$f > /tmp/v323patch/$f
+          done
+      - name: Materialize v3.23 engine and defaults
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d engine/c/zchezz_v323 ]; then
+            cp -a engine/c/zchezz_v322 engine/c/zchezz_v323
+            python /tmp/v323patch/v323_run_pk17_split.py --root engine/c/zchezz_v323
+          fi
+          python - <<'PY'
+          from pathlib import Path
+
+          def repl(path, old, new, required=False):
+              p=Path(path); s=p.read_text(encoding='utf-8'); n=s.count(old)
+              if n:
+                  p.write_text(s.replace(old,new),encoding='utf-8')
+                  print(path, n, old, '->', new)
+              elif required and new not in s:
+                  raise SystemExit(f'{path}: missing {old!r}/{new!r}')
+
+          # Release identity.
+          repl('engine/c/zchezz_v323/main.c', '#define ENGINE_VERSION "3.22"', '#define ENGINE_VERSION "3.23"', True)
+          repl('engine/c/zchezz_v323/main.c', 'main.c — Zchezz v3.21 UCI engine', 'main.c — Zchezz v3.23 UCI engine')
+          Path('engine/ACTIVE_ENGINE').write_text('v323\n', encoding='utf-8')
+
+          # Build defaults: v403 remains the NNU4 shared-tool host.
+          repl('engine/build/Makefile', 'ENGINE       ?= v322', 'ENGINE       ?= v323', True)
+          repl('engine/build/Makefile', "v3.22's NNU3 engine", "v3.23's NNU3 engine")
+          repl('engine/build/Makefile', 'v3.22 participates', 'v3.23 participates')
+          repl('engine/build/build_termux.sh', 'VERSION="${1:-v322}"', 'VERSION="${1:-v323}"', True)
+
+          # Architecture-neutral active-engine wrappers/defaults.
+          paths=[
+              'tests/run_arena.py','tests/run_selfplay.py','tests/run_tournament.py',
+              'tests/run_tournament_quick.py'
+          ]
+          for path in paths:
+              repl(path, 'zchezz_v322', 'zchezz_v323')
+              repl(path, 'Zchezz-v322', 'Zchezz-v323')
+              repl(path, 'v322-1T', 'v323-1T')
+              repl(path, 'v3.22', 'v3.23')
+
+          # Keep explicit historical references where intended; only the active
+          # defaults above move. Native NNU4 selfplay remains hosted by v403.
+          PY
+      - name: Native smoke before commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C engine/build ENGINE=v323 clean native
+          test -x engine/c/zchezz_v323/zchezz.exe
+          OUT="$(printf 'uci\nisready\nquit\n' | engine/c/zchezz_v323/zchezz.exe --nnue engine/c/zchezz_v323/nnue_weights.bin 2>&1)"
+          printf '%s\n' "$OUT"
+          grep -q 'id name Zchezz 3.23' <<<"$OUT"
+          grep -q 'readyok' <<<"$OUT"
+          python - <<'PY'
+          from utils.repo_paths import active_version, engine_dir
+          assert active_version() == 'v323', active_version()
+          assert engine_dir().name == 'zchezz_v323', engine_dir()
+          print('active:', active_version(), engine_dir())
+          PY
+      - name: Commit materialized release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add engine/ACTIVE_ENGINE engine/build/Makefile engine/build/build_termux.sh \
+                  engine/c/zchezz_v323 \
+                  tests/run_arena.py tests/run_selfplay.py tests/run_tournament.py tests/run_tournament_quick.py
+          if git diff --cached --quiet; then
+            echo 'v3.23 already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'release(v323): materialize PK17 engine'
+          git push origin HEAD:v323-release-candidate
