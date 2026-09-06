@@ -1,0 +1,231 @@
+name: v500-residual-growth-sweep
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-residual-growth-sweep.yml"
+      - "train/v500_residual_growth.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  residual:
+    name: residual-${{ matrix.h1 }}x${{ matrix.h2 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {h1: 128, h2: 64,  seed: 761286}
+          - {h1: 192, h2: 64,  seed: 761926}
+          - {h1: 256, h2: 64,  seed: 762566}
+          - {h1: 128, h2: 128, seed: 761288}
+          - {h1: 256, h2: 128, seed: 762568}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+      H1: ${{ matrix.h1 }}
+      H2: ${{ matrix.h2 }}
+      SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download original v5 teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+
+      - name: Build corrected 100k source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd, shutil
+          out=Path('data/v500_residual_probe')
+          if out.exists(): shutil.rmtree(out)
+          out.mkdir(parents=True)
+          rows=black_rows=0
+          for g in range(10):
+              files=sorted(Path(f'data/v500_teacher_v314/gen{g:02d}').glob('*.parquet'))
+              assert len(files)==2,(g,files)
+              for i,p in enumerate(files):
+                  x=pd.read_parquet(p)
+                  black=x['fen'].str.split().str[1].eq('b')
+                  black_rows += int(black.sum()); rows += len(x)
+                  x.loc[black,'cp']=-x.loc[black,'cp']
+                  x.to_parquet(out/f'g{g:02d}_{i:02d}.parquet',index=False)
+          assert rows==100000
+          print(f'residual source rows={rows:,} repaired_black={black_rows:,}')
+          PY
+
+      - name: Residual bootstrap
+        run: |
+          TAG="${H1}x${H2}"
+          mkdir -p "artifacts/residual_${TAG}" "checkpoints/v500/residual_${TAG}"
+          python train/v500_residual_growth.py bootstrap \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst "artifacts/residual_${TAG}/bootstrap.pt" \
+            --h1 "$H1" --h2 "$H2" --seed "$SEED"
+          python train/v500_arch_sweep.py export \
+            --ckpt "artifacts/residual_${TAG}/bootstrap.pt" \
+            --dst "artifacts/residual_${TAG}/bootstrap.bin" \
+            --h1 "$H1" --h2 "$H2"
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine "engine/c/zchezz_vr${TAG}" \
+            --weights "artifacts/residual_${TAG}/bootstrap.bin" \
+            --h1 "$H1" --h2 "$H2"
+
+      - name: Build bootstrap and baselines
+        run: |
+          make -C engine/build ENGINE="vr${H1}x${H2}" clean native
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+          make -C engine/build ENGINE=v500 arena
+          python - <<'PY'
+          import os,sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          h1=os.environ['H1'];h2=os.environ['H2']
+          p._make_gate_openings(p.ROOT/f'artifacts/residual_{h1}x{h2}/openings.epd', 766600, 512)
+          PY
+
+      - name: Bootstrap NPS screen
+        run: |
+          python - <<'PY'
+          import json,os,re,statistics,subprocess
+          h1=os.environ['H1'];h2=os.environ['H2']
+          paths={'candidate':f'engine/c/zchezz_vr{h1}x{h2}/zchezz.exe','base':'engine/c/zchezz_v500/zchezz.exe'}
+          vals={k:[] for k in paths}
+          order=['candidate','base','base','candidate']*2
+          for k in order:
+              p=subprocess.run([paths[k],'bench','11'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
+              if not m: raise SystemExit(p.stdout[-3000:])
+              vals[k].append(int(m[-1].replace(',','')))
+          out={k:{'runs':v,'median':statistics.median(v)} for k,v in vals.items()}
+          out['ratio']=out['candidate']['median']/out['base']['median']
+          print(json.dumps(out,indent=2))
+          open(f'artifacts/residual_{h1}x{h2}/nps.json','w').write(json.dumps(out,indent=2))
+          PY
+
+      - name: Verify residual bootstrap is strength-neutral
+        run: |
+          TAG="${H1}x${H2}"
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vr${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 64 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/residual_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$SEED" --tt-mb 16 \
+            --json "artifacts/residual_${TAG}/bootstrap_vs_v500.json"
+
+      - name: Train residual capacity only
+        run: |
+          TAG="${H1}x${H2}"
+          python train/v500_residual_growth.py train \
+            --bootstrap "artifacts/residual_${TAG}/bootstrap.pt" \
+            --ckpt-dir "checkpoints/v500/residual_${TAG}" \
+            --source data/v500_residual_probe \
+            --h1 "$H1" --h2 "$H2" \
+            --epochs 12 --batch-size 2048 --lr 3e-4 \
+            --workers 4 --device cpu --lam 0.15 --seed "$SEED" --dataset-tag stage1
+          python train/v500_arch_sweep.py export \
+            --ckpt-dir "checkpoints/v500/residual_${TAG}" \
+            --dst "artifacts/residual_${TAG}/trained.bin" \
+            --h1 "$H1" --h2 "$H2"
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine "engine/c/zchezz_vr${TAG}" \
+            --weights "artifacts/residual_${TAG}/trained.bin" \
+            --h1 "$H1" --h2 "$H2"
+          make -C engine/build ENGINE="vr${TAG}" clean native
+
+      - name: Audit trained live channels
+        run: |
+          python - <<'PY'
+          import os,struct,json
+          from pathlib import Path
+          h1=int(os.environ['H1']);h2=int(os.environ['H2'])
+          p=Path(f'artifacts/residual_{h1}x{h2}/trained.bin');b=p.read_bytes()
+          dims=struct.unpack_from('<5I',b,8); _,H1,L2I,H2,_=dims
+          off=44 + 2560*H1*2 + H1*4
+          l2=struct.unpack_from(f'<{H2*L2I}b',b,off)
+          imp=[]
+          for i in range(H1):
+              imp.append(sum(abs(l2[r*L2I+i])+abs(l2[r*L2I+H1+i]) for r in range(H2)))
+          live=sum(x>0 for x in imp)
+          top=sorted(imp,reverse=True)
+          total=sum(top)
+          out={'dims':dims,'live_h1':live,'h1':H1,'dead_h1':H1-live,
+               'top32_share':sum(top[:32])/total if total else 0,
+               'top64_share':sum(top[:64])/total if total else 0}
+          print(json.dumps(out,indent=2));Path(f'artifacts/residual_{h1}x{h2}/utilization.json').write_text(json.dumps(out,indent=2))
+          PY
+
+      - name: Residual candidate vs accepted v5 at fixed nodes
+        run: |
+          TAG="${H1}x${H2}"
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vr${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/residual_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$((SEED+1000))" --tt-mb 16 \
+            --json "artifacts/residual_${TAG}/vs_v500_nodes.json"
+
+      - name: Residual candidate vs v3.14 at fixed nodes
+        run: |
+          TAG="${H1}x${H2}"
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vr${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/residual_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$((SEED+2000))" --tt-mb 16 \
+            --json "artifacts/residual_${TAG}/vs_v314_nodes.json"
+
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          h1=os.environ['H1'];h2=os.environ['H2'];root=Path(f'artifacts/residual_{h1}x{h2}')
+          print(f'=== RESIDUAL {h1}x{h2} ===')
+          for f in ('nps.json','utilization.json'):
+              p=root/f
+              if p.exists(): print(f, json.dumps(json.loads(p.read_text())))
+          for f in ('bootstrap_vs_v500.json','vs_v500_nodes.json','vs_v314_nodes.json'):
+              p=root/f
+              if not p.exists(): print(f,'MISSING');continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{f}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-residual-${{ matrix.h1 }}x${{ matrix.h2 }}
+          path: |
+            artifacts/residual_${{ matrix.h1 }}x${{ matrix.h2 }}/
+            checkpoints/v500/residual_${{ matrix.h1 }}x${{ matrix.h2 }}/
+          retention-days: 30
