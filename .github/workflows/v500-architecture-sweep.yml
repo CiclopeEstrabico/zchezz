@@ -1,0 +1,224 @@
+name: v500-architecture-sweep
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-architecture-sweep.yml"
+      - "train/v500_arch_sweep.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  architecture:
+    name: h1-${{ matrix.h1 }}-h2-${{ matrix.h2 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - h1: 512
+            h2: 64
+            seed: 751264
+          - h1: 512
+            h2: 128
+            seed: 751228
+          - h1: 384
+            h2: 64
+            seed: 738464
+          - h1: 256
+            h2: 64
+            seed: 725664
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+      H1: ${{ matrix.h1 }}
+      H2: ${{ matrix.h2 }}
+      SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas pyarrow python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download original v5 corpus
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: gitzambrano/zchezz
+          run-id: 33987304161
+          pattern: nnue10k-data-*
+          merge-multiple: true
+          path: data
+
+      - name: Build corrected 100k probe source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd, shutil
+          out=Path('data/v500_arch_probe')
+          if out.exists(): shutil.rmtree(out)
+          out.mkdir(parents=True)
+          rows=black_rows=files_n=0
+          for g in range(10):
+              src=Path(f'data/v500_teacher_v314/gen{g:02d}')
+              files=sorted(src.glob('*.parquet'))
+              assert len(files)==2,(g,files)
+              for i,p in enumerate(files):
+                  x=pd.read_parquet(p)
+                  black=x['fen'].str.split().str[1].eq('b')
+                  black_rows += int(black.sum())
+                  rows += len(x)
+                  # Historical corpus bug: old teacher cp was double-flipped
+                  # for Black-to-move. Restore the teacher's WHITE-relative score.
+                  x.loc[black,'cp']=-x.loc[black,'cp']
+                  x.to_parquet(out/f'g{g:02d}_{i:02d}.parquet',index=False)
+                  files_n += 1
+          assert rows == 100000 and files_n == 20
+          print(f'probe source: rows={rows:,} repaired_black={black_rows:,}')
+          PY
+
+      - name: Bootstrap architecture from accepted v5
+        run: |
+          TAG="${H1}x${H2}"
+          mkdir -p "artifacts/arch_${TAG}" "checkpoints/v500/arch_${TAG}"
+          python train/v500_arch_sweep.py bootstrap \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst "artifacts/arch_${TAG}/bootstrap.pt" \
+            --h1 "$H1" --h2 "$H2" --seed "$SEED"
+          python train/v500_arch_sweep.py export \
+            --ckpt "artifacts/arch_${TAG}/bootstrap.pt" \
+            --dst "artifacts/arch_${TAG}/bootstrap.bin" \
+            --h1 "$H1" --h2 "$H2"
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine "engine/c/zchezz_va${H1}x${H2}" \
+            --weights "artifacts/arch_${TAG}/bootstrap.bin" \
+            --h1 "$H1" --h2 "$H2"
+
+      - name: Build initialized candidate and baselines
+        run: |
+          make -C engine/build ENGINE="va${H1}x${H2}" clean native
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v314 clean native
+          make -C engine/build ENGINE=v500 arena
+          python - <<'PY'
+          import os,sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          h1=os.environ['H1']; h2=os.environ['H2']
+          p._make_gate_openings(p.ROOT/f'artifacts/arch_{h1}x{h2}/openings.epd', 754321, 512)
+          PY
+
+      - name: Initialized architecture NPS screen
+        run: |
+          python - <<'PY'
+          import json, os, re, statistics, subprocess
+          h1=os.environ['H1']; h2=os.environ['H2']
+          cand=f'engine/c/zchezz_va{h1}x{h2}/zchezz.exe'
+          base='engine/c/zchezz_v500/zchezz.exe'
+          vals={'candidate':[],'base':[]}
+          for name,path in [('candidate',cand),('base',base),('base',base),('candidate',cand)]*2:
+              p=subprocess.run([path,'bench','11'], text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, check=True, timeout=180)
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
+              if not m: raise SystemExit('NPS not found\n'+p.stdout[-3000:])
+              vals[name].append(int(m[-1].replace(',','')))
+          out={k:{'runs':v,'median':statistics.median(v)} for k,v in vals.items()}
+          out['ratio']=out['candidate']['median']/out['base']['median']
+          print(json.dumps(out,indent=2))
+          open(f'artifacts/arch_{h1}x{h2}/nps.json','w').write(json.dumps(out,indent=2))
+          PY
+
+      - name: Initialized architecture vs accepted v5 at fixed nodes
+        run: |
+          TAG="${H1}x${H2}"
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_va${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/arch_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$SEED" --tt-mb 16 \
+            --json "artifacts/arch_${TAG}/init_vs_v500.json"
+
+      - name: Conservative fine-tune of architecture
+        run: |
+          TAG="${H1}x${H2}"
+          python train/v500_arch_sweep.py train \
+            --bootstrap "artifacts/arch_${TAG}/bootstrap.pt" \
+            --ckpt-dir "checkpoints/v500/arch_${TAG}" \
+            --source data/v500_arch_probe \
+            --h1 "$H1" --h2 "$H2" \
+            --epochs 6 --batch-size 2048 --transfer-lr 8e-6 \
+            --weight-decay 1e-4 --workers 4 --device cpu \
+            --lam 0.15 --seed "$SEED" --dataset-tag conservative
+          python train/v500_arch_sweep.py export \
+            --ckpt-dir "checkpoints/v500/arch_${TAG}" \
+            --dst "artifacts/arch_${TAG}/trained.bin" \
+            --h1 "$H1" --h2 "$H2"
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine "engine/c/zchezz_va${TAG}" \
+            --weights "artifacts/arch_${TAG}/trained.bin" \
+            --h1 "$H1" --h2 "$H2"
+          make -C engine/build ENGINE="va${TAG}" clean native
+
+      - name: Trained architecture vs accepted v5 at fixed nodes
+        run: |
+          TAG="${H1}x${H2}"
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_va${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/arch_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$((SEED+1000))" --tt-mb 16 \
+            --json "artifacts/arch_${TAG}/trained_vs_v500.json"
+
+      - name: Trained architecture vs v3.14 at fixed nodes
+        run: |
+          TAG="${H1}x${H2}"
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_va${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v314/zchezz.exe" \
+            --games 256 --threads 4 --movetime 0 --nodes 50000 --max-plies 300 \
+            --openings "artifacts/arch_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$((SEED+2000))" --tt-mb 16 \
+            --json "artifacts/arch_${TAG}/trained_vs_v314.json"
+
+      - name: Summarize architecture
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          h1=os.environ['H1']; h2=os.environ['H2']
+          root=Path(f'artifacts/arch_{h1}x{h2}')
+          print(f'=== ARCH {h1}x{h2} ===')
+          p=root/'nps.json'
+          if p.exists():
+              x=json.loads(p.read_text()); print(f'NPS ratio candidate/base={x["ratio"]:.4f}')
+          for name in ('init_vs_v500.json','trained_vs_v500.json','trained_vs_v314.json'):
+              p=root/name
+              if not p.exists(): print(name,'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-architecture-${{ matrix.h1 }}x${{ matrix.h2 }}
+          path: |
+            artifacts/arch_${{ matrix.h1 }}x${{ matrix.h2 }}/
+            checkpoints/v500/arch_${{ matrix.h1 }}x${{ matrix.h2 }}/
+          retention-days: 30
