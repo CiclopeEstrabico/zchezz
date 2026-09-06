@@ -1,0 +1,133 @@
+name: v500 true fixed-node gate
+
+on:
+  push:
+    branches: [v500-strength]
+    paths:
+      - '.github/workflows/v500-true-node-gate.yml'
+      - 'tests/patch_uci_node_limit.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH_FLAGS: -mavx2
+  STATIC_FLAG: ''
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas python-chess
+          python -c 'import torch; print(torch.__version__)' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Materialize node-correct v5 and v3.14 copies
+        run: |
+          python tests/patch_uci_node_limit.py --src engine/c/zchezz_v500 --dst engine/c/zchezz_vn500
+          python tests/patch_uci_node_limit.py --src engine/c/zchezz_v314 --dst engine/c/zchezz_vn314
+
+      - name: Materialize exact 64x32 on node-correct v5 code
+        run: |
+          mkdir -p artifacts/true-nodes
+          python train/v500_exact_compress.py \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst artifacts/true-nodes/exact64.pt --h1 64 --seed 806064
+          python train/v500_arch_sweep.py export \
+            --ckpt artifacts/true-nodes/exact64.pt \
+            --dst artifacts/true-nodes/exact64.bin --h1 64 --h2 32
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_vn500 \
+            --dst-engine engine/c/zchezz_vn64x32 \
+            --weights artifacts/true-nodes/exact64.bin --h1 64 --h2 32
+
+      - name: Build engines and arena
+        run: |
+          make -C engine/build ENGINE=vn500 clean native
+          make -C engine/build ENGINE=vn314 clean native
+          make -C engine/build ENGINE=vn64x32 clean native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Build deterministic paired openings
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(Path('artifacts/true-nodes/openings.epd'), 806500, 128)
+          PY
+
+      - name: Verify nodes-only searches are no longer depth-8 capped
+        run: |
+          python - <<'PY'
+          import re,subprocess
+          fen='r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'
+          for name,path in [('v5','engine/c/zchezz_vn500/zchezz.exe'),('v314','engine/c/zchezz_vn314/zchezz.exe')]:
+              p=subprocess.Popen([path],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1)
+              for cmd in ['uci','isready','ucinewgame',f'position fen {fen}','go nodes 50000']:
+                  p.stdin.write(cmd+'\n');p.stdin.flush()
+              lines=[]
+              while True:
+                  s=p.stdout.readline().strip(); lines.append(s)
+                  if s.startswith('bestmove'): break
+              depths=[int(x.group(1)) for l in lines if (x:=re.search(r'info depth (\d+)',l))]
+              nodes=[int(x.group(1)) for l in lines if (x:=re.search(r' nodes (\d+)',l))]
+              print(name,'max_depth',max(depths or [0]),'last_reported_nodes',nodes[-1] if nodes else 0)
+              assert max(depths or [0]) > 8, (name,lines[-20:])
+              p.stdin.write('quit\n');p.stdin.flush();p.wait(timeout=3)
+          PY
+
+      - name: Exact64 vs v5 at true 20k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn64x32/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn500/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 20000 --max-plies 300 \
+            --openings artifacts/true-nodes/openings.epd --opening-plies 0 \
+            --seed 806501 --tt-mb 16 --json artifacts/true-nodes/exact64_vs_v5.json
+
+      - name: v5 vs v3.14 at true 20k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 20000 --max-plies 300 \
+            --openings artifacts/true-nodes/openings.epd --opening-plies 0 \
+            --seed 806502 --tt-mb 16 --json artifacts/true-nodes/v5_vs_v314.json
+
+      - name: Exact64 vs v3.14 at true 20k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn64x32/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn314/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 20000 --max-plies 300 \
+            --openings artifacts/true-nodes/openings.epd --opening-plies 0 \
+            --seed 806503 --tt-mb 16 --json artifacts/true-nodes/exact64_vs_v314.json
+
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for fn in ['exact64_vs_v5.json','v5_vs_v314.json','exact64_vs_v314.json']:
+              p=Path('artifacts/true-nodes')/fn
+              if not p.exists(): print(fn,'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{fn}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-true-node-gate
+          path: artifacts/true-nodes/
+          retention-days: 30
