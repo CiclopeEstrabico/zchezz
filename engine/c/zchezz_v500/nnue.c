@@ -401,6 +401,8 @@ int nnue_load(const char *path) {
 void nnue_reset(NnueAccum *na) {
     na->acc_dirty = 1;
     na->acc_ptr   = 0;
+    memset(na->acc_valid_w, 0, sizeof(na->acc_valid_w));
+    memset(na->acc_valid_b, 0, sizeof(na->acc_valid_b));
 }
 
 void nnue_reset_global(void) { nnue_reset(&g_nnue_accum); }
@@ -454,6 +456,11 @@ void nnue_rebuild(NnueAccum *na, const uint8_t *board) {
     na->bucket_b_stack[0] = (uint8_t)bb;
     na->dirty_w_stack[0]  = 0;
     na->dirty_b_stack[0]  = 0;
+    memset(na->acc_valid_w, 0, sizeof(na->acc_valid_w));
+    memset(na->acc_valid_b, 0, sizeof(na->acc_valid_b));
+    na->acc_valid_w[0] = 1;
+    na->acc_valid_b[0] = 1;
+    na->delta_n[0] = 0;
 }
 
 /* ── Rebuild ONE perspective in the current frame (bucket refresh) ──
@@ -483,6 +490,7 @@ static void _refresh_perspective(NnueAccum *na, const uint8_t *board, int white_
         }
         na->bucket_w_stack[ptr] = (uint8_t)bw;
         na->dirty_w_stack[ptr]  = 0;
+        na->acc_valid_w[ptr]    = 1;
     } else {
         int bb = nnue_king_bucket_b(bk);
         int16_t *acc = na->acc_stack_b[ptr];
@@ -498,6 +506,7 @@ static void _refresh_perspective(NnueAccum *na, const uint8_t *board, int white_
         }
         na->bucket_b_stack[ptr] = (uint8_t)bb;
         na->dirty_b_stack[ptr]  = 0;
+        na->acc_valid_b[ptr]    = 1;
     }
 }
 
@@ -529,8 +538,7 @@ static const int _castle_sq[5][4] = {
  * cannot silently become "clean" deeper in the tree.
  * ════════════════════════════════════════════════════════════════ */
 void nnue_push_na(NnueAccum *na, const uint8_t *board, const NNMove *m) {
-    if (!na->net) { na->acc_dirty = 1; return; }   /* defensive, see nnue_rebuild */
-    const int16_t *L1WT = na->net->L1WT;            /* hot-loop local */
+    if (!na->net) { na->acc_dirty = 1; return; }
 
     int src = na->acc_ptr, dst = src + 1;
     if (dst >= NN_ACC_STACK) { na->acc_dirty = 1; return; }
@@ -538,61 +546,91 @@ void nnue_push_na(NnueAccum *na, const uint8_t *board, const NNMove *m) {
 
     int bw = na->bucket_w_stack[src], bb = na->bucket_b_stack[src];
     int dw = na->dirty_w_stack[src],  db = na->dirty_b_stack[src];
-
-    /* If a perspective is dirty, its accumulator content is garbage and
-     * will be rebuilt from scratch by the first eval that reads this
-     * frame (_refresh_perspective memsets it).  Skip the memcpy AND all
-     * add/sub updates for that side — only buckets/dirty flags must be
-     * propagated to the new frame below. */
-    int updW = !dw, updB = !db;
-    if (updW) memcpy(na->acc_stack_w[dst], na->acc_stack_w[src], NN_L1_OUT * sizeof(int16_t));
-    if (updB) memcpy(na->acc_stack_b[dst], na->acc_stack_b[src], NN_L1_OUT * sizeof(int16_t));
-    int16_t *cW = na->acc_stack_w[dst], *cB = na->acc_stack_b[dst];
+    int n = 0;
+#define LDOP(pc_, sq_, sign_) do { \
+        uint8_t _pc=(uint8_t)(pc_); \
+        if (_pc && PC_TYPE(_pc) != PT_KING && n < 4) { \
+            na->delta_piece[dst][n]=_pc; na->delta_sq[dst][n]=(uint8_t)(sq_); \
+            na->delta_sign[dst][n]=(int8_t)(sign_); n++; \
+        } \
+    } while (0)
 
     if (m->castle) {
         const int *cs = _castle_sq[m->castle];
-        int kf = cs[0], kt = cs[1], rf = cs[2], rt = cs[3];
-        uint8_t rook = board[rf];
-        _acc_sub_piece(cW, cB, L1WT, rook, rf, bw, bb, updW, updB);
-        _acc_add_piece(cW, cB, L1WT, rook, rt, bw, bb, updW, updB);
+        int kf=cs[0], kt=cs[1], rf=cs[2], rt=cs[3];
+        uint8_t rook=board[rf];
+        LDOP(rook,rf,-1); LDOP(rook,rt,+1);
         if (PC_COLOR(board[kf]) == COL_W) {
-            int nb = nnue_king_bucket_w(kt);
-            if (nb != bw) { dw = 1; bw = nb; }
+            int nb=nnue_king_bucket_w(kt); if (nb != bw) { dw=1; bw=nb; }
         } else {
-            int nb = nnue_king_bucket_b(kt);
-            if (nb != bb) { db = 1; bb = nb; }
+            int nb=nnue_king_bucket_b(kt); if (nb != bb) { db=1; bb=nb; }
         }
     } else {
-        int f = m->from_sq, to = m->to_sq;
-        uint8_t p = board[f], cap = board[to];
-
+        int f=m->from_sq, to=m->to_sq;
+        uint8_t p=board[f], cap=board[to];
         if (PC_TYPE(p) == PT_KING) {
-            /* The king is not a feature, but a capture by the king is. */
-            if (cap) _acc_sub_piece(cW, cB, L1WT, cap, to, bw, bb, updW, updB);
+            if (cap) LDOP(cap,to,-1);
             if (PC_COLOR(p) == COL_W) {
-                int nb = nnue_king_bucket_w(to);
-                if (nb != bw) { dw = 1; bw = nb; }
+                int nb=nnue_king_bucket_w(to); if (nb != bw) { dw=1; bw=nb; }
             } else {
-                int nb = nnue_king_bucket_b(to);
-                if (nb != bb) { db = 1; bb = nb; }
+                int nb=nnue_king_bucket_b(to); if (nb != bb) { db=1; bb=nb; }
             }
         } else {
-            _acc_sub_piece(cW, cB, L1WT, p, f, bw, bb, updW, updB);
-            if (cap) _acc_sub_piece(cW, cB, L1WT, cap, to, bw, bb, updW, updB);
+            LDOP(p,f,-1);
+            if (cap) LDOP(cap,to,-1);
             if (m->is_epc) {
-                int epsq = (PC_COLOR(p) == COL_W) ? to + 8 : to - 8;
-                if (board[epsq]) _acc_sub_piece(cW, cB, L1WT, board[epsq], epsq, bw, bb, updW, updB);
+                int e=(PC_COLOR(p)==COL_W)?to+8:to-8;
+                if (board[e]) LDOP(board[e],e,-1);
             }
-            uint8_t landing = m->prom ? (uint8_t)(PC_COLOR(p) | m->prom) : p;
-            _acc_add_piece(cW, cB, L1WT, landing, to, bw, bb, updW, updB);
+            uint8_t land=m->prom?(uint8_t)(PC_COLOR(p)|m->prom):p;
+            LDOP(land,to,+1);
         }
     }
+#undef LDOP
 
-    na->bucket_w_stack[dst] = (uint8_t)bw;
-    na->bucket_b_stack[dst] = (uint8_t)bb;
-    na->dirty_w_stack[dst]  = (uint8_t)dw;
-    na->dirty_b_stack[dst]  = (uint8_t)db;
-    na->acc_ptr = dst;
+    na->delta_n[dst]=(uint8_t)n;
+    na->bucket_w_stack[dst]=(uint8_t)bw;
+    na->bucket_b_stack[dst]=(uint8_t)bb;
+    na->dirty_w_stack[dst]=(uint8_t)dw;
+    na->dirty_b_stack[dst]=(uint8_t)db;
+    na->acc_valid_w[dst]=0;
+    na->acc_valid_b[dst]=0;
+    na->acc_ptr=dst;
+}
+
+/* Materialize one clean perspective from the nearest already-materialized
+ * ancestor.  If a bucket crossing is pending, the existing refresh path
+ * rebuilds from the current board instead and this helper intentionally
+ * does nothing. */
+static inline void _ensure_lazy_perspective(NnueAccum *na, int white_pov) {
+    int p=na->acc_ptr;
+    uint8_t *valid = white_pov ? na->acc_valid_w : na->acc_valid_b;
+    uint8_t *dirty = white_pov ? na->dirty_w_stack : na->dirty_b_stack;
+    if (valid[p] || dirty[p]) return;
+
+    int q=p;
+    while (q > 0 && !valid[q] && !dirty[q]) q--;
+    /* A dirty ancestor can only propagate to p until an eval refreshes it.
+     * Therefore clean p implies that q is a valid materialized ancestor. */
+    if (!valid[q]) return;
+
+    const int16_t *L1WT=na->net->L1WT;
+    for (int d=q+1; d<=p; d++) {
+        int bw=na->bucket_w_stack[d], bb=na->bucket_b_stack[d];
+        if (white_pov)
+            memcpy(na->acc_stack_w[d],na->acc_stack_w[d-1],NN_L1_OUT*sizeof(int16_t));
+        else
+            memcpy(na->acc_stack_b[d],na->acc_stack_b[d-1],NN_L1_OUT*sizeof(int16_t));
+        for (int k=0;k<na->delta_n[d];k++) {
+            uint8_t pc=na->delta_piece[d][k]; int sq=na->delta_sq[d][k];
+            int add=na->delta_sign[d][k] > 0;
+            if (add)
+                _acc_add_piece(na->acc_stack_w[d],na->acc_stack_b[d],L1WT,pc,sq,bw,bb,white_pov,!white_pov);
+            else
+                _acc_sub_piece(na->acc_stack_w[d],na->acc_stack_b[d],L1WT,pc,sq,bw,bb,white_pov,!white_pov);
+        }
+        valid[d]=1;
+    }
 }
 
 /* Pop restores the parent frame.  Bucket and dirty state come back
@@ -787,8 +825,11 @@ static int _nnue_forward(NnueAccum *na, int stm, const uint8_t *board) {
     const float    OutScale = net->OutScale;
 
     int ptr = na->acc_ptr;
-    /* Step 0: lazy bucket refresh (rare: only after a king move that
-     * crossed a bucket border). */
+    /* Step 0a: materialize clean lazy chains only if this node evaluates. */
+    if (!na->dirty_w_stack[ptr]) _ensure_lazy_perspective(na, 1);
+    if (!na->dirty_b_stack[ptr]) _ensure_lazy_perspective(na, 0);
+    /* Step 0b: a king-bucket crossing is still rebuilt exactly from the
+     * current board, preserving the original v5 bucket semantics. */
     if (na->dirty_w_stack[ptr]) _refresh_perspective(na, board, 1);
     if (na->dirty_b_stack[ptr]) _refresh_perspective(na, board, 0);
 

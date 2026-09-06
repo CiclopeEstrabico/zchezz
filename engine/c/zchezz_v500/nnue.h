@@ -189,6 +189,14 @@ typedef struct {
     int16_t  acc_stack_w[NN_ACC_STACK][NN_L1_OUT] __attribute__((aligned(32)));
     int16_t  acc_stack_b[NN_ACC_STACK][NN_L1_OUT] __attribute__((aligned(32)));
     int      acc_ptr;
+    /* Lazy materialization metadata.  Each move needs at most four
+     * non-king feature operations (castle rook: 2; EP/promotion/capture: <=3). */
+    uint8_t  acc_valid_w[NN_ACC_STACK];
+    uint8_t  acc_valid_b[NN_ACC_STACK];
+    uint8_t  delta_n[NN_ACC_STACK];
+    uint8_t  delta_piece[NN_ACC_STACK][4];
+    uint8_t  delta_sq[NN_ACC_STACK][4];
+    int8_t   delta_sign[NN_ACC_STACK][4];
     int16_t  acc_w[NN_L1_OUT]                     __attribute__((aligned(32)));
     int16_t  acc_b[NN_L1_OUT]                     __attribute__((aligned(32)));
     uint8_t  bucket_w_stack[NN_ACC_STACK];
