@@ -1,0 +1,126 @@
+name: v500-exact-compression-screen
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-exact-compression-screen.yml"
+      - "train/v500_exact_compress.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    name: exact-${{ matrix.h1 }}x32
+    strategy:
+      fail-fast: false
+      matrix:
+        h1: [64, 96, 128]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+      H1: ${{ matrix.h1 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas python-chess
+          python -c 'import torch; print(torch.__version__)' || \
+            python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Materialize exact compressed candidate
+        run: |
+          TAG="${H1}x32"
+          mkdir -p "artifacts/exact_${TAG}"
+          python train/v500_exact_compress.py \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst "artifacts/exact_${TAG}/bootstrap.pt" \
+            --h1 "$H1" --seed "$((790000+H1))"
+          python train/v500_arch_sweep.py export \
+            --ckpt "artifacts/exact_${TAG}/bootstrap.pt" \
+            --dst "artifacts/exact_${TAG}/weights.bin" \
+            --h1 "$H1" --h2 32
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine "engine/c/zchezz_vx${H1}x32" \
+            --weights "artifacts/exact_${TAG}/weights.bin" \
+            --h1 "$H1" --h2 32
+
+      - name: Build
+        run: |
+          make -C engine/build ENGINE="vx${H1}x32" clean native
+          make -C engine/build ENGINE=v500 clean native
+          make -C engine/build ENGINE=v500 arena
+
+      - name: Deterministic parity and NPS
+        run: |
+          python - <<'PY'
+          import os,subprocess,re,statistics,json
+          from pathlib import Path
+          h1=os.environ['H1']; root=Path(f'artifacts/exact_{h1}x32')
+          exes={'candidate':f'engine/c/zchezz_vx{h1}x32/zchezz.exe','base':'engine/c/zchezz_v500/zchezz.exe'}
+          def run(exe,depth=11):
+              p=subprocess.run([exe,'bench',str(depth)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              pos=[re.sub(r'\s+',' ',x.strip()) for x in p.stdout.splitlines() if x.startswith('Position ')]
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
+              if not m: raise SystemExit(p.stdout[-3000:])
+              return pos,int(m[-1].replace(',','')),p.stdout
+          b,_,_=run(exes['base']); c,_,_=run(exes['candidate'])
+          if b!=c:
+              print('BASE',b); print('CAND',c); raise SystemExit('deterministic bench mismatch')
+          vals={k:[] for k in exes}
+          for k in ['candidate','base','base','candidate']*3:
+              _,v,_=run(exes[k]); vals[k].append(v)
+          out={k:{'runs':v,'median':statistics.median(v),'mean':statistics.mean(v)} for k,v in vals.items()}
+          out['ratio']=out['candidate']['median']/out['base']['median']
+          out['deterministic_parity']=True
+          print(json.dumps(out,indent=2)); (root/'nps.json').write_text(json.dumps(out,indent=2))
+          PY
+
+      - name: Fixed-node identity
+        run: |
+          TAG="${H1}x32"
+          python - <<'PY'
+          import os,sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          h1=os.environ['H1']
+          p._make_gate_openings(p.ROOT/f'artifacts/exact_{h1}x32/openings.epd', 791000+int(h1), 256)
+          PY
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vx${TAG}/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
+            --openings "artifacts/exact_${TAG}/openings.epd" --opening-plies 0 \
+            --seed "$((792000+H1))" --tt-mb 16 \
+            --json "artifacts/exact_${TAG}/nodes.json"
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import os,json
+          from pathlib import Path
+          h1=os.environ['H1']; root=Path(f'artifacts/exact_{h1}x32')
+          if (root/'nps.json').exists():
+              x=json.loads((root/'nps.json').read_text())
+              print(f'exact {h1}x32 NPS ratio={x["ratio"]:.4f} parity={x["deterministic_parity"]}')
+          if (root/'nodes.json').exists():
+              x=json.loads((root/'nodes.json').read_text())['pairings'][0]
+              print(f'nodes W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-exact-${{ matrix.h1 }}x32
+          path: artifacts/exact_${{ matrix.h1 }}x32/
+          retention-days: 30
