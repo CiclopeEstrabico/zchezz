@@ -1,0 +1,114 @@
+name: v500-lazy-accum-screen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - "tools/v500_apply_lazy_accum.py"
+      - ".github/workflows/v500-lazy-accum-screen.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lazy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Materialize candidate
+        run: |
+          rm -rf engine/c/zchezz_v500base engine/c/zchezz_v500lazy
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500base
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500lazy
+          python tools/v500_apply_lazy_accum.py --root engine/c/zchezz_v500lazy
+          mkdir -p artifacts/lazy_accum
+          diff -ur engine/c/zchezz_v500base engine/c/zchezz_v500lazy > artifacts/lazy_accum/patch.diff || true
+          test -s artifacts/lazy_accum/patch.diff
+      - name: Verification build and bench
+        run: |
+          ARCH_FLAGS="-mavx2 -DNNUE_VERIFY_ACC" make -C engine/build ENGINE=v500lazy clean native
+          engine/c/zchezz_v500lazy/zchezz.exe bench 10 | tee artifacts/lazy_accum/verify_bench.txt
+      - name: Normal builds
+        run: |
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500base clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500lazy clean native
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500 arena
+      - name: Deterministic bench parity and NPS
+        run: |
+          python - <<'PY'
+          import subprocess,re,statistics,json
+          from pathlib import Path
+          root=Path('artifacts/lazy_accum')
+          def run(exe,depth=11):
+              p=subprocess.run([exe,'bench',str(depth)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+              lines=[]
+              for line in p.stdout.splitlines():
+                  if line.startswith('Position '):
+                      lines.append(re.sub(r'\s+',' ',line.strip()))
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
+              if not m: raise SystemExit(p.stdout[-3000:])
+              return lines,int(m[-1].replace(',','')),p.stdout
+          base_lines,_,_=run('engine/c/zchezz_v500base/zchezz.exe')
+          lazy_lines,_,_=run('engine/c/zchezz_v500lazy/zchezz.exe')
+          # Search semantics must match exactly apart from timing/NPS.
+          if base_lines != lazy_lines:
+              print('BASE',base_lines); print('LAZY',lazy_lines); raise SystemExit('deterministic bench mismatch')
+          d={}
+          for name in ('base','lazy'):
+              vals=[]; raw=[]
+              for _ in range(7):
+                  _,v,o=run(f'engine/c/zchezz_v500{name}/zchezz.exe'); vals.append(v); raw.append(o)
+              d[name]={'runs':vals,'median':statistics.median(vals),'mean':statistics.mean(vals)}
+              (root/f'bench_{name}.txt').write_text('\n---\n'.join(raw))
+          d['ratio']=d['lazy']['median']/d['base']['median']
+          print(json.dumps(d,indent=2)); (root/'nps.json').write_text(json.dumps(d,indent=2))
+          PY
+      - name: Openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/lazy_accum/openings.epd',660731,320)
+          PY
+      - name: Fixed-node identity
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500lazy/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 192 --threads 4 --movetime 0 --nodes 30000 --max-plies 240 \
+            --openings artifacts/lazy_accum/openings.epd --opening-plies 0 --seed 661000 --tt-mb 16 \
+            --json artifacts/lazy_accum/nodes.json
+      - name: Timed Elo
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500lazy/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 512 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/lazy_accum/openings.epd --opening-plies 0 --seed 661100 --tt-mb 16 \
+            --json artifacts/lazy_accum/time20.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('artifacts/lazy_accum').glob('*.json')):
+              j=json.loads(p.read_text())
+              if 'pairings' in j:
+                  x=j['pairings'][0]; print(f'{p.name}: {x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+              elif 'ratio' in j: print('NPS ratio lazy/base',j['ratio'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-lazy-accum-screen
+          path: artifacts/lazy_accum/
+          retention-days: 30
