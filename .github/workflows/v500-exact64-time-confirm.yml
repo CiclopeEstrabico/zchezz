@@ -1,0 +1,84 @@
+name: v500 exact64 time confirmation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v500-strength]
+    paths:
+      - '.github/workflows/v500-exact64-time-confirm.yml'
+
+permissions:
+  contents: read
+
+env:
+  ARCH_FLAGS: -mavx2
+  STATIC_FLAG: ''
+
+jobs:
+  confirm:
+    strategy:
+      fail-fast: false
+      matrix:
+        opponent: [v500, v314]
+        order: [candidate-first, candidate-second]
+        seed: [806101, 806701]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas python-chess
+          python -c 'import torch; print(torch.__version__)' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Materialize exact 64x32
+        run: |
+          mkdir -p artifacts/exact64-confirm
+          python train/v500_exact_compress.py \
+            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+            --dst artifacts/exact64-confirm/bootstrap.pt --h1 64 --seed 806064
+          python train/v500_arch_sweep.py export \
+            --ckpt artifacts/exact64-confirm/bootstrap.pt \
+            --dst artifacts/exact64-confirm/weights.bin --h1 64 --h2 32
+          python train/v500_arch_sweep.py materialize-engine \
+            --base-engine engine/c/zchezz_v500 \
+            --dst-engine engine/c/zchezz_vx64x32 \
+            --weights artifacts/exact64-confirm/weights.bin --h1 64 --h2 32
+      - name: Build engines and arena
+        run: |
+          make -C engine/build ENGINE=vx64x32 clean native
+          make -C engine/build ENGINE=${{ matrix.opponent }} clean native
+          make -C engine/build ENGINE=v500 arena
+      - name: Create paired openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/exact64-confirm/openings.epd', ${{ matrix.seed }}, 1024)
+          PY
+      - name: Confirm 200 ms with one arena thread
+        run: |
+          C="$GITHUB_WORKSPACE/engine/c/zchezz_vx64x32/zchezz.exe"
+          O="$GITHUB_WORKSPACE/engine/c/zchezz_${{ matrix.opponent }}/zchezz.exe"
+          if [ '${{ matrix.order }}' = 'candidate-first' ]; then P0="$C"; P1="$O"; else P0="$O"; P1="$C"; fi
+          python tests/run_arena.py \
+            --player "uci:$P0" --player "uci:$P1" \
+            --games 256 --threads 1 --movetime 200 --nodes 0 --max-plies 300 \
+            --openings artifacts/exact64-confirm/openings.epd --opening-plies 0 \
+            --seed ${{ matrix.seed }} --tt-mb 16 \
+            --json artifacts/exact64-confirm/result-${{ matrix.opponent }}-${{ matrix.order }}-${{ matrix.seed }}.json
+      - name: Summary
+        run: |
+          python - <<'PY'
+          import json,glob
+          for p in glob.glob('artifacts/exact64-confirm/result-*.json'):
+              x=json.load(open(p))['pairings'][0]
+              print(p, f'W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact64-confirm-${{ matrix.opponent }}-${{ matrix.order }}-${{ matrix.seed }}
+          path: artifacts/exact64-confirm/
+          retention-days: 30
