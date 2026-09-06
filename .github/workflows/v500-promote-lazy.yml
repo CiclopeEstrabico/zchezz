@@ -1,0 +1,37 @@
+name: v500-promote-lazy
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-promote-lazy.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Promote validated lazy HalfKP accumulator
+        run: |
+          python tools/v500_apply_lazy_accum.py --root engine/c/zchezz_v500
+          git diff --check
+      - name: Verification build
+        run: |
+          ARCH_FLAGS="-mavx2 -DNNUE_VERIFY_ACC" make -C engine/build ENGINE=v500 clean native
+          engine/c/zchezz_v500/zchezz.exe bench 10
+      - name: Commit promoted baseline
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add engine/c/zchezz_v500/nnue.c engine/c/zchezz_v500/nnue.h
+          git commit -m "perf(v500): promote lazy HalfKP accumulator"
+          git push origin HEAD:v500-strength
