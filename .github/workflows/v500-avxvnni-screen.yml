@@ -1,0 +1,99 @@
+name: v500-avxvnni-screen
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/v500-avxvnni-screen.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Prepare copies
+        run: |
+          rm -rf engine/c/zchezz_v500avx2 engine/c/zchezz_v500vnni
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500avx2
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500vnni
+      - name: Build AVX2 and AVX-VNNI
+        run: |
+          ARCH_FLAGS="-mavx2" make -C engine/build ENGINE=v500avx2 clean native
+          ARCH_FLAGS="-mavx2 -mavxvnni" make -C engine/build ENGINE=v500vnni clean native
+          make -C engine/build ENGINE=v500 arena
+      - name: Deterministic parity and NPS
+        run: |
+          mkdir -p artifacts/vnni
+          python3 - <<'PY'
+          import subprocess,re,statistics,json
+          def run(exe,depth=11):
+              out=subprocess.run([exe,'bench',str(depth)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180).stdout
+              pos=[re.sub(r'\s+',' ',x.strip()) for x in out.splitlines() if x.startswith('Position ')]
+              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',out)
+              if not pos or not m: raise SystemExit(out[-3000:])
+              return pos,int(m[-1].replace(',',''))
+          for d in (9,11,12):
+              a,_=run('engine/c/zchezz_v500avx2/zchezz.exe',d)
+              b,_=run('engine/c/zchezz_v500vnni/zchezz.exe',d)
+              if a!=b: raise SystemExit(f'AVX2/VNNI semantic mismatch depth {d}')
+          vals={'avx2':[],'vnni':[]}
+          for name in ('avx2','vnni','vnni','avx2')*2:
+              _,v=run(f'engine/c/zchezz_v500{name}/zchezz.exe'); vals[name].append(v)
+          data={k:{'runs':v,'median':statistics.median(v),'mean':statistics.mean(v)} for k,v in vals.items()}
+          data['ratio']=data['vnni']['median']/data['avx2']['median']
+          print(json.dumps(data,indent=2))
+          open('artifacts/vnni/nps.json','w').write(json.dumps(data,indent=2))
+          PY
+      - name: Openings
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/vnni/openings.epd', 720731, 256)
+          PY
+      - name: Fixed-node identity
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500vnni/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500avx2/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 30000 --max-plies 240 \
+            --openings artifacts/vnni/openings.epd --opening-plies 0 \
+            --seed 721000 --tt-mb 16 --json artifacts/vnni/nodes.json
+      - name: Timed screen
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500vnni/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500avx2/zchezz.exe" \
+            --games 192 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/vnni/openings.epd --opening-plies 0 \
+            --seed 721100 --tt-mb 16 --json artifacts/vnni/time20.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path('artifacts/vnni').glob('*.json')):
+              j=json.loads(p.read_text())
+              if 'pairings' in j:
+                  x=j['pairings'][0]
+                  print(f'{p.name}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+              else: print(p.name,json.dumps(j))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-avxvnni-screen
+          path: artifacts/vnni/
+          retention-days: 30
