@@ -1,0 +1,52 @@
+name: cleanup-obsolete-branches
+
+on:
+  push:
+    branches: ["v500-strength"]
+    paths:
+      - ".github/workflows/cleanup-obsolete-branches.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Delete obsolete remote branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          keep_main="main"
+          keep_v500="v500-strength"
+          keep_v323="v323-fullacc-endgame-test"
+
+          mapfile -t branches < <(
+            git ls-remote --heads origin \
+              | awk '{sub("refs/heads/", "", $2); print $2}' \
+              | sort
+          )
+
+          printf 'Remote branches before cleanup:\n'
+          printf '  %s\n' "${branches[@]}"
+
+          for branch in "${branches[@]}"; do
+            case "$branch" in
+              "$keep_main"|"$keep_v500"|"$keep_v323")
+                echo "KEEP   $branch"
+                ;;
+              *)
+                echo "DELETE $branch"
+                git push origin --delete "$branch"
+                ;;
+            esac
+          done
+
+          echo 'Remote branches after cleanup:'
+          git ls-remote --heads origin \
+            | awk '{sub("refs/heads/", "", $2); print "  " $2}' \
+            | sort
