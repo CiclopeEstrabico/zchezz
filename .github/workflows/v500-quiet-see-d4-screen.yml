@@ -1,0 +1,76 @@
+name: v500-quiet-see-d4-screen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["v500-strength"]
+    paths: [".github/workflows/v500-quiet-see-d4-screen.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  see:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      ARCH_FLAGS: -mavx2
+      STATIC_FLAG: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install --disable-pip-version-check python-chess
+      - name: Materialize depth-4 quiet SEE candidate
+        run: |
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500base
+          cp -a engine/c/zchezz_v500 engine/c/zchezz_v500see4
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('engine/c/zchezz_v500see4/search.c'); s=p.read_text()
+          old='!in_check && !is_pv && legal_count > 0 && depth <= 3 &&'
+          assert s.count(old)==1, s.count(old)
+          p.write_text(s.replace(old,'!in_check && !is_pv && legal_count > 0 && depth <= 4 &&',1))
+          PY
+          make -C engine/build ENGINE=v500base clean native
+          make -C engine/build ENGINE=v500see4 clean native
+          make -C engine/build ENGINE=v500 arena
+          mkdir -p artifacts/see4
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(p.ROOT/'artifacts/see4/openings.epd',640731,256)
+          PY
+      - name: Fixed-node strength
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500see4/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 192 --threads 4 --movetime 0 --nodes 30000 --max-plies 240 \
+            --openings artifacts/see4/openings.epd --opening-plies 0 --seed 641000 --tt-mb 16 \
+            --json artifacts/see4/nodes.json
+      - name: Timed strength
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500see4/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_v500base/zchezz.exe" \
+            --games 384 --threads 4 --movetime 20 --nodes 0 --max-plies 240 \
+            --openings artifacts/see4/openings.epd --opening-plies 0 --seed 641100 --tt-mb 16 \
+            --json artifacts/see4/time20.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in Path('artifacts/see4').glob('*.json'):
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{p.name}: {x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-quiet-see-d4-screen
+          path: artifacts/see4/
+          retention-days: 30
