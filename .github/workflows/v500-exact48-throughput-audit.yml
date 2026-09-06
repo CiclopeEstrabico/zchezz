@@ -16,6 +16,7 @@ jobs:
     timeout-minutes: 45
     env:
       STATIC_FLAG: ""
+      ARCH_FLAGS: -mavx2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,76 +27,90 @@ jobs:
           python -m pip install --disable-pip-version-check numpy pandas python-chess
           python -c 'import torch; print(torch.__version__)' || \
             python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Materialize exact 48x32
+      - name: Materialize exact 48x32 and 64x32
         run: |
-          mkdir -p artifacts/exact48-audit
-          python train/v500_exact_compress.py \
-            --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
-            --dst artifacts/exact48-audit/bootstrap.pt --h1 48 --seed 804800
-          python train/v500_arch_sweep.py export \
-            --ckpt artifacts/exact48-audit/bootstrap.pt \
-            --dst artifacts/exact48-audit/weights.bin --h1 48 --h2 32
-          python train/v500_arch_sweep.py materialize-engine \
-            --base-engine engine/c/zchezz_v500 \
-            --dst-engine engine/c/zchezz_vx48x32 \
-            --weights artifacts/exact48-audit/weights.bin --h1 48 --h2 32
+          mkdir -p artifacts/exact-throughput
+          for H1 in 48 64; do
+            python train/v500_exact_compress.py \
+              --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+              --dst "artifacts/exact-throughput/${H1}x32.pt" --h1 "$H1" --seed "$((804800+H1))"
+            python train/v500_arch_sweep.py export \
+              --ckpt "artifacts/exact-throughput/${H1}x32.pt" \
+              --dst "artifacts/exact-throughput/${H1}x32.bin" --h1 "$H1" --h2 32
+            python train/v500_arch_sweep.py materialize-engine \
+              --base-engine engine/c/zchezz_v500 \
+              --dst-engine "engine/c/zchezz_vx${H1}x32" \
+              --weights "artifacts/exact-throughput/${H1}x32.bin" --h1 "$H1" --h2 32
+          done
       - name: Build AVX2 engines
-        env:
-          ARCH_FLAGS: -mavx2
         run: |
-          make -C engine/build ENGINE=vx48x32 clean native
-          cp engine/c/zchezz_vx48x32/zchezz.exe artifacts/exact48-audit/candidate-avx2.exe
-          make -C engine/build ENGINE=v500 clean native
-          cp engine/c/zchezz_v500/zchezz.exe artifacts/exact48-audit/v500-avx2.exe
-          make -C engine/build ENGINE=v314 clean native
-          cp engine/c/zchezz_v314/zchezz.exe artifacts/exact48-audit/v314-avx2.exe
-      - name: Build scalar candidate and v5
-        env:
-          ARCH_FLAGS: ""
-        run: |
-          make -C engine/build ENGINE=vx48x32 clean native
-          cp engine/c/zchezz_vx48x32/zchezz.exe artifacts/exact48-audit/candidate-scalar.exe
-          make -C engine/build ENGINE=v500 clean native
-          cp engine/c/zchezz_v500/zchezz.exe artifacts/exact48-audit/v500-scalar.exe
-      - name: Search parity and alternating throughput
+          for E in vx48x32 vx64x32 v500 v314; do
+            make -C engine/build ENGINE="$E" clean native
+            cp "engine/c/zchezz_${E}/zchezz.exe" "artifacts/exact-throughput/${E}.exe"
+          done
+      - name: High-resolution deep throughput and parity
         run: |
           python - <<'PY'
-          import subprocess,re,statistics,json
+          import subprocess,re,statistics,json,time
           from pathlib import Path
-          root=Path('artifacts/exact48-audit')
+          root=Path('artifacts/exact-throughput')
           exes={
-            'candidate':str(root/'candidate-avx2.exe'),
-            'v500':str(root/'v500-avx2.exe'),
-            'v314':str(root/'v314-avx2.exe'),
+            'exact48':str(root/'vx48x32.exe'),
+            'exact64':str(root/'vx64x32.exe'),
+            'v500':str(root/'v500.exe'),
+            'v314':str(root/'v314.exe'),
           }
-          def bench(exe,depth=11):
-              p=subprocess.run([exe,'bench',str(depth)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=180)
+          DEPTH=18
+          def bench(exe):
+              t0=time.perf_counter_ns()
+              p=subprocess.run([exe,'bench',str(DEPTH)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True,timeout=300)
+              t1=time.perf_counter_ns()
               positions=[re.sub(r'\s+',' ',x.strip()) for x in p.stdout.splitlines() if x.startswith('Position ')]
-              m=re.findall(r'(?i)nodes/sec\s*:\s*([0-9,]+)',p.stdout)
-              if not m: raise SystemExit(p.stdout[-3000:])
-              return positions,int(m[-1].replace(',',''))
+              m_nodes=re.findall(r'(?i)Total nodes\s*:\s*([0-9,]+)',p.stdout)
+              m_ms=re.findall(r'(?i)Elapsed\s*:\s*([0-9,]+)\s*ms',p.stdout)
+              if not m_nodes: raise SystemExit(p.stdout[-3000:])
+              nodes=int(m_nodes[-1].replace(',',''))
+              wall_s=(t1-t0)/1e9
+              nps=nodes/wall_s
+              engine_ms=int(m_ms[-1].replace(',','')) if m_ms else None
+              return positions,nodes,wall_s,nps,engine_ms
           refs={}
-          for name in ('candidate','v500'):
-              refs[name],_=bench(exes[name])
-          cs,_=bench(str(root/'candidate-scalar.exe'))
-          bs,_=bench(str(root/'v500-scalar.exe'))
+          for k in ('exact48','exact64','v500'):
+              refs[k]=bench(exes[k])[0]
           parity={
-            'candidate_vs_v500_avx2': refs['candidate']==refs['v500'],
-            'candidate_vs_v500_scalar': cs==bs,
-            'candidate_avx2_vs_scalar': refs['candidate']==cs,
-            'v500_avx2_vs_scalar': refs['v500']==bs,
+            'exact48_vs_v500':refs['exact48']==refs['v500'],
+            'exact64_vs_v500':refs['exact64']==refs['v500'],
+            'exact48_vs_exact64':refs['exact48']==refs['exact64'],
           }
           print('PARITY',json.dumps(parity,indent=2))
-          if not all(parity.values()): raise SystemExit('search parity audit failed')
+          if not all(parity.values()): raise SystemExit('deep-search parity failed')
           vals={k:[] for k in exes}
-          for k in ['candidate','v500','v314','v314','v500','candidate']*5:
-              _,nps=bench(exes[k]); vals[k].append(nps)
-          out={k:{'runs':v,'median':statistics.median(v),'mean':statistics.mean(v)} for k,v in vals.items()}
-          out['candidate_over_v500']=out['candidate']['median']/out['v500']['median']
-          out['candidate_over_v314']=out['candidate']['median']/out['v314']['median']
-          out['v500_over_v314']=out['v500']['median']/out['v314']['median']
+          order=['exact48','exact64','v500','v314','v314','v500','exact64','exact48']*4
+          for k in order:
+              _,nodes,wall,nps,engine_ms=bench(exes[k])
+              vals[k].append({'nodes':nodes,'wall_s':wall,'nps':nps,'engine_ms':engine_ms})
+              print(f'{k:7s} nodes={nodes} wall={wall:.6f}s nps={nps:,.0f} engine_ms={engine_ms}')
+          out={}
+          for k,runs in vals.items():
+              nps=[x['nps'] for x in runs]
+              wall=[x['wall_s'] for x in runs]
+              out[k]={
+                'runs':runs,
+                'median_nps':statistics.median(nps),
+                'mean_nps':statistics.mean(nps),
+                'median_wall_s':statistics.median(wall),
+              }
+          out['ratios']={
+            'exact48_over_v500':out['exact48']['median_nps']/out['v500']['median_nps'],
+            'exact64_over_v500':out['exact64']['median_nps']/out['v500']['median_nps'],
+            'exact48_over_v314':out['exact48']['median_nps']/out['v314']['median_nps'],
+            'exact64_over_v314':out['exact64']['median_nps']/out['v314']['median_nps'],
+            'v500_over_v314':out['v500']['median_nps']/out['v314']['median_nps'],
+          }
+          out['depth']=DEPTH
           out['parity']=parity
-          print(json.dumps(out,indent=2)); (root/'audit.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out['ratios'],indent=2))
+          (root/'audit.json').write_text(json.dumps(out,indent=2))
           PY
       - name: Summary
         if: always()
@@ -103,17 +118,15 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          p=Path('artifacts/exact48-audit/audit.json')
+          p=Path('artifacts/exact-throughput/audit.json')
           if not p.exists(): print('audit.json MISSING'); raise SystemExit(0)
           x=json.loads(p.read_text())
-          print(f"candidate/v500={x['candidate_over_v500']:.4f}")
-          print(f"candidate/v314={x['candidate_over_v314']:.4f}")
-          print(f"v500/v314={x['v500_over_v314']:.4f}")
-          print('parity=',x['parity'])
+          print(f"depth={x['depth']} parity={x['parity']}")
+          for k,v in x['ratios'].items(): print(f'{k}={v:.4f}')
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v500-exact48-throughput-audit
-          path: artifacts/exact48-audit/
+          name: v500-exact-throughput-audit
+          path: artifacts/exact-throughput/
           retention-days: 30
