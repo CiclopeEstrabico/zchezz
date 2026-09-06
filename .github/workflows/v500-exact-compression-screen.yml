@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        h1: [64, 96, 128]
+        h1: [48]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
