@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           cd engine/c/zchezz_v323
           gcc -O3 -ffast-math -D_GNU_SOURCE -DNO_TABLEBASES -std=c11 -mavx2 \
-            -o zchezz main.c board.c search.c nnue.c syzygy.c tbprobe.c book.c -lm -pthread
+            -o zchezz main.c board.c search.c nnue.c syzygy.c book.c -lm -pthread
 
       - name: Verify go nodes budget
         shell: bash
