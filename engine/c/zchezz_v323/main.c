@@ -799,6 +799,12 @@ static void cmd_go(const char *line) {
     } else if (mate > 0) {
         p.max_depth = mate * 2;
         p.time_limit_ms = 0;
+    } else if (p.node_limit > 0) {
+        /* A nodes-only UCI search must not inherit DEFAULT_DEPTH=8.
+         * The node budget is the stopping condition; let iterative
+         * deepening continue until that budget is exhausted. */
+        p.max_depth = MAX_PLY - 1;
+        p.time_limit_ms = 0;
     } else if (wtime > 0 || btime > 0) {
         int is_white = (g_board.turn == COL_W);
         p.time_limit_ms = estimate_movetime(wtime, btime, winc, binc,

@@ -504,7 +504,7 @@ static void sort_moves(SearchState *ss, Move *moves, int n, const Board *bd, int
  * and displace more valuable deeper entries). */
 static int qsearch(SearchState *ss, Board *b, int alpha, int beta, int ply) {
     if (ply >= MAX_PLY-1) return eval_stm(b);
-    if (ss->nodes >= ss->node_limit || time_up(ss)) return eval_stm(b);
+    if (ss->nodes_total >= ss->node_limit || time_up(ss)) return eval_stm(b);
     ss->nodes++; ss->nodes_total++;
 
     /* ── TT probe in qsearch ─────────────────────────────────── */
@@ -669,7 +669,7 @@ static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
 static int alpha_beta(SearchState *ss, Board *b, int depth, int alpha, int beta,
                       Move *pv, int *pv_len, int ply, int in_check_hint) {
     if (ply >= MAX_PLY-1) { *pv_len=0; return eval_stm(b); }
-    if (ss->nodes >= ss->node_limit || time_up(ss)) {
+    if (ss->nodes_total >= ss->node_limit || time_up(ss)) {
         *pv_len=0;
         return depth<=0 ? eval_stm(b) : qsearch(ss,b,alpha,beta,ply);
     }
