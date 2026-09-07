@@ -1,0 +1,64 @@
+name: v500 quantized structure audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v500-strength]
+    paths:
+      - '.github/workflows/v500-structure-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install numerical dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy
+          python -c 'import torch; print(torch.__version__)' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Audit quantized live paths
+        run: |
+          python - <<'PY'
+          import sys, json
+          from pathlib import Path
+          import torch
+          sys.path.insert(0,'train')
+          import import_nnu4 as imp
+
+          w, meta = imp.read_nnu4(Path('engine/c/zchezz_v500/nnue_weights.bin'))
+          qb=float(meta['qb'])
+          h1=w['l1_bias'].numel()
+          h2=w['l2.bias'].numel()
+
+          q2=torch.round(w['l2.weight'].float()*qb).to(torch.int32)
+          q3=torch.round(w['l3.weight'].float()*qb).to(torch.int32).flatten()
+
+          h1_imp=q2[:,:h1].abs().sum(0)+q2[:,h1:].abs().sum(0)
+          live_h1=torch.nonzero(h1_imp>0,as_tuple=False).flatten()
+          live_h2=torch.nonzero(q3!=0,as_tuple=False).flatten()
+
+          # H2 units that are structurally observable at the output after quantization.
+          # A zero q3 coefficient makes the complete H2 unit exactly removable.
+          print('H1',h1,'quantized-live',len(live_h1),'indices',live_h1.tolist())
+          print('H2',h2,'quantized-live-to-L3',len(live_h2),'indices',live_h2.tolist())
+          print('L3 qweights',q3.tolist())
+          print('H1 importance sorted',torch.sort(h1_imp[live_h1],descending=True).values.tolist())
+
+          out={
+            'h1':h1,'h1_live':len(live_h1),'h1_live_indices':live_h1.tolist(),
+            'h2':h2,'h2_live':len(live_h2),'h2_live_indices':live_h2.tolist(),
+            'l3_qweights':q3.tolist(),'qb':qb,
+          }
+          Path('v500-structure-audit.json').write_text(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v500-structure-audit
+          path: v500-structure-audit.json
+          retention-days: 30
