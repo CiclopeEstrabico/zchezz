@@ -27,32 +27,20 @@ jobs:
 
           search = Path('engine/c/zchezz_v323/search.c')
           s = search.read_text(encoding='utf-8')
-          old = 'if (ss->nodes >= ss->node_limit || time_up(ss))'
-          n = s.count(old)
+          old_guard = 'if (ss->nodes >= ss->node_limit || time_up(ss))'
+          n = s.count(old_guard)
           if n != 2:
               raise SystemExit(f'expected 2 per-iteration node-limit guards, found {n}')
-          s = s.replace(old, 'if (ss->nodes_total >= ss->node_limit || time_up(ss))')
+          s = s.replace(old_guard, 'if (ss->nodes_total >= ss->node_limit || time_up(ss))')
           search.write_text(s, encoding='utf-8')
 
           main = Path('engine/c/zchezz_v323/main.c')
           m = main.read_text(encoding='utf-8')
-          old = '''    } else if (mate > 0) {
-        p.max_depth = mate * 2;
-        p.time_limit_ms = 0;
-    } else if (wtime > 0 || btime > 0) {'''
-          new = '''    } else if (mate > 0) {
-        p.max_depth = mate * 2;
-        p.time_limit_ms = 0;
-    } else if (p.node_limit > 0) {
-        /* A nodes-only UCI search must not inherit DEFAULT_DEPTH=8.
-         * The node budget is the stopping condition; let iterative
-         * deepening continue until that budget is exhausted. */
-        p.max_depth = MAX_PLY - 1;
-        p.time_limit_ms = 0;
-    } else if (wtime > 0 || btime > 0) {'''
-          if old not in m:
+          old_anchor = "    } else if (mate > 0) {\n        p.max_depth = mate * 2;\n        p.time_limit_ms = 0;\n    } else if (wtime > 0 || btime > 0) {"
+          new_anchor = "    } else if (mate > 0) {\n        p.max_depth = mate * 2;\n        p.time_limit_ms = 0;\n    } else if (p.node_limit > 0) {\n        /* A nodes-only UCI search must not inherit DEFAULT_DEPTH=8.\n         * The node budget is the stopping condition; let iterative\n         * deepening continue until that budget is exhausted. */\n        p.max_depth = MAX_PLY - 1;\n        p.time_limit_ms = 0;\n    } else if (wtime > 0 || btime > 0) {"
+          if old_anchor not in m:
               raise SystemExit('main.c node-only insertion anchor not found')
-          m = m.replace(old, new, 1)
+          m = m.replace(old_anchor, new_anchor, 1)
           main.write_text(m, encoding='utf-8')
           PY
 
@@ -64,23 +52,22 @@ jobs:
           gcc -O3 -ffast-math -D_GNU_SOURCE -DNO_TABLEBASES -std=c11 -mavx2 \
             -o zchezz main.c board.c search.c nnue.c syzygy.c tbprobe.c book.c -lm -pthread
 
-      - name: Verify go nodes is neither depth-8 capped nor iteration-local
+      - name: Verify go nodes budget
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import re, subprocess, sys, time
+          import re, subprocess, time
           exe = 'engine/c/zchezz_v323/zchezz'
-          p = subprocess.Popen([exe, '--nnue', 'engine/c/zchezz_v323/nnue_weights.bin'],
-                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, bufsize=1)
+          p = subprocess.Popen([exe, '--nnue', 'engine/c/zchezz_v323/nnue_weights.bin'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
           assert p.stdin and p.stdout
           for cmd in ('uci','isready','position startpos','go nodes 2000000'):
-              p.stdin.write(cmd+'\n'); p.stdin.flush()
+              p.stdin.write(cmd+'\n')
+              p.stdin.flush()
           max_depth = 0
           last_nodes = 0
+          lines = []
           deadline = time.time() + 90
-          lines=[]
           while time.time() < deadline:
               line = p.stdout.readline()
               if not line:
@@ -88,13 +75,18 @@ jobs:
               lines.append(line.rstrip())
               md = re.search(r'\bdepth (\d+)', line)
               mn = re.search(r'\bnodes (\d+)', line)
-              if md: max_depth=max(max_depth,int(md.group(1)))
-              if mn: last_nodes=max(last_nodes,int(mn.group(1)))
+              if md:
+                  max_depth = max(max_depth, int(md.group(1)))
+              if mn:
+                  last_nodes = max(last_nodes, int(mn.group(1)))
               if line.startswith('bestmove '):
                   break
-          p.stdin.write('quit\n'); p.stdin.flush()
-          try: p.wait(timeout=5)
-          except subprocess.TimeoutExpired: p.kill()
+          p.stdin.write('quit\n')
+          p.stdin.flush()
+          try:
+              p.wait(timeout=5)
+          except subprocess.TimeoutExpired:
+              p.kill()
           print('\n'.join(lines[-40:]))
           print('MAX_DEPTH', max_depth, 'LAST_NODES', last_nodes)
           if max_depth <= 8:
