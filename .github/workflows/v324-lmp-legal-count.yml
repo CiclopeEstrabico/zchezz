@@ -1,9 +1,10 @@
-name: v3.24 LMP Legal Quiet Count
+name: v3.24 LMP Legal Count
 
 on:
   workflow_dispatch:
   push:
-    branches: [exp/v324-lmp-legal-count]
+    branches:
+      - exp/v324-lmp-legal-count
 
 permissions:
   contents: read
@@ -25,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --disable-pip-version-check -e ".[all]"
 
-      - name: Build untouched v3.23 baseline
+      - name: Build baseline
         shell: bash
         run: |
           set -euo pipefail
@@ -33,103 +34,100 @@ jobs:
           cp engine/c/zchezz_v323/zchezz.exe /tmp/base.exe
           cp engine/c/zchezz_v323/nnue_weights.bin /tmp/nnue_weights.bin
 
-      - name: Apply isolated LMP legal-count fix and build
+      - name: Build candidate
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-          p=Path('engine/c/zchezz_v323/search.c')
-          s=p.read_text(encoding='utf-8')
-          old='''                if (!in_check && is_quiet && depth<=7 && legal_count>0 && !is_killer) {
-                    quiet_count++;
-                    int lmp_lim = lmp_limit[depth<8?depth:7];
-'''
-          new='''                if (!in_check && is_quiet && depth<=7 && legal_count>0 && !is_killer) {
-                    /* LMP budget must count legal quiets only.  Move generation is
-                     * pseudo-legal, so a pinned/illegal quiet must not consume a slot
-                     * and cause a later legal quiet to be pruned.  Pre-check legality
-                     * here without changing the ordering of LMP/history/SEE below. */
-                    board_make(b, m);
-                    int lmp_mover_col = b->turn ^ 24;
-                    int lmp_king_sq = lmp_mover_col == COL_W ? b->wk : b->bk;
-                    int lmp_legal = !board_is_attacked(b, lmp_king_sq, b->turn);
-                    board_unmake(b);
-                    if (!lmp_legal) continue;
-
-                    quiet_count++;
-                    int lmp_lim = lmp_limit[depth<8?depth:7];
-'''
-          if s.count(old) != 1:
-              raise SystemExit(f'LMP anchor count={s.count(old)}')
-          s=s.replace(old,new,1)
-          p.write_text(s,encoding='utf-8')
-          PY
+          python tools/v324_apply_lmp_legal_count.py
           git diff --check
           make -C engine/build ENGINE=v323 clean native CC=gcc ARCH_FLAGS="-mavx2" STATIC_FLAG=""
           python tests/test_perft.py --version v323 --max-depth 4
           python tests/test_uci_extended.py --version v323 --only T1 --only T2 --only T6 --only T9
           cp engine/c/zchezz_v323/zchezz.exe /tmp/cand.exe
 
-      - name: Tree and NPS benchmark
+      - name: Benchmark tree and NPS
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p tests/arena_results
           python - <<'PY'
-          import json,re,statistics,subprocess,time
+          import json, re, statistics, subprocess, time
           from pathlib import Path
-          w='/tmp/nnue_weights.bin'
+          w = '/tmp/nnue_weights.bin'
           def bench(exe):
-              t=time.perf_counter()
-              p=subprocess.run([exe,'--nnue',w,'bench','11'],capture_output=True,text=True,check=True)
-              dt=time.perf_counter()-t
-              txt=p.stdout+p.stderr
-              n=int(re.search(r'Total nodes\s*:\s*(\d+)',txt).group(1))
-              return n,n/dt
-          B=[]; C=[]
+              t = time.perf_counter()
+              p = subprocess.run([exe, '--nnue', w, 'bench', '11'], capture_output=True, text=True, check=True)
+              dt = time.perf_counter() - t
+              txt = p.stdout + p.stderr
+              n = int(re.search(r'Total nodes\s*:\s*(\d+)', txt).group(1))
+              return n, n / dt
+          B, C = [], []
           for i in range(5):
-              order=(('b','/tmp/base.exe'),('c','/tmp/cand.exe')) if i%2==0 else (('c','/tmp/cand.exe'),('b','/tmp/base.exe'))
-              for k,e in order: (B if k=='b' else C).append(bench(e))
-          bn=B[0][0]; cn=C[0][0]
-          b=statistics.median(x[1] for x in B); c=statistics.median(x[1] for x in C)
-          out={'baseline_nodes':bn,'candidate_nodes':cn,'tree_delta_pct':100*(cn/bn-1),'baseline_median_nps':b,'candidate_median_nps':c,'nps_delta_pct':100*(c/b-1)}
-          print(json.dumps(out,indent=2))
-          Path('tests/arena_results/tree.json').write_text(json.dumps(out,indent=2))
+              order = (('b','/tmp/base.exe'),('c','/tmp/cand.exe')) if i % 2 == 0 else (('c','/tmp/cand.exe'),('b','/tmp/base.exe'))
+              for k, e in order:
+                  (B if k == 'b' else C).append(bench(e))
+          bn, cn = B[0][0], C[0][0]
+          bnps = statistics.median(x[1] for x in B)
+          cnps = statistics.median(x[1] for x in C)
+          out = {
+              'baseline_nodes': bn,
+              'candidate_nodes': cn,
+              'tree_delta_pct': 100 * (cn / bn - 1),
+              'baseline_median_nps': bnps,
+              'candidate_median_nps': cnps,
+              'nps_delta_pct': 100 * (cnps / bnps - 1),
+          }
+          print(json.dumps(out, indent=2))
+          Path('tests/arena_results/tree.json').write_text(json.dumps(out, indent=2))
           PY
 
-      - name: Generate deterministic openings
+      - name: Generate openings
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import random,chess
+          import random, chess
           from pathlib import Path
-          rng=random.Random(32428100)
-          rows=[]; seen=set()
-          while len(rows)<384:
-              b=chess.Board(); ok=True
+          rng = random.Random(32428100)
+          rows, seen = [], set()
+          while len(rows) < 384:
+              b = chess.Board()
+              ok = True
               for _ in range(rng.randint(8,22)):
-                  ms=list(b.legal_moves)
-                  if not ms: ok=False; break
-                  qs=[m for m in ms if not b.is_capture(m)]
-                  b.push(rng.choice(qs if qs and rng.random()<0.72 else ms))
-                  if b.is_game_over(claim_draw=True): ok=False; break
-              if not ok: continue
-              k=' '.join(b.fen().split()[:4])
-              if k not in seen: seen.add(k); rows.append(k)
-          Path('tests/arena_results/openings.epd').write_text('\n'.join(rows)+'\n')
+                  moves = list(b.legal_moves)
+                  if not moves:
+                      ok = False
+                      break
+                  quiet = [m for m in moves if not b.is_capture(m)]
+                  b.push(rng.choice(quiet if quiet and rng.random() < 0.72 else moves))
+                  if b.is_game_over(claim_draw=True):
+                      ok = False
+                      break
+              if not ok:
+                  continue
+              key = ' '.join(b.fen().split()[:4])
+              if key not in seen:
+                  seen.add(key)
+                  rows.append(key)
+          Path('tests/arena_results/openings.epd').write_text('\n'.join(rows) + '\n')
           PY
 
       - name: Arena 512 nodes
         shell: bash
         run: |
+          set -euo pipefail
           python tests/run_arena.py \
-            --player uci:/tmp/cand.exe --player uci:/tmp/base.exe \
-            --games 1400 --movetime 0 --nodes 512 \
-            --threads 2 --max-plies 300 \
-            --openings "$GITHUB_WORKSPACE/tests/arena_results/openings.epd" --opening-plies 0 \
-            --seed 32428101 --tt-mb 8 \
+            --player uci:/tmp/cand.exe \
+            --player uci:/tmp/base.exe \
+            --games 1400 \
+            --movetime 0 \
+            --nodes 512 \
+            --threads 2 \
+            --max-plies 300 \
+            --openings "$GITHUB_WORKSPACE/tests/arena_results/openings.epd" \
+            --opening-plies 0 \
+            --seed 32428101 \
+            --tt-mb 8 \
             --json tests/arena_results/lmp-legal-count-512.json \
             --pgn tests/arena_results/lmp-legal-count-512.pgn
 
