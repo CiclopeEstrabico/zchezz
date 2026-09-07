@@ -69,7 +69,7 @@ jobs:
           make -C engine/build ENGINE=vn64x32 clean native
           make -C engine/build ENGINE=vn323 clean native
 
-      - name: Verify true nodes-only semantics
+      - name: Verify nodes-only search is not depth-8 capped
         run: |
           python - <<'PY'
           import re, subprocess
@@ -82,7 +82,7 @@ jobs:
           }
           for name,path in engines.items():
               p=subprocess.Popen([path],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1)
-              for cmd in ['uci','isready','ucinewgame',f'position fen {fen}','go nodes 50000']:
+              for cmd in ['uci','isready','ucinewgame',f'position fen {fen}','go nodes 2000000']:
                   p.stdin.write(cmd+'\n'); p.stdin.flush()
               lines=[]
               while True:
