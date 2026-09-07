@@ -1,0 +1,173 @@
+name: v500 exact 48x20 gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v500-strength]
+    paths:
+      - '.github/workflows/v500-exact-48x20-gate.yml'
+      - 'train/v500_exact_compress.py'
+      - 'train/v500_arch_sweep.py'
+      - 'tests/patch_uci_node_limit.py'
+      - 'tests/uci_node_budget_probe.py'
+
+permissions:
+  contents: read
+
+env:
+  ARCH_FLAGS: -mavx2
+  STATIC_FLAG: ''
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout v5 experiment branch
+        uses: actions/checkout@v4
+
+      - name: Checkout current main for v3.23 reference
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main_ref
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy python-chess
+          python -c 'import torch; print(torch.__version__)' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Materialize node-correct baselines
+        run: |
+          python tests/patch_uci_node_limit.py --src engine/c/zchezz_v500 --dst engine/c/zchezz_vn500
+          python tests/patch_uci_node_limit.py --src main_ref/engine/c/zchezz_v323 --dst engine/c/zchezz_vn323
+
+      - name: Materialize exact 48x32 and 48x20 networks
+        run: |
+          mkdir -p artifacts/exact48x20
+          for H2 in 32 20; do
+            python train/v500_exact_compress.py \
+              --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+              --dst artifacts/exact48x20/exact48x${H2}.pt \
+              --h1 48 --h2 ${H2} --seed $((820000 + H2))
+            python train/v500_arch_sweep.py export \
+              --ckpt artifacts/exact48x20/exact48x${H2}.pt \
+              --dst artifacts/exact48x20/exact48x${H2}.bin \
+              --h1 48 --h2 ${H2}
+            python train/v500_arch_sweep.py materialize-engine \
+              --base-engine engine/c/zchezz_vn500 \
+              --dst-engine engine/c/zchezz_vn48x${H2} \
+              --weights artifacts/exact48x20/exact48x${H2}.bin \
+              --h1 48 --h2 ${H2}
+          done
+          ls -lh artifacts/exact48x20/*.bin
+
+      - name: Build engines
+        run: |
+          make -C engine/build ENGINE=vn500 clean native
+          make -C engine/build ENGINE=vn48x32 clean native
+          make -C engine/build ENGINE=vn48x20 clean native
+          make -C engine/build ENGINE=vn323 clean native
+
+      - name: Verify exact fixed-node search parity
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'tests')
+          import uci_node_budget_probe as u
+          specs={
+              'v5':'engine/c/zchezz_vn500/zchezz.exe',
+              '48x32':'engine/c/zchezz_vn48x32/zchezz.exe',
+              '48x20':'engine/c/zchezz_vn48x20/zchezz.exe',
+          }
+          procs={n:u.start(p,16) for n,p in specs.items()}
+          mismatches=[]
+          try:
+              for i,fen in enumerate(u.positions(820201,48)):
+                  r={n:u.probe(p,fen,50000) for n,p in procs.items()}
+                  sig={n:(x['bestmove'],x['last_info_depth'],x['last_info_score']) for n,x in r.items()}
+                  moves={x[0] for x in sig.values()}
+                  scores={x[2] for x in sig.values()}
+                  if len(moves)!=1 or len(scores)!=1:
+                      mismatches.append((i,sig))
+                  print(i,sig)
+          finally:
+              for p in procs.values():
+                  try: u.send(p,'quit'); p.wait(timeout=2)
+                  except Exception: p.kill()
+          if mismatches:
+              raise SystemExit(f'parity mismatches: {mismatches[:3]}')
+          print('exact search parity: 48/48 positions OK')
+          PY
+
+      - name: Fixed-node throughput audit
+        run: |
+          python tests/uci_node_budget_probe.py \
+            --engine "exact48x20=engine/c/zchezz_vn48x20/zchezz.exe" \
+            --engine "exact48x32=engine/c/zchezz_vn48x32/zchezz.exe" \
+            --engine "v5=engine/c/zchezz_vn500/zchezz.exe" \
+            --engine "v323=engine/c/zchezz_vn323/zchezz.exe" \
+            --budgets 25000,50000,100000,200000 \
+            --positions 40 --seed 820202 --hash-mb 16 \
+            --json artifacts/exact48x20/throughput.json
+
+      - name: Build paired openings
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(Path('artifacts/exact48x20/openings.epd'),820203,128)
+          PY
+
+      - name: Exact48x20 vs exact48x32 at 200 ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn48x20/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn48x32/zchezz.exe" \
+            --games 128 --threads 1 --movetime 200 --max-plies 260 \
+            --openings artifacts/exact48x20/openings.epd --opening-plies 0 \
+            --seed 820204 --tt-mb 16 \
+            --json artifacts/exact48x20/exact48x20_vs_48x32_200ms.json
+
+      - name: Exact48x20 vs current main v3.23 at 200 ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn48x20/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn323/zchezz.exe" \
+            --games 128 --threads 1 --movetime 200 --max-plies 260 \
+            --openings artifacts/exact48x20/openings.epd --opening-plies 0 \
+            --seed 820205 --tt-mb 16 \
+            --json artifacts/exact48x20/exact48x20_vs_v323_200ms.json
+
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('artifacts/exact48x20')
+          for fn in ['exact48x20_vs_48x32_200ms.json','exact48x20_vs_v323_200ms.json']:
+              p=root/fn
+              if not p.exists():
+                  print(fn,'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{fn}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          tp=root/'throughput.json'
+          if tp.exists():
+              x=json.loads(tp.read_text())
+              print('throughput ratios:')
+              print(json.dumps(x.get('ratios',{}),indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-exact-48x20-gate
+          path: artifacts/exact48x20/
+          retention-days: 30
