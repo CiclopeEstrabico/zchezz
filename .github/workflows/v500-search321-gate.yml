@@ -19,7 +19,7 @@ env:
 jobs:
   gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,16 +43,16 @@ jobs:
           from pathlib import Path
           sys.path.insert(0,'train')
           import v500_pipeline as p
-          p._make_gate_openings(Path('artifacts/search321/openings.epd'),806731,128)
+          p._make_gate_openings(Path('artifacts/search321/openings.epd'),806741,256)
           PY
-      - name: Search321 vs v5 at true 50k nodes
+      - name: Search321 vs v5 at true 50k nodes confirmation
         run: |
           python tests/run_arena.py \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn500s321/zchezz.exe" \
             --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn500/zchezz.exe" \
-            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
+            --games 512 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
             --openings artifacts/search321/openings.epd --opening-plies 0 \
-            --seed 806732 --tt-mb 16 --json artifacts/search321/search321_vs_v5_50k.json
+            --seed 806742 --tt-mb 16 --json artifacts/search321/search321_vs_v5_50k.json
       - name: Summarize
         if: always()
         run: |
@@ -69,6 +69,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v500-search321-gate
+          name: v500-search321-gate-confirm
           path: artifacts/search321/
           retention-days: 30
