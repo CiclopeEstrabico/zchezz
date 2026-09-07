@@ -1,0 +1,62 @@
+name: v323 dead-path audit
+
+on:
+  push:
+    branches: [v500-compact-investigation]
+    paths:
+      - .github/workflows/v323-dead-path-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main_ref
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy
+      - name: Audit v3.23 NNU3 observable quantized paths
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import struct, numpy as np
+
+          p=Path('main_ref/engine/c/zchezz_v323/nnue_weights.bin')
+          b=p.read_bytes()
+          assert b[:4] == b'NNU3'
+          epoch=struct.unpack_from('<I',b,4)[0]
+          dims=struct.unpack_from('<5I',b,8)
+          print('epoch',epoch,'dims',dims,'bytes',len(b))
+          L1_IN,L1_OUT,L2_IN,L2_OUT,L3_IN=dims
+          off=4+4+5*4+4*4
+          L1=np.frombuffer(b,dtype='<i2',count=L1_IN*L1_OUT,offset=off).reshape(L1_IN,L1_OUT); off += L1_IN*L1_OUT*2
+          L1B=np.frombuffer(b,dtype='<i4',count=L1_OUT,offset=off); off += L1_OUT*4
+          # file layout is [L2_IN][L2_OUT]
+          L2file=np.frombuffer(b,dtype=np.int8,count=L2_IN*L2_OUT,offset=off).reshape(L2_IN,L2_OUT); off += L2_IN*L2_OUT
+          L2B=np.frombuffer(b,dtype='<i4',count=L2_OUT,offset=off); off += L2_OUT*4
+          L3=np.frombuffer(b,dtype=np.int8,count=L3_IN,offset=off); off += L3_IN
+          live_h2=np.flatnonzero(L3 != 0)
+          dead_h2=np.flatnonzero(L3 == 0)
+          live_h1=np.flatnonzero(np.any(L2file[:,live_h2] != 0,axis=1)) if len(live_h2) else np.array([],dtype=int)
+          dead_h1=np.setdiff1d(np.arange(L1_OUT),live_h1)
+          # additionally flag L1 units whose incoming quantized weights and bias are identically zero
+          intrinsic_dead_h1=np.flatnonzero((np.all(L1 == 0,axis=0)) & (L1B == 0))
+          print(f'H2 observable through L3: {len(live_h2)}/{L2_OUT}; dead={len(dead_h2)}')
+          print('dead H2 indices:',dead_h2.tolist())
+          print(f'H1 observable through live H2: {len(live_h1)}/{L1_OUT}; graph-dead={len(dead_h1)}')
+          print('graph-dead H1 indices:',dead_h1.tolist())
+          print(f'H1 intrinsically zero at L1: {len(intrinsic_dead_h1)}/{L1_OUT}')
+          print('intrinsic-dead H1 indices:',intrinsic_dead_h1.tolist())
+          if len(live_h1):
+              print('SIMD-clean H1 floor (multiple of 16):', int(((len(live_h1)+15)//16)*16))
+          if len(live_h2):
+              print('SIMD-clean H2 floor (multiple of 4):', int(((len(live_h2)+3)//4)*4))
+          PY
