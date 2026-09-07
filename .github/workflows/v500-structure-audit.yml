@@ -33,15 +33,18 @@ jobs:
 
           w, meta = imp.read_nnu4(Path('engine/c/zchezz_v500/nnue_weights.bin'))
           qb=float(meta['qb'])
+          qa_eff=int(meta['qa_eff'])
+          shift=int(meta['shift'])
           h1=w['l1_bias'].numel()
           h2=w['l2.bias'].numel()
 
           q2=torch.round(w['l2.weight'].float()*qb).to(torch.int32)
+          q2b=torch.round(w['l2.bias'].float()*(qa_eff*qb)).to(torch.int64)
           q3=torch.round(w['l3.weight'].float()*qb).to(torch.int32).flatten()
 
-          # Direct H1 liveness counts any non-zero quantized L2 edge.  Structural
+          # Direct H1 liveness counts any non-zero quantized L2 edge. Structural
           # liveness counts only edges that feed an H2 unit whose quantized L3
-          # coefficient is non-zero.  The latter is the exact observable path.
+          # coefficient is non-zero. The latter is the exact observable path.
           h1_direct_imp=q2[:,:h1].abs().sum(0)+q2[:,h1:].abs().sum(0)
           live_h1_direct=torch.nonzero(h1_direct_imp>0,as_tuple=False).flatten()
           live_h2=torch.nonzero(q3!=0,as_tuple=False).flatten()
@@ -49,10 +52,26 @@ jobs:
           h1_obs_imp=q2_obs[:,:h1].abs().sum(0)+q2_obs[:,h1:].abs().sum(0)
           live_h1_obs=torch.nonzero(h1_obs_imp>0,as_tuple=False).flatten()
 
+          # SCReLU output entering L2 is always in [0,254]. Ignoring correlations
+          # between features gives a conservative interval for every H2 integer
+          # accumulator. If even this loose upper bound is < 2**SHIFT, then
+          # (acc2 >> SHIFT) can never exceed zero and ClippedReLU is identically
+          # zero for every possible engine input. Such an H2 can be removed even
+          # when its L3 coefficient is non-zero.
+          relu1_max=254
+          lo=q2b + relu1_max*torch.minimum(q2,torch.zeros_like(q2)).sum(1).to(torch.int64)
+          hi=q2b + relu1_max*torch.maximum(q2,torch.zeros_like(q2)).sum(1).to(torch.int64)
+          always_zero=torch.nonzero(hi < (1 << shift),as_tuple=False).flatten()
+          always_sat=torch.nonzero(lo >= (int(qb) << shift),as_tuple=False).flatten()
+          live_but_zero=sorted(set(live_h2.tolist()) & set(always_zero.tolist()))
+
           print('H1',h1,'direct-quantized-live',len(live_h1_direct),'indices',live_h1_direct.tolist())
           print('H2',h2,'quantized-live-to-L3',len(live_h2),'indices',live_h2.tolist())
           print('H1 transitively observable through live H2',len(live_h1_obs),'indices',live_h1_obs.tolist())
           print('H1 direct-only dead-after-H2-prune',sorted(set(live_h1_direct.tolist())-set(live_h1_obs.tolist())))
+          print('H2 provably always-zero under loose [0,254] input bounds',always_zero.tolist())
+          print('H2 provably always-saturated under loose bounds',always_sat.tolist())
+          print('H2 with nonzero L3 but provably always-zero',live_but_zero)
           print('L3 qweights',q3.tolist())
           print('observable H1 importance sorted',torch.sort(h1_obs_imp[live_h1_obs],descending=True).values.tolist())
 
@@ -66,6 +85,11 @@ jobs:
             'h2':h2,
             'h2_live':len(live_h2),
             'h2_live_indices':live_h2.tolist(),
+            'h2_always_zero_loose_bound':always_zero.tolist(),
+            'h2_always_saturated_loose_bound':always_sat.tolist(),
+            'h2_live_but_always_zero':live_but_zero,
+            'h2_acc_lower':lo.tolist(),
+            'h2_acc_upper':hi.tolist(),
             'l3_qweights':q3.tolist(),
             'qb':qb,
           }
