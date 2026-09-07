@@ -39,21 +39,35 @@ jobs:
           q2=torch.round(w['l2.weight'].float()*qb).to(torch.int32)
           q3=torch.round(w['l3.weight'].float()*qb).to(torch.int32).flatten()
 
-          h1_imp=q2[:,:h1].abs().sum(0)+q2[:,h1:].abs().sum(0)
-          live_h1=torch.nonzero(h1_imp>0,as_tuple=False).flatten()
+          # Direct H1 liveness counts any non-zero quantized L2 edge.  Structural
+          # liveness counts only edges that feed an H2 unit whose quantized L3
+          # coefficient is non-zero.  The latter is the exact observable path.
+          h1_direct_imp=q2[:,:h1].abs().sum(0)+q2[:,h1:].abs().sum(0)
+          live_h1_direct=torch.nonzero(h1_direct_imp>0,as_tuple=False).flatten()
           live_h2=torch.nonzero(q3!=0,as_tuple=False).flatten()
+          q2_obs=q2[live_h2]
+          h1_obs_imp=q2_obs[:,:h1].abs().sum(0)+q2_obs[:,h1:].abs().sum(0)
+          live_h1_obs=torch.nonzero(h1_obs_imp>0,as_tuple=False).flatten()
 
-          # H2 units that are structurally observable at the output after quantization.
-          # A zero q3 coefficient makes the complete H2 unit exactly removable.
-          print('H1',h1,'quantized-live',len(live_h1),'indices',live_h1.tolist())
+          print('H1',h1,'direct-quantized-live',len(live_h1_direct),'indices',live_h1_direct.tolist())
           print('H2',h2,'quantized-live-to-L3',len(live_h2),'indices',live_h2.tolist())
+          print('H1 transitively observable through live H2',len(live_h1_obs),'indices',live_h1_obs.tolist())
+          print('H1 direct-only dead-after-H2-prune',sorted(set(live_h1_direct.tolist())-set(live_h1_obs.tolist())))
           print('L3 qweights',q3.tolist())
-          print('H1 importance sorted',torch.sort(h1_imp[live_h1],descending=True).values.tolist())
+          print('observable H1 importance sorted',torch.sort(h1_obs_imp[live_h1_obs],descending=True).values.tolist())
 
           out={
-            'h1':h1,'h1_live':len(live_h1),'h1_live_indices':live_h1.tolist(),
-            'h2':h2,'h2_live':len(live_h2),'h2_live_indices':live_h2.tolist(),
-            'l3_qweights':q3.tolist(),'qb':qb,
+            'h1':h1,
+            'h1_direct_live':len(live_h1_direct),
+            'h1_direct_live_indices':live_h1_direct.tolist(),
+            'h1_observable_live':len(live_h1_obs),
+            'h1_observable_live_indices':live_h1_obs.tolist(),
+            'h1_dead_after_h2_prune':sorted(set(live_h1_direct.tolist())-set(live_h1_obs.tolist())),
+            'h2':h2,
+            'h2_live':len(live_h2),
+            'h2_live_indices':live_h2.tolist(),
+            'l3_qweights':q3.tolist(),
+            'qb':qb,
           }
           Path('v500-structure-audit.json').write_text(json.dumps(out,indent=2))
           PY
