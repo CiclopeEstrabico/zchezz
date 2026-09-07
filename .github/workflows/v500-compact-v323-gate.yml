@@ -1,0 +1,213 @@
+name: v500 compact vs main v3.23
+
+on:
+  push:
+    branches: [v500-strength]
+    paths:
+      - '.github/workflows/v500-compact-v323-gate.yml'
+      - 'tests/patch_uci_node_limit.py'
+      - 'tests/uci_node_budget_probe.py'
+      - 'train/v500_exact_compress.py'
+      - 'train/v500_arch_sweep.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH_FLAGS: -mavx2
+  STATIC_FLAG: ''
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout v5 experiment branch
+        uses: actions/checkout@v4
+
+      - name: Checkout current main for v3.23 reference
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main_ref
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check numpy pandas python-chess
+          python -c 'import torch; print(torch.__version__)' || python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Materialize node-correct v5 and current v3.23
+        run: |
+          python tests/patch_uci_node_limit.py --src engine/c/zchezz_v500 --dst engine/c/zchezz_vn500
+          python tests/patch_uci_node_limit.py --src main_ref/engine/c/zchezz_v323 --dst engine/c/zchezz_vn323
+
+      - name: Materialize exact compact candidates
+        run: |
+          mkdir -p artifacts/compact-v323
+          for H1 in 48 64; do
+            python train/v500_exact_compress.py \
+              --base-nnu4 engine/c/zchezz_v500/nnue_weights.bin \
+              --dst artifacts/compact-v323/exact${H1}.pt --h1 ${H1} --seed $((806000 + H1))
+            python train/v500_arch_sweep.py export \
+              --ckpt artifacts/compact-v323/exact${H1}.pt \
+              --dst artifacts/compact-v323/exact${H1}.bin --h1 ${H1} --h2 32
+            python train/v500_arch_sweep.py materialize-engine \
+              --base-engine engine/c/zchezz_vn500 \
+              --dst-engine engine/c/zchezz_vn${H1}x32 \
+              --weights artifacts/compact-v323/exact${H1}.bin --h1 ${H1} --h2 32
+          done
+
+      - name: Build engines
+        run: |
+          make -C engine/build ENGINE=vn500 clean native
+          make -C engine/build ENGINE=vn48x32 clean native
+          make -C engine/build ENGINE=vn64x32 clean native
+          make -C engine/build ENGINE=vn323 clean native
+
+      - name: Verify true nodes-only semantics
+        run: |
+          python - <<'PY'
+          import re, subprocess
+          fen='r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'
+          engines={
+              'v5':'engine/c/zchezz_vn500/zchezz.exe',
+              '48x32':'engine/c/zchezz_vn48x32/zchezz.exe',
+              '64x32':'engine/c/zchezz_vn64x32/zchezz.exe',
+              'v323-main':'engine/c/zchezz_vn323/zchezz.exe',
+          }
+          for name,path in engines.items():
+              p=subprocess.Popen([path],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1)
+              for cmd in ['uci','isready','ucinewgame',f'position fen {fen}','go nodes 50000']:
+                  p.stdin.write(cmd+'\n'); p.stdin.flush()
+              lines=[]
+              while True:
+                  s=p.stdout.readline().strip(); lines.append(s)
+                  if s.startswith('bestmove'): break
+              depths=[int(x.group(1)) for l in lines if (x:=re.search(r'info depth (\d+)',l))]
+              nodes=[int(x.group(1)) for l in lines if (x:=re.search(r' nodes (\d+)',l))]
+              print(name,'max_depth',max(depths or [0]),'last_info_nodes',nodes[-1] if nodes else 0)
+              assert max(depths or [0]) > 8, (name,lines[-20:])
+              p.stdin.write('quit\n'); p.stdin.flush(); p.wait(timeout=3)
+          PY
+
+      - name: Verify compact fixed-node search parity with v5
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'tests')
+          import uci_node_budget_probe as u
+          specs={
+              'v5':'engine/c/zchezz_vn500/zchezz.exe',
+              '48':'engine/c/zchezz_vn48x32/zchezz.exe',
+              '64':'engine/c/zchezz_vn64x32/zchezz.exe',
+          }
+          procs={n:u.start(p,16) for n,p in specs.items()}
+          mismatches=[]
+          try:
+              for i,fen in enumerate(u.positions(806701,24)):
+                  r={n:u.probe(p,fen,50000) for n,p in procs.items()}
+                  moves={n:x['bestmove'] for n,x in r.items()}
+                  if len(set(moves.values())) != 1:
+                      mismatches.append((i,moves,r))
+                  print(i,moves,{n:x['last_info_depth'] for n,x in r.items()})
+          finally:
+              for p in procs.values():
+                  try: u.send(p,'quit'); p.wait(timeout=2)
+                  except Exception: p.kill()
+          if mismatches:
+              raise SystemExit(f'fixed-node parity mismatches: {mismatches[:3]}')
+          print('fixed-node bestmove parity: 24/24 OK')
+          PY
+
+      - name: Fixed-node throughput audit
+        run: |
+          python tests/uci_node_budget_probe.py \
+            --engine "exact48=engine/c/zchezz_vn48x32/zchezz.exe" \
+            --engine "exact64=engine/c/zchezz_vn64x32/zchezz.exe" \
+            --engine "v5=engine/c/zchezz_vn500/zchezz.exe" \
+            --engine "v323=engine/c/zchezz_vn323/zchezz.exe" \
+            --budgets 25000,50000,100000 --positions 32 --seed 806702 --hash-mb 16 \
+            --json artifacts/compact-v323/throughput.json
+
+      - name: Build deterministic paired openings
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,'train')
+          import v500_pipeline as p
+          p._make_gate_openings(Path('artifacts/compact-v323/openings.epd'),806703,128)
+          PY
+
+      - name: Exact48 vs current main v3.23 at true 50k nodes
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn48x32/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn323/zchezz.exe" \
+            --games 128 --threads 4 --movetime 0 --nodes 50000 --max-plies 260 \
+            --openings artifacts/compact-v323/openings.epd --opening-plies 0 \
+            --seed 806704 --tt-mb 16 --json artifacts/compact-v323/exact48_vs_v323_50k.json
+
+      - name: v5 vs current main v3.23 at 200 ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn500/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn323/zchezz.exe" \
+            --games 96 --threads 1 --movetime 200 --max-plies 260 \
+            --openings artifacts/compact-v323/openings.epd --opening-plies 0 \
+            --seed 806705 --tt-mb 16 --json artifacts/compact-v323/v5_vs_v323_200ms.json
+
+      - name: Exact48 vs current main v3.23 at 200 ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn48x32/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn323/zchezz.exe" \
+            --games 128 --threads 1 --movetime 200 --max-plies 260 \
+            --openings artifacts/compact-v323/openings.epd --opening-plies 0 \
+            --seed 806706 --tt-mb 16 --json artifacts/compact-v323/exact48_vs_v323_200ms.json
+
+      - name: Exact64 vs current main v3.23 at 200 ms
+        run: |
+          python tests/run_arena.py \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn64x32/zchezz.exe" \
+            --player "uci:$GITHUB_WORKSPACE/engine/c/zchezz_vn323/zchezz.exe" \
+            --games 128 --threads 1 --movetime 200 --max-plies 260 \
+            --openings artifacts/compact-v323/openings.epd --opening-plies 0 \
+            --seed 806707 --tt-mb 16 --json artifacts/compact-v323/exact64_vs_v323_200ms.json
+
+      - name: Summarize
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('artifacts/compact-v323')
+          for fn in [
+              'exact48_vs_v323_50k.json',
+              'v5_vs_v323_200ms.json',
+              'exact48_vs_v323_200ms.json',
+              'exact64_vs_v323_200ms.json',
+          ]:
+              p=root/fn
+              if not p.exists():
+                  print(fn,'MISSING'); continue
+              x=json.loads(p.read_text())['pairings'][0]
+              print(f'{fn}: W/D/L={x["w"]}/{x["d"]}/{x["l"]} Elo={x["elo"]:+.2f} +/-{x["ci95"]:.2f}')
+          tp=root/'throughput.json'
+          if tp.exists():
+              x=json.loads(tp.read_text())
+              print('throughput ratios:')
+              print(json.dumps(x.get('ratios',{}),indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v500-compact-v323-gate
+          path: artifacts/compact-v323/
+          retention-days: 30
