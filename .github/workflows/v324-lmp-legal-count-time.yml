@@ -1,0 +1,96 @@
+name: v3.24 LMP Legal Count Wall Clock
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - exp/v324-lmp-legal-count
+
+permissions:
+  contents: read
+
+env:
+  STATIC_FLAG: ""
+
+jobs:
+  wallclock:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - movetime: 50
+            games: 800
+            seed: 32428250
+          - movetime: 200
+            games: 800
+            seed: 32428400
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[all]"
+
+      - name: Build baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C engine/build ENGINE=v323 clean native CC=gcc ARCH_FLAGS="-mavx2" STATIC_FLAG=""
+          cp engine/c/zchezz_v323/zchezz.exe /tmp/base.exe
+          cp engine/c/zchezz_v323/nnue_weights.bin /tmp/nnue_weights.bin
+          python tools/v324_apply_lmp_legal_count.py
+          git diff --check
+          make -C engine/build ENGINE=v323 clean native CC=gcc ARCH_FLAGS="-mavx2" STATIC_FLAG=""
+          python tests/test_perft.py --version v323 --max-depth 4
+          python tests/test_uci_extended.py --version v323 --only T1 --only T2 --only T6 --only T9
+          cp engine/c/zchezz_v323/zchezz.exe /tmp/cand.exe
+
+      - name: Generate deterministic openings
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tests/arena_results
+          python - <<'PY'
+          import random, chess
+          from pathlib import Path
+          rng = random.Random(32428200)
+          rows=[]; seen=set()
+          while len(rows)<384:
+              b=chess.Board(); ok=True
+              for _ in range(rng.randint(8,22)):
+                  ms=list(b.legal_moves)
+                  if not ms: ok=False; break
+                  qs=[m for m in ms if not b.is_capture(m)]
+                  b.push(rng.choice(qs if qs and rng.random()<0.72 else ms))
+                  if b.is_game_over(claim_draw=True): ok=False; break
+              if not ok: continue
+              k=' '.join(b.fen().split()[:4])
+              if k not in seen: seen.add(k); rows.append(k)
+          Path('tests/arena_results/openings.epd').write_text('\n'.join(rows)+'\n')
+          PY
+
+      - name: Arena ${{ matrix.movetime }}ms
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/run_arena.py \
+            --player uci:/tmp/cand.exe --player uci:/tmp/base.exe \
+            --games ${{ matrix.games }} --movetime ${{ matrix.movetime }} --nodes 0 \
+            --threads 2 --max-plies 300 \
+            --openings "$GITHUB_WORKSPACE/tests/arena_results/openings.epd" --opening-plies 0 \
+            --seed ${{ matrix.seed }} --tt-mb 8 \
+            --json tests/arena_results/lmp-legal-${{ matrix.movetime }}ms.json \
+            --pgn tests/arena_results/lmp-legal-${{ matrix.movetime }}ms.pgn
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v324-lmp-legal-${{ matrix.movetime }}ms
+          path: tests/arena_results/
+          if-no-files-found: warn
