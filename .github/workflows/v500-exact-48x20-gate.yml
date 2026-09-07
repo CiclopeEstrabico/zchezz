@@ -89,10 +89,10 @@ jobs:
           try:
               for i,fen in enumerate(u.positions(820201,48)):
                   r={n:u.probe(p,fen,50000) for n,p in procs.items()}
-                  sig={n:(x['bestmove'],x['last_info_depth'],x['last_info_score']) for n,x in r.items()}
+                  sig={n:(x['bestmove'],x['last_info_depth']) for n,x in r.items()}
                   moves={x[0] for x in sig.values()}
-                  scores={x[2] for x in sig.values()}
-                  if len(moves)!=1 or len(scores)!=1:
+                  depths={x[1] for x in sig.values()}
+                  if len(moves)!=1 or len(depths)!=1:
                       mismatches.append((i,sig))
                   print(i,sig)
           finally:
